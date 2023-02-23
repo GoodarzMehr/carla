@@ -649,7 +649,7 @@ if [[ -d ${PROJ_INSTALL_DIR} ]] ; then
   log "PROJ already installed."
 else
   log "Retrieving PROJ"
-  wget ${PROJ_REPO}
+  wget ${PROJ_REPO} --no-check-certificate
 
   log "Extracting PROJ"
   tar -xzf ${PROJ_TAR}
@@ -661,11 +661,11 @@ else
   pushd ${PROJ_SRC_DIR}/build >/dev/null
 
   cmake -G "Ninja" .. \
-      -DCMAKE_CXX_FLAGS="-std=c++14 -fPIC" \
+      -DCMAKE_CXX_FLAGS="-fPIC -std=c++14" \
       -DSQLITE3_INCLUDE_DIR=${SQLITE_INCLUDE_DIR} -DSQLITE3_LIBRARY=${SQLITE_LIB} \
       -DEXE_SQLITE3=${SQLITE_EXE} \
       -DENABLE_TIFF=OFF -DENABLE_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DBUILD_PROJSYNC=OFF \
-      -DCMAKE_BUILD_TYPE=Release -DBUILD_PROJINFO=OFF \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_PROJINFO=OFF \
       -DBUILD_CCT=OFF -DBUILD_CS2CS=OFF -DBUILD_GEOD=OFF -DBUILD_GIE=OFF \
       -DBUILD_PROJ=OFF -DBUILD_TESTING=OFF \
       -DCMAKE_INSTALL_PREFIX=${PROJ_INSTALL_DIR_FULL}
