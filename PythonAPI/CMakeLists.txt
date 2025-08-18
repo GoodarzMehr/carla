@@ -21,11 +21,11 @@ execute_process (
     NUMPY_VERSION_QUERY_RESULT
 )
 if (NUMPY_VERSION_QUERY_RESULT)
-  message (FATAL_ERROR "Failed to query numpy version.")
+  carla_error ("Failed to query numpy version.")
 endif ()
-message (STATUS "Found Numpy ${NUMPY_VERSION_STRING} for Python ${Python3_VERSION} (${Python3_EXECUTABLE}).")
+carla_message ("Found Numpy ${NUMPY_VERSION_STRING} for Python ${Python3_VERSION} (${Python3_EXECUTABLE}).")
 if ("${NUMPY_VERSION_STRING}" VERSION_GREATER "2.0.0")
-  message (FATAL_ERROR "Unsupported Numpy version, please downgrade to a version prior to numpy 2.")
+  carla_error ("Unsupported Numpy version, please downgrade to a version prior to numpy 2.")
 endif ()
 # --
 
