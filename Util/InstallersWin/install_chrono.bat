@@ -41,43 +41,20 @@ if not "%BUILD_DIR:~-1%"=="\" set BUILD_DIR=%BUILD_DIR%\
 if %GENERATOR% == "" set GENERATOR="Visual Studio 17 2022"
 
 rem ============================================================================
-rem -- Get Eigen (Chrono dependency) -------------------------------------------
+rem -- Get/Use Eigen (Chrono dependency) ---------------------------------------
 rem ============================================================================
 
-set EIGEN_VERSION=3.3.7
-set EIGEN_REPO=https://gitlab.com/libeigen/eigen/-/archive/3.3.7/eigen-3.3.7.zip
-set EIGEN_BASENAME=eigen-%EIGEN_VERSION%
-
-set EIGEN_SRC_DIR=%BUILD_DIR%%EIGEN_BASENAME%
 set EIGEN_INSTALL_DIR=%BUILD_DIR%eigen-install
 set EIGEN_INCLUDE=%EIGEN_INSTALL_DIR%\include
-set EIGEN_TEMP_FILE=eigen-%EIGEN_VERSION%.zip
-set EIGEN_TEMP_FILE_DIR=%BUILD_DIR%eigen-%EIGEN_VERSION%.zip
-
-if not exist "%EIGEN_SRC_DIR%" (
-    if not exist "%EIGEN_TEMP_FILE_DIR%" (
-        echo %FILE_N% Retrieving %EIGEN_TEMP_FILE_DIR%.
-        powershell -Command "(New-Object System.Net.WebClient).DownloadFile('%EIGEN_REPO%', '%EIGEN_TEMP_FILE_DIR%')"
-    )
-    if %errorlevel% neq 0 goto error_download_eigen
-    rem Extract the downloaded library
-    echo %FILE_N% Extracting eigen from "%EIGEN_TEMP_FILE%".
-    powershell -Command "Expand-Archive '%EIGEN_TEMP_FILE_DIR%' -DestinationPath '%BUILD_DIR%'"
-    if %errorlevel% neq 0 goto error_extracting
-    echo %EIGEN_SRC_DIR%
-
-    del %EIGEN_TEMP_FILE_DIR%
-)
 
 if not exist "%EIGEN_INSTALL_DIR%" (
-    mkdir %EIGEN_INSTALL_DIR%
-    mkdir %EIGEN_INCLUDE%
-    mkdir %EIGEN_INCLUDE%\unsupported
-    mkdir %EIGEN_INCLUDE%\Eigen
+    echo %FILE_N% Eigen not found, installing via install_eigen.bat...
+    call "%LOCAL_PATH%install_eigen.bat" --build-dir "%BUILD_DIR%"
+    if %errorlevel% neq 0 (
+        echo %FILE_N% [ERROR] Failed to install Eigen.
+        goto bad_exit
+    )
 )
-
-xcopy /q /Y /S /I "%EIGEN_SRC_DIR%\Eigen" "%EIGEN_INCLUDE%\Eigen"
-xcopy /q /Y /S /I "%EIGEN_SRC_DIR%\unsupported\Eigen" "%EIGEN_INCLUDE%\unsupported\Eigen"
 
 rem ============================================================================
 rem -- Get Chrono -------------------------------------------
