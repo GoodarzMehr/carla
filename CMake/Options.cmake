@@ -245,6 +245,18 @@ carla_string_option (
   "${CARLA_UNREAL_PACKAGE_BUILD_TYPE_DEFAULT}"
 )
 
+if ("${CARLA_UNREAL_PACKAGE_BUILD_TYPE}" STREQUAL "Shipping")
+  set (CARLA_UNREAL_PACKAGE_NO_COMPRESSION_DEFAULT ON)
+else ()
+  set (CARLA_UNREAL_PACKAGE_NO_COMPRESSION_DEFAULT OFF)
+endif ()
+
+carla_option (
+  CARLA_UNREAL_PACKAGE_NO_COMPRESSION
+  "Whether to skip the package compression step."
+  ${CARLA_UNREAL_PACKAGE_NO_COMPRESSION_DEFAULT}
+)
+
 
 
 # ================================
