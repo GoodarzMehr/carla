@@ -76,11 +76,15 @@ If you need to upgrade:
 pip3 install --upgrade pip
 ```
 
-You also need to install some Python dependencies:
+#### CARLA_ROOT environment variable
+
+For many of the following instructions, you will need to refer to paths relative to the root directory of your local copy of the CARLA code repository. Therefore it is a good idea to set an environment variable to point to this location. For example, if you have cloned CARLA into your home directory:
 
 ```sh
-pip3 install --user -r CARLA_ROOT/PythonAPI/carla/requirements.txt
+export CARLA_ROOT="$HOME/carla"
 ```
+
+Ensure to run this command at the start of each new terminal session you open, or add it to your `.bashrc` or `.profile`. If you don't want to use this environment variable, replace `${CARLA_ROOT}` in the commands given later with the appropriate path.
 
 ---
 
@@ -119,6 +123,23 @@ __4.__ Open the Editor to check that Unreal Engine has been installed properly.
     cd ~/UnrealEngine_4.26/Engine/Binaries/Linux && ./UE4Editor
 ```
 
+### Set the Unreal Engine environment variable
+
+For CARLA to locate the correct installation of Unreal Engine, an environment variable is needed.
+
+To set the variable for this session only:
+
+```sh
+export UE4_ROOT=~/UnrealEngine_4.26
+```
+
+You may want to set the environment variable in your `.bashrc` or `.profile`, so that it is always set. Open `.bashrc` or `.profile` with `gedit` and add the line above near the end of the file and save:
+
+```sh
+cd ~
+gedit .bashrc # or .profile
+```
+
 ---
 
 ## Building CARLA 
@@ -146,13 +167,13 @@ CARLA comes with a large repository of 3D assets including maps, vehicles and pe
 
 If you are working on the latest updates of the `ue4-dev` branch you will need to download the latest version of the content. There are two ways to achieve this:
 
-__1. Using the content update script__: This script downloads the latest package of the CARLA content as a `tar.gz` archive and decompresses the archive into the `CARLA_ROOT/Unreal/CarlaUE4/Content/Carla` directory:
+__1. Using the content update script__: This script downloads the latest package of the CARLA content as a `tar.gz` archive and decompresses the archive into the `${CARLA_ROOT}/Unreal/CarlaUE4/Content/Carla` directory:
 
 ```sh
 ./Update.sh
 ```
 
-__2. Using Git__: Using Git, you will establish a git repository for the content in the `CARLA_ROOT/Unreal/CarlaUE4/Content/Carla` directory. **This is the preferred method if you intend to commit content updates to CARLA (or your own fork of CARLA)**. From the root directory of the CARLA code repository, run the following command (if you have your own fork of the CARLA content, change the target remote repository accordingly):
+__2. Using Git__: Using Git, you will establish a git repository for the content in the `${CARLA_ROOT}/Unreal/CarlaUE4/Content/Carla` directory. **This is the preferred method if you intend to commit content updates to CARLA (or your own fork of CARLA)**. From the root directory of the CARLA code repository, run the following command (if you have your own fork of the CARLA content, change the target remote repository accordingly):
 
 ```sh
 git clone https://bitbucket.org/carla-simulator/carla-content Unreal/CarlaUE4/Content/Carla
@@ -170,23 +191,6 @@ You may want to download the assets for a specific CARLA version for some purpos
 tar -xvzf <assets_archive>.tar.gz.tar -C /path/to/carla/Unreal/CarlaUE4/Content/Carla
 ```
 
-### Set the Unreal Engine environment variable
-
-For CARLA to locate the correct installation of Unreal Engine, an environment variable is needed.
-
-To set the variable for this session only:
-
-```sh
-export UE4_ROOT=~/UnrealEngine_4.26
-```
-
-You may want to set the environment variable in your `.bashrc` or `.profile`, so that it is always set. Open `.bashrc` or `.profile` with `gedit` and add the line above near the end of the file and save:
-
-```sh
-cd ~
-gedit .bashrc # or .profile
-```
-
 ---
 
 ### Build CARLA with Make
@@ -201,6 +205,14 @@ The following command compiles the Python API client:
 
 ```sh
 make PythonAPI
+```
+
+The Python examples provided with CARLA need some prerequisite libraries installed:
+
+You also need to install some Python dependencies:
+
+```sh
+pip3 install --user -r ${CARLA_ROOT}/PythonAPI/carla/requirements.txt
 ```
 
 **Building the Python API for a specific Python version**
@@ -245,14 +257,14 @@ make PythonAPI ARGS="--python-version=3.12"
 make PythonAPI ARGS="--python-root=/path/to/python/installation"
 ```
 
-The CARLA Python API wheel will be generated in `CARLA_ROOT/PythonAPI/carla/dist`. The name of the wheel will depend upon the current CARLA version and the chosen Python version. Install the wheel with PIP:
+The CARLA Python API wheel will be generated in `${CARLA_ROOT}/PythonAPI/carla/dist`. The name of the wheel will depend upon the current CARLA version and the chosen Python version. Install the wheel with PIP:
 
 ```sh
 # CARLA 0.9.16, Python 3.8
-pip3 install CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.16-cp38-linux_x86_64.whl
+pip3 install ${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.16-cp38-linux_x86_64.whl
 
 # CARLA 0.9.16, Python 3.10
-#pip3 install CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.16-cp310-linux_x86_64.whl
+#pip3 install ${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.16-cp310-linux_x86_64.whl
 ```
 
 !!! Warning
