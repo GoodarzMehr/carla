@@ -251,11 +251,11 @@ python3.12 -m pip install --upgrade pip setuptools
 make PythonAPI ARGS="--python-version=3.12"
 ```
 
-* If you are using a non-standard Python installation or a Python virtual environment manager like PyEnv, Rye or Conda. Instead of the `--python-version` argument it may be better to use the `--python-root` argument (you can locate the installation using `which python3`):
+<!-- * If you are using a non-standard Python installation or a Python virtual environment manager like PyEnv, Rye or Conda. Instead of the `--python-version` argument it may be better to use the `--python-root` argument (you can locate the installation using `which python3`):
 
 ```sh
 make PythonAPI ARGS="--python-root=/path/to/python/installation"
-```
+``` -->
 
 The CARLA Python API wheel will be generated in `${CARLA_ROOT}/PythonAPI/carla/dist`. The name of the wheel will depend upon the current CARLA version and the chosen Python version. Install the wheel with PIP:
 
