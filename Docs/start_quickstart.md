@@ -43,7 +43,7 @@ pip3 install --upgrade pip
 
 ### Download and extract a CARLA package
 
-Download the desired CARLA package from GitHub using the link provided below. We recommend downloading the Package for the latest release, which is currently [0.9.15](https://github.com/carla-simulator/carla/releases/tag/0.9.15/).
+Download the desired CARLA package from GitHub using the link provided below. We recommend downloading the Package for the latest release, which is currently [0.9.15](https://github.com/carla-simulator/carla/releases/tag/0.9.15/). If you would prefer to use the latest features completed by the CARLA team, you can download the __nightly build__ for [__Linux__](https://carla-releases.s3.us-east-005.backblazeb2.com/Linux/Dev/CARLA_Latest.tar.gz) or [__Windows__](https://carla-releases.s3.us-east-005.backblazeb2.com/Windows/Dev/CARLA_Latest.zip).
 
 <div class="build-buttons">
 <p>
@@ -52,7 +52,7 @@ Download the desired CARLA package from GitHub using the link provided below. We
 </p>
 </div>
 
-This repository contains multiple versions of CARLA. You will find options to download the __current release__ with all the most recent fixes and features, __previous releases__ and a __nightly build__ with all the developmental fixes and features (the nightly build may be unstable, use it with caution).
+This repository contains multiple versions of CARLA. You will find options to download the __current release__ with all the most recent fixes and features. You can also find __previous releases__ of CARLA for legacy installations. The __nightly build__ contains developmental fixes and features that have been merged into the `ue4-dev` branch (the nightly build may be unstable, use it with caution).
 
 The package is a compressed file named with the version number. Download and extract the archive in a convenient location (e.g. the `home` or `Documents` directory).
 

@@ -36,7 +36,35 @@ Talking about how CARLA grows means talking about a community of developers who 
   
 This documentation will be a companion along the way. The next page contains __[Quick start](start_quickstart.md)__ instructions for those eager to install a CARLA release. There is also a build guide for Linux and Windows. This will make CARLA from repository and allow to dive full-length into its features.  
 
-Welcome to CARLA.  
+Welcome to CARLA!
+
+---
+
+## Get started
+
+There are numerous different ways that you can use CARLA. You can either get started out of the box straight away with the packaged version, or you can download the source code and start developing your own custom version of CARLA, follow the links below to start
+
+### Download the latest release as a package
+
+Use the links below to download the latest CARLA release for your operating system and read [these instructions](../start_quickstart) to get started.
+
+<div class="build-buttons">
+<p>
+<a href="https://tiny.carla.org/carla-0-9-15-linux" target="_blank" class="btn btn-neutral" title="Download the latest CARLA release for Ubuntu">
+<b>Download CARLA 0.9.15 for Ubuntu</b></a>
+</p>
+</div>
+
+<div class="build-buttons">
+<p>
+<a href="https://tiny.carla.org/carla-0-9-15-windows" target="_blank" class="btn btn-neutral" title="Download latest CARLA release for Windows">
+<b>Download CARLA 0.9.15 for Windows</b></a>
+</p>
+</div>
+
+### Download the source code and create a custom version of CARLA
+
+Follow the links below for instructions on how to clone the source code from [CARLA's GitHub repository](https://github.com/carla-simulator/carla) and get started developing CARLA!
 
 <div class="build-buttons">
 <p>
