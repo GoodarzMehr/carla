@@ -484,8 +484,6 @@ function (
     )
   endif ()
 
-  carla_message ("PACKAGE_POST_BUILD_COMMANDS:\n${PACKAGE_POST_BUILD_COMMANDS}")
-  
   add_custom_command (
     TARGET ${TARGET_NAME}
     POST_BUILD
