@@ -26,6 +26,7 @@ import argparse
 import os
 import imageio
 import sys
+import yaml
 from typing import Union
 import logging
 
@@ -38,12 +39,52 @@ logging.basicConfig(
 logger = logging.getLogger("example_replay_recording")
 
 
-from nurec_integration import NurecScenario
+from nurec_integration import NurecScenario, ShutterType
 from pygame_display import PygameDisplay
 from constants import EGO_TRACK_ID
 from utils import handle_exception
 from typing import Tuple, Optional
+from scipy.spatial.transform import Rotation as R
 
+def make_transform_matrix(rotation=None, translation=None):
+    """
+    Create a 4x4 homogeneous transformation matrix compatible with Unreal/CARLA.
+
+    Rotation is assumed to be [yaw, pitch, roll] in degrees.
+    Translation is [x, y, z].
+
+    Returns:
+    - 4x4 numpy array
+    """
+    mat = np.eye(4, dtype=float)
+
+    # Handle rotation
+    if rotation is not None:
+        # rotation is [yaw, pitch, roll] in degrees
+        yaw, pitch, roll = rotation
+        # Convert to scipy format: order="XYZ" means roll(X), pitch(Y), yaw(Z)
+        r = R.from_euler("ZYX", [roll, pitch, yaw], degrees=True)
+        mat[:3, :3] = r.as_matrix()
+
+    # Handle translation
+    if translation is not None:
+        mat[:3, 3] = translation
+
+    return mat
+
+
+def parse_camera_params(cam_cfg):
+    params = cam_cfg["camera_params"].copy()
+
+    # Convert "pi" string to np.pi
+    if params.get("max_angle") == "pi":
+        params["max_angle"] = np.pi
+
+    # Convert shutter_type string to enum
+    if isinstance(params.get("shutter_type"), str):
+        params["shutter_type"] = getattr(ShutterType, params["shutter_type"])
+
+    return params
 
 def process_carla_image(
     display: PygameDisplay,
@@ -92,50 +133,66 @@ def add_cameras(
 ) -> Tuple[carla.Actor, PygameDisplay]:
     # Set up pygame display for visualization
     pygame_display = PygameDisplay()
+
+    world = client.get_world()
+    # Get the blueprint library to spawn cameras
+    bp_library = world.get_blueprint_library()
+
     # Add cameras using the new flexible add_camera method
 
-    # Add cameras
-    scenario.add_camera(
-        "camera_front_wide_120fov",
-        make_camera_callback(pygame_display, "camera_front_wide_120fov", (1, 0), saveimages, output_dir),
-        framerate=10,
-        resolution_ratio=0.125,
-    )
-    scenario.add_camera(
-        "camera_cross_left_120fov",
-        make_camera_callback(pygame_display, "camera_cross_left_120fov", (0, 0), saveimages, output_dir),
-        framerate=10,
-        resolution_ratio=0.125,
-    )
-    scenario.add_camera(
-        "camera_cross_right_120fov",
-        make_camera_callback(pygame_display, "camera_cross_right_120fov", (2, 0), saveimages, output_dir),
-        framerate=10,
-        resolution_ratio=0.125,
-    )
+    with open("carla_example_camera_config.yaml", "r") as f:
+        camera_configs = yaml.safe_load(f)
 
-    # Add a standard Carla camera attached to the ego vehicle
-    world = client.get_world()
-    bp_library = world.get_blueprint_library()
-    camera_bp = bp_library.find("sensor.camera.rgb")
-    camera_bp.set_attribute("image_size_x", "481")
-    camera_bp.set_attribute("image_size_y", "271")
-    camera_bp.set_attribute("fov", "100")
+    for cam_cfg in camera_configs:
+        # Case 1: Rich camera_params style
+        if "camera_params" in cam_cfg:
+            camera_params = parse_camera_params(cam_cfg)
+            # --- Choose between transform_matrix or rot+trans ---
+            if "transform_matrix" in cam_cfg:
+                transform_matrix = np.array(cam_cfg["transform_matrix"], dtype=float)
+            else:
+                rotation = cam_cfg.get("rotation")         # e.g., [roll, pitch, yaw] en rad
+                translation = cam_cfg.get("translation")   # e.g., [x, y, z]
+                transform_matrix = make_transform_matrix(rotation, translation)
 
-    # Get the ego vehicle instance
-    ego_vehicle = scenario.actor_mapping[EGO_TRACK_ID].actor_inst
+            grid_size = tuple(cam_cfg.get("display", {}).get("grid_size", (3, 2)))
+            grid_pos = tuple(cam_cfg.get("display", {}).get("grid_pos", (0, 0)))
 
-    # Attach camera to ego vehicle with a rear view
-    camera_transform = carla.Transform(
-        carla.Location(x=0, z=10), carla.Rotation(pitch=-90)
-    )
-    camera = world.spawn_actor(camera_bp, camera_transform, attach_to=ego_vehicle)
+            scenario.add_camera(
+                camera_params,
+                make_camera_callback(pygame_display, camera_params["logical_id"], grid_pos, saveimages, output_dir),
+                transform=transform_matrix,
+                framerate=cam_cfg.get("framerate", 30),
+                resolution_ratio=cam_cfg.get("resolution_ratio", 1.0),
+            )
+        # Case 2: Simple CARLA sensor style
+        elif "sensor" in cam_cfg:
+            sensor_type = cam_cfg["sensor"]
+            camera_bp = bp_library.find(f"sensor.camera.{sensor_type}")
 
-    # Set up the callback function to process and display images
-    # Display in position 1,1 (center of the display grid)
-    camera.listen(
-        lambda image: process_carla_image(pygame_display, (3, 2), (1, 1), image)
-    )
+            # Apply attributes
+            for attr, value in cam_cfg.get("attributes", {}).items():
+                camera_bp.set_attribute(attr, str(value))
+
+            # Build transform
+            loc = cam_cfg["transform"]["location"]
+            rot = cam_cfg["transform"]["rotation"]
+            camera_transform = carla.Transform(
+                carla.Location(x=loc.get("x", 0.0), y=loc.get("y", 0.0), z=loc.get("z", 0.0)),
+                carla.Rotation(pitch=rot.get("pitch", 0.0), yaw=rot.get("yaw", 0.0), roll=rot.get("roll", 0.0)),
+            )
+
+            camera = world.spawn_actor(camera_bp, camera_transform, attach_to=scenario.actor_mapping[EGO_TRACK_ID].actor_inst)
+
+            grid_size = tuple(cam_cfg.get("display", {}).get("grid_size", (3, 2)))
+            grid_pos = tuple(cam_cfg.get("display", {}).get("grid_pos", (0, 0)))
+
+            camera.listen(
+                lambda image, pos=grid_pos: process_carla_image(pygame_display, grid_size, pos, image)
+            )
+
+        else:
+            raise ValueError(f"Unknown camera configuration format: {cam_cfg}")
     return camera, pygame_display
 
 
