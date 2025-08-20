@@ -62,6 +62,13 @@ if not exist "%EIGEN_INSTALL_DIR%" (
     )
 )
 
+if not exist "%EIGEN_INCLUDE%" (
+    echo %FILE_N% [ERROR] Eigen include directory not found at: %EIGEN_INCLUDE%
+    goto bad_exit
+)
+
+for %%i in ("%EIGEN_INCLUDE%") do set EIGEN_INCLUDE_ABS=%%~fi
+
 rem ============================================================================
 rem -- Get Chrono -------------------------------------------
 rem ============================================================================
@@ -105,7 +112,7 @@ if not exist %CHRONO_INSTALL_DIR% (
     cmake -G %GENERATOR% %PLATFORM%^
         -DCMAKE_BUILD_TYPE=Release^
         -DCMAKE_CXX_FLAGS_RELEASE="/MD /MP"^
-        -DEIGEN3_INCLUDE_DIR="%EIGEN_INCLUDE%"^
+        -DEIGEN3_INCLUDE_DIR="%EIGEN_INCLUDE_ABS%"^
         -DCMAKE_INSTALL_PREFIX="%CHRONO_INSTALL_DIR%"^
         -DENABLE_MODULE_VEHICLE=ON^
         %CHRONO_SRC_DIR%
@@ -128,12 +135,12 @@ rem ============================================================================
 
 :success
     echo.
-    echo %FILE_N% Chrono has been successfully installed in "%EIGEN_INSTALL_DIR%"!
+    echo %FILE_N% Chrono has been successfully installed in "%CHRONO_INSTALL_DIR%"!
     goto good_exit
 
 :already_build
-    echo %FILE_N% A xerces installation already exists.
-    echo %FILE_N% Delete "%EIGEN_INSTALL_DIR%" if you want to force a rebuild.
+    echo %FILE_N% A chrono installation already exists.
+    echo %FILE_N% Delete "%CHRONO_INSTALL_DIR%" if you want to force a rebuild.
     goto good_exit
 
 :error_download_eigen
@@ -194,7 +201,7 @@ rem ============================================================================
     exit /b 0
 
 :bad_exit
-    if exist "%EIGEN_INSTALL_DIR%" rd /s /q "%EIGEN_INSTALL_DIR%"
+    if exist "%CHRONO_INSTALL_DIR%" rd /s /q "%CHRONO_INSTALL_DIR%"
     echo %FILE_N% Exiting with error...
     endlocal
     exit /b %errorlevel%
