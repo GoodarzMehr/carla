@@ -15,6 +15,8 @@ rem ============================================================================
 rem -- Parse arguments ---------------------------------------------------------
 rem ============================================================================
 
+set CHRONO_PATH=
+
 :arg-parse
 if not "%1"=="" (
     if "%1"=="--build-dir" (
@@ -29,6 +31,10 @@ if not "%1"=="" (
     )
     if "%1"=="--generator" (
         set GENERATOR=%2
+        shift
+    )
+    if "%1"=="--chrono-path" (
+        set CHRONO_PATH=%2
         shift
     )
     shift
@@ -65,13 +71,24 @@ set CHRONO_VERSION=6.0.0
 set CHRONO_REPO=https://github.com/projectchrono/chrono.git
 set CHRONO_BASENAME=chrono
 
-set CHRONO_SRC_DIR=%BUILD_DIR%%CHRONO_BASENAME%-src
 set CHRONO_INSTALL_DIR=%BUILD_DIR%chrono-install
+
+if not "%CHRONO_PATH%"=="" (
+    echo %FILE_N% Using user-provided Chrono at: %CHRONO_PATH%
+    set CHRONO_SRC_DIR=%CHRONO_PATH%
+) else (
+    set CHRONO_SRC_DIR=%BUILD_DIR%%CHRONO_BASENAME%-src
+)
+
 set CHRONO_BUILD_DIR=%CHRONO_SRC_DIR%\build
 
 if not exist %CHRONO_INSTALL_DIR% (
-    echo %FILE_N% Retrieving Chrono.
-    call git clone --depth 1 --branch %CHRONO_VERSION% %CHRONO_REPO% %CHRONO_SRC_DIR%
+    if "%CHRONO_PATH%"=="" (
+        echo %FILE_N% Retrieving Chrono.
+        call git clone --depth 1 --branch %CHRONO_VERSION% %CHRONO_REPO% %CHRONO_SRC_DIR%
+    ) else (
+        echo %FILE_N% Using existing Chrono source at: %CHRONO_PATH%
+    )
 
     mkdir %CHRONO_BUILD_DIR%
     mkdir %CHRONO_INSTALL_DIR%
@@ -106,7 +123,7 @@ rem ============================================================================
 
 :help
     echo %FILE_N% Download and install a the Chrono library.
-    echo "Usage: %FILE_N% [-h^|--help] [--build-dir] [--zlib-install-dir]"
+    echo "Usage: %FILE_N% [-h^|--help] [--build-dir] [--zlib-install-dir] [--chrono-path]"
     goto eof
 
 :success
