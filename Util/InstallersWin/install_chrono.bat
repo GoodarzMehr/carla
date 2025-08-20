@@ -111,14 +111,14 @@ if not exist %CHRONO_INSTALL_DIR% (
     echo %FILE_N% Compiling Chrono.
     cmake -G %GENERATOR% %PLATFORM%^
         -DCMAKE_BUILD_TYPE=Release^
-        -DCMAKE_CXX_FLAGS_RELEASE="/MD /MP"^
+        -DCMAKE_CXX_FLAGS_RELEASE="/MD /MP /O2 /Ob2 /DNDEBUG"^
         -DEIGEN3_INCLUDE_DIR="%EIGEN_INCLUDE_ABS%"^
         -DCMAKE_INSTALL_PREFIX="%CHRONO_INSTALL_DIR%"^
         -DENABLE_MODULE_VEHICLE=ON^
         %CHRONO_SRC_DIR%
 
     echo %FILE_N% Building...
-    cmake --build . --config Release --target install
+    cmake --build . --config Release --target install --parallel %NUMBER_OF_PROCESSORS%
 
 )
 
