@@ -23,7 +23,10 @@ import numpy as np
 import carla
 
 import argparse
-
+import os
+import imageio
+import sys
+from typing import Union
 import logging
 
 # set up logging with info for default logger
@@ -59,29 +62,54 @@ def process_carla_image(
     array = array[:, :, ::-1]
     display.setImage(array, pygame_dims, image_pos)
 
+name_to_index = {}
+def save_image(image: Union[carla.Image, np.ndarray], camera_name: str, output_dir: str) -> None:
+    """
+    Save the image to a file
+    """
+    next_index = name_to_index.get(camera_name, 0)
+    name_to_index[camera_name] = next_index + 1
+
+    # write as jpeg to disk under data/camera_name/
+    os.makedirs(f"{output_dir}/{camera_name}", exist_ok=True)
+
+    if isinstance(image, carla.Image):
+        image.save_to_disk(f"{output_dir}/{camera_name}/{next_index:05d}.jpg")
+    else:
+        array = image.astype(np.uint8)
+        imageio.imwrite(f"{output_dir}/{camera_name}/{next_index:05d}.jpg", array)
+
+def make_camera_callback(display, camera_name, pygame_pos, saveimages: bool, output_dir: str = "data"):
+    def callback(image):
+        display.setImage(image, (3, 2), pygame_pos)
+        if saveimages:
+            save_image(image, camera_name, output_dir)
+    return callback
+
 
 def add_cameras(
-    scenario: NurecScenario, client: carla.Client, resolution_ratio: float = 0.125
+    scenario: NurecScenario, client: carla.Client, output_dir: str, saveimages: bool, resolution_ratio: float = 0.125
 ) -> Tuple[carla.Actor, PygameDisplay]:
     # Set up pygame display for visualization
     pygame_display = PygameDisplay()
     # Add cameras using the new flexible add_camera method
 
+    # Add cameras
     scenario.add_camera(
         "camera_front_wide_120fov",
-        lambda image: pygame_display.setImage(image, (3, 2), (1, 0)),
+        make_camera_callback(pygame_display, "camera_front_wide_120fov", (1, 0), saveimages, output_dir),
         framerate=10,
         resolution_ratio=0.125,
     )
     scenario.add_camera(
         "camera_cross_left_120fov",
-        lambda image: pygame_display.setImage(image, (3, 2), (0, 0)),
+        make_camera_callback(pygame_display, "camera_cross_left_120fov", (0, 0), saveimages, output_dir),
         framerate=10,
         resolution_ratio=0.125,
     )
     scenario.add_camera(
         "camera_cross_right_120fov",
-        lambda image: pygame_display.setImage(image, (3, 2), (2, 0)),
+        make_camera_callback(pygame_display, "camera_cross_right_120fov", (2, 0), saveimages, output_dir),
         framerate=10,
         resolution_ratio=0.125,
     )
@@ -132,6 +160,11 @@ def main() -> None:
         help="TCP port to listen to (default: 2000)",
     )
     argparser.add_argument(
+        '-o', '--output-dir',
+        metavar='O',
+        default="data",
+        help='output directory (data)')
+    argparser.add_argument(
         "-np",
         "--nurec-port",
         metavar="Q",
@@ -145,6 +178,11 @@ def main() -> None:
         metavar="U",
         required=True,
         help="Path to the USDZ file containing the NUREC scenario data",
+    )
+    argparser.add_argument(
+        "--saveimages",
+        action="store_true",
+        help="Save images to disk (default: False)",
     )
     argparser.add_argument(
         "--move-spectator", action="store_true", help="move spectator camera"
@@ -166,7 +204,7 @@ def main() -> None:
         display: Optional[PygameDisplay] = None
         try:
             # Add cameras, we need to refernce spectator to keep it alive
-            spectator, display = add_cameras(scenario, client)
+            spectator, display = add_cameras(scenario, client, args.output_dir, args.saveimages )
 
             logger.info("Starting replay")
             scenario.start_replay()
@@ -195,6 +233,11 @@ def main() -> None:
             if display is not None:
                 display.destroy()
 
+    sim_world = client.get_world()
+    # Reset the world to non-synchronous mode
+    settings = sim_world.get_settings()
+    settings.synchronous_mode = False
+    sim_world.apply_settings(settings)
 
 if __name__ == "__main__":
     main()
