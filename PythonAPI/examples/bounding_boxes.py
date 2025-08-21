@@ -94,15 +94,15 @@ def decode_instance_segmentation(img_rgba: np.ndarray):
     return semantic_labels, actor_ids
 
 # Generate a 2D bounding box for an actor from the actor ID image
-def bbox_2d_for_actor(actor_ids: np.ndarray, semantic_labels: np.ndarray, actor_id: int):
-    mask = (actor_ids == actor_id)
+def bbox_2d_for_actor(actor, actor_ids: np.ndarray, semantic_labels: np.ndarray):
+    mask = (actor_ids == actor.id)
     if not np.any(mask):
         return None  # actor not present
     ys, xs = np.where(mask)
     xmin, xmax = xs.min(), xs.max()
     ymin, ymax = ys.min(), ys.max()
-    return {'actor_id': actor_id,
-            'semantic_label': semantic_labels[mask][0],
+    return {'actor_id': actor.id,
+            'semantic_label': actor.semantic_tags[0],
             'bbox_2d': (xmin, ymin, xmax, ymax)}
 
 # Generate a 3D bounding box for an actor from the simulation
@@ -124,9 +124,9 @@ def bbox_3d_for_actor(actor, ego, camera_bp, camera):
     ego_bbox_transform = carla.Transform(ego_bbox_loc, ego.get_transform().rotation)
 
     npc_bbox_loc = actor.get_transform().location + actor.bounding_box.location
-    npc_bbox_transform = carla.Transform(npc_bbox_loc, actor.get_transform().rotation)
+    #npc_bbox_transform = carla.Transform(npc_bbox_loc, actor.get_transform().rotation)
 
-    npc_loc_ego_space = ego.get_transform().inverse_transform(npc_bbox_loc)
+    npc_loc_ego_space = ego_bbox_transform.inverse_transform(npc_bbox_loc)
 
     verts = [v for v in actor.bounding_box.get_world_vertices(actor.get_transform())]
 
@@ -203,8 +203,53 @@ def visualize_3d_bboxes(surface, img, bboxes):
     for item in bboxes:
         bbox = item['3d']
         color = SEMANTIC_MAP[bbox['semantic_label']][1]
+
+        n = 0
+        mean_x = 0
+        mean_y = 0
         for line in bbox['projection']:
+            mean_x += line[0]
+            mean_y += line[1]
+            n += 1
             pygame.draw.line(surface, color, (line[0], line[1]), (line[2],line[3]), 2)
+
+        if n > 0:
+            mean_x /= n
+            mean_y /= n
+
+            # --- Render label ---
+            font = pygame.font.SysFont("Arial", 18)
+            text_surface = font.render(SEMANTIC_MAP[bbox['semantic_label']][0], True, (255,255,255), color)  # black text, filled bg
+            text_rect = text_surface.get_rect(topleft=(mean_x, mean_y))
+            surface.blit(text_surface, text_rect)
+
+def calculate_relative_velocity(actor, ego):
+    # Calculate the relative velocity in world frame
+    rel_vel = actor.get_velocity() - ego.get_velocity()
+    # Now convert to local frame of ego
+    vel_ego_frame = ego.get_transform().inverse_transform(rel_vel)
+
+    return {
+        'x': vel_ego_frame.x,
+        'y': vel_ego_frame.y,
+        'z': vel_ego_frame.z
+    }
+
+def vehicle_light_state_to_dict(vehicle: carla.Vehicle):
+    state = vehicle.get_light_state()
+    return {
+        "position":     bool(state & carla.VehicleLightState.Position),
+        "low_beam":     bool(state & carla.VehicleLightState.LowBeam),
+        "high_beam":    bool(state & carla.VehicleLightState.HighBeam),
+        "brake":        bool(state & carla.VehicleLightState.Brake),
+        "reverse":      bool(state & carla.VehicleLightState.Reverse),
+        "left_blinker": bool(state & carla.VehicleLightState.LeftBlinker),
+        "right_blinker":bool(state & carla.VehicleLightState.RightBlinker),
+        "fog":          bool(state & carla.VehicleLightState.Fog),
+        "interior":     bool(state & carla.VehicleLightState.Interior),
+        "special1":     bool(state & carla.VehicleLightState.Special1),
+        "special2":     bool(state & carla.VehicleLightState.Special2),
+    }
 
 def main():
 
@@ -306,7 +351,7 @@ def main():
             img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
 
             if record:
-                image.save_to_disk('out/%08d' % image.frame)
+                image.save_to_disk('_out/%08d' % image.frame)
 
             inst_seg_image = inst_queue.get()
             inst_seg = np.reshape(np.copy(inst_seg_image.raw_data), (inst_seg_image.height, inst_seg_image.width, 4))
@@ -324,7 +369,7 @@ def main():
                     dist = npc.get_transform().location.distance(ego_vehicle.get_transform().location)
 
                     # Filter for the vehicles within 100m
-                    if dist < 100:
+                    if dist < 50:
 
                         # Limit to vehicles in front of the camera
                         forward_vec = camera.get_transform().get_forward_vector()
@@ -334,7 +379,7 @@ def main():
                             
                             # Generate 2D and 2D bounding boxes for each actor
                             semantic_labels, actor_ids = decode_instance_segmentation(inst_seg)
-                            npc_bbox_2d = bbox_2d_for_actor(actor_ids, semantic_labels, npc.id)
+                            npc_bbox_2d = bbox_2d_for_actor(npc, actor_ids, semantic_labels)
                             npc_bbox_3d = bbox_3d_for_actor(npc, ego_vehicle, camera_bp, camera)
 
                             frame_bboxes.append({'3d': npc_bbox_3d, '2d': npc_bbox_2d})
@@ -343,18 +388,15 @@ def main():
                                 'id': npc.id,
                                 'class': SEMANTIC_MAP[npc.semantic_tags[0]][0],
                                 'blueprint_id': npc.type_id,
-                                'velocity': {
-                                    'x': npc.get_velocity().x,
-                                    'y': npc.get_velocity().y,
-                                    'z': npc.get_velocity().z
-                                },
+                                'velocity': calculate_relative_velocity(npc, ego_vehicle),
                                 'bbox_3d': npc_bbox_3d['bbox_3d'],
                                 'bbox_2d': {
                                     'xmin': int(npc_bbox_2d['bbox_2d'][0]),
                                     'ymin': int(npc_bbox_2d['bbox_2d'][1]),
                                     'xmax': int(npc_bbox_2d['bbox_2d'][2]),
                                     'ymax': int(npc_bbox_2d['bbox_2d'][3]),
-                                } if npc_bbox_2d else None
+                                } if npc_bbox_2d else None,
+                                'light_state': vehicle_light_state_to_dict(npc)
 
                             })
 
@@ -367,7 +409,7 @@ def main():
             pygame.display.flip()
             clock.tick(30)  # 30 FPS              
             if record:
-                with open(f"out/{snapshot.frame}.json", 'w') as f:
+                with open(f"_out/{snapshot.frame}.json", 'w') as f:
                     json.dump(json_frame_data, f)
 
     except KeyboardInterrupt:
