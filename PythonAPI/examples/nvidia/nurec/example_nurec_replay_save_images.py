@@ -183,8 +183,8 @@ def add_cameras(
             if "transform_matrix" in cam_cfg:
                 transform_matrix = np.array(cam_cfg["transform_matrix"], dtype=float)
             else:
-                rotation = cam_cfg.get("rotation")         # e.g., [roll, pitch, yaw] en rad
-                translation = cam_cfg.get("translation")   # e.g., [x, y, z]
+                rotation = cam_cfg.get("rotation")         # [roll, pitch, yaw] in rad
+                translation = cam_cfg.get("translation")   # [x, y, z]
                 transform_matrix = make_transform_matrix(rotation, translation)
 
             cameraname = camera_params["logical_id"] + str(grid_pos[0]) + str(grid_pos[1])
