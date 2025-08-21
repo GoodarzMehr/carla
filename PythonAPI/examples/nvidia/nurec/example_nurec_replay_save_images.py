@@ -44,29 +44,59 @@ from pygame_display import PygameDisplay
 from constants import EGO_TRACK_ID
 from utils import handle_exception
 from typing import Tuple, Optional
-from scipy.spatial.transform import Rotation as R
+
 
 def make_transform_matrix(rotation=None, translation=None):
     """
-    Create a 4x4 homogeneous transformation matrix compatible with Unreal/CARLA.
-
-    Rotation is assumed to be [yaw, pitch, roll] in degrees.
-    Translation is [x, y, z].
-
-    Returns:
-    - 4x4 numpy array
+    Crea una 4x4 compatible con tu consumidor:
+    - Rotación de Unreal/CARLA: yaw(Z), pitch(Y), roll(X), en grados.
+    - Traducción [x, y, z].
+    - Ajusta los ejes para que el 'forward' del consumidor (columna Z) apunte a +X del mundo.
     """
     mat = np.eye(4, dtype=float)
 
-    # Handle rotation
     if rotation is not None:
-        # rotation is [yaw, pitch, roll] in degrees
-        yaw, pitch, roll = rotation
-        # Convert to scipy format: order="XYZ" means roll(X), pitch(Y), yaw(Z)
-        r = R.from_euler("ZYX", [roll, pitch, yaw], degrees=True)
-        mat[:3, :3] = r.as_matrix()
+        pitch_deg, yaw_deg, roll_deg = rotation
+        yaw   = np.radians(yaw_deg)
+        pitch = np.radians(pitch_deg)
+        roll  = np.radians(roll_deg)
 
-    # Handle translation
+        # Rotaciones básicas (derecha = +Y, arriba = +Z, adelante = +X)
+        Rz_yaw = np.array([
+            [ np.cos(yaw), -np.sin(yaw), 0.0],
+            [ np.sin(yaw),  np.cos(yaw), 0.0],
+            [          0.,           0., 1.0]
+        ])
+
+        Ry_pitch = np.array([
+            [ np.cos(pitch), 0.0, np.sin(pitch)],
+            [           0.0, 1.0,           0.0],
+            [-np.sin(pitch), 0.0, np.cos(pitch)]
+        ])
+
+        Rx_roll = np.array([
+            [1.0,          0.0,           0.0],
+            [0.0,  np.cos(roll), -np.sin(roll)],
+            [0.0,  np.sin(roll),  np.cos(roll)]
+        ])
+
+        # Orden Unreal: R = Rz(yaw) * Ry(pitch) * Rx(roll)
+        R_unreal = Rz_yaw @ Ry_pitch @ Rx_roll
+
+        # Matriz de cambio de base (columnas = ejes del "engine" en coordenadas Unreal):
+        # col0 = engine_X = -Unreal_Y = (0,-1,0)
+        # col1 = engine_Y = -Unreal_Z = (0, 0,-1)
+        # col2 = engine_Z =  Unreal_X = (1, 0, 0)
+        A = np.array([
+            [ 0.0,  0.0, 1.0],
+            [-1.0,  0.0, 0.0],
+            [ 0.0, -1.0, 0.0]
+        ])
+
+        # Rotación final para tu consumidor
+        R_engine = R_unreal @ A
+        mat[:3, :3] = R_engine
+
     if translation is not None:
         mat[:3, 3] = translation
 
@@ -143,6 +173,8 @@ def add_cameras(
     with open("carla_example_camera_config.yaml", "r") as f:
         camera_configs = yaml.safe_load(f)
 
+    grid_size =  (3, 2)
+    grid_pos = (0, 0)
     for cam_cfg in camera_configs:
         # Case 1: Rich camera_params style
         if "camera_params" in cam_cfg:
@@ -155,15 +187,13 @@ def add_cameras(
                 translation = cam_cfg.get("translation")   # e.g., [x, y, z]
                 transform_matrix = make_transform_matrix(rotation, translation)
 
-            grid_size = tuple(cam_cfg.get("display", {}).get("grid_size", (3, 2)))
-            grid_pos = tuple(cam_cfg.get("display", {}).get("grid_pos", (0, 0)))
-
+            cameraname = camera_params["logical_id"] + str(grid_pos[0]) + str(grid_pos[1])
             scenario.add_camera(
                 camera_params,
-                make_camera_callback(pygame_display, camera_params["logical_id"], grid_pos, saveimages, output_dir),
+                make_camera_callback(pygame_display, cameraname, grid_pos, saveimages, output_dir),
                 transform=transform_matrix,
-                framerate=cam_cfg.get("framerate", 30),
-                resolution_ratio=cam_cfg.get("resolution_ratio", 1.0),
+                framerate=30,
+                resolution_ratio=0.125,
             )
         # Case 2: Simple CARLA sensor style
         elif "sensor" in cam_cfg:
@@ -184,8 +214,6 @@ def add_cameras(
 
             camera = world.spawn_actor(camera_bp, camera_transform, attach_to=scenario.actor_mapping[EGO_TRACK_ID].actor_inst)
 
-            grid_size = tuple(cam_cfg.get("display", {}).get("grid_size", (3, 2)))
-            grid_pos = tuple(cam_cfg.get("display", {}).get("grid_pos", (0, 0)))
 
             camera.listen(
                 lambda image, pos=grid_pos: process_carla_image(pygame_display, grid_size, pos, image)
@@ -193,6 +221,11 @@ def add_cameras(
 
         else:
             raise ValueError(f"Unknown camera configuration format: {cam_cfg}")
+        
+        grid_pos = (grid_pos[0] + 1, grid_pos[1])
+        if grid_pos[0] >= grid_size[0]:
+            grid_pos = (1, grid_pos[1] + 1)
+        
     return camera, pygame_display
 
 
