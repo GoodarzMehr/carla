@@ -48,10 +48,10 @@ from typing import Tuple, Optional
 
 def make_transform_matrix(rotation=None, translation=None):
     """
-    Crea una 4x4 compatible con tu consumidor:
-    - Rotación de Unreal/CARLA: yaw(Z), pitch(Y), roll(X), en grados.
-    - Traducción [x, y, z].
-    - Ajusta los ejes para que el 'forward' del consumidor (columna Z) apunte a +X del mundo.
+    Create a 4x4 compatible with your consumer:
+    - Unreal/CARLA rotation: yaw(Z), pitch(Y), roll(X), in degrees.
+    - Translation [x, y, z].
+    - Adjust the axes so that the consumer's forward (Z column) points to +X of the world.
     """
     mat = np.eye(4, dtype=float)
 
@@ -61,7 +61,7 @@ def make_transform_matrix(rotation=None, translation=None):
         pitch = np.radians(pitch_deg)
         roll  = np.radians(roll_deg)
 
-        # Rotaciones básicas (derecha = +Y, arriba = +Z, adelante = +X)
+        # Basic rotations (right = +Y, up = +Z, forward = +X)
         Rz_yaw = np.array([
             [ np.cos(yaw), -np.sin(yaw), 0.0],
             [ np.sin(yaw),  np.cos(yaw), 0.0],
@@ -80,10 +80,10 @@ def make_transform_matrix(rotation=None, translation=None):
             [0.0,  np.sin(roll),  np.cos(roll)]
         ])
 
-        # Orden Unreal: R = Rz(yaw) * Ry(pitch) * Rx(roll)
+        # Unreal Order: R = Rz(yaw) * Ry(pitch) * Rx(roll)
         R_unreal = Rz_yaw @ Ry_pitch @ Rx_roll
 
-        # Matriz de cambio de base (columnas = ejes del "engine" en coordenadas Unreal):
+        # Change of basis matrix (columns = engine axes in Unreal coordinates):
         # col0 = engine_X = -Unreal_Y = (0,-1,0)
         # col1 = engine_Y = -Unreal_Z = (0, 0,-1)
         # col2 = engine_Z =  Unreal_X = (1, 0, 0)
