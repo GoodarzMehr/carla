@@ -8,7 +8,7 @@ Objects within the CARLA simulation all have a bounding box and the CARLA Python
 
 Let's lay down the standard CARLA boilerplate code, set up the client and world objects, spawn a vehicle and attach a camera to it:
 
-```py
+```python
 import carla
 import math
 import random

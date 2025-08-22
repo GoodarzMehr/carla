@@ -2,7 +2,7 @@ site_name: CARLA Simulator
 repo_url: https://github.com/carla-simulator/carla
 docs_dir: Docs
 edit_uri: 'edit/master/Docs/'
-theme: readthedocs
+# theme: material
 extra_css: [extra.css]
 extra_javascript: [extra.js]
 
@@ -59,5 +59,34 @@ nav:
   - '': ''
  
 markdown_extensions:
-  - admonition 
+  - admonition
+  - pymdownx.highlight:
+      linenums: true
+      anchor_linenums: true
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - content.code.annotate 
+  logo: img/logos/CarlaLogo.svg
+  palette:
+    # Light mode
+    - scheme: default
+      primary: indigo
+      accent: pink
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+    # Dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
  

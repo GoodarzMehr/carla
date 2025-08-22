@@ -1,0 +1,21 @@
+.copy-button {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  padding: 2px 6px;
+  font-size: 0.75em;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.3;
+  transition: opacity 0.2s;
+}
+
+.copy-button:hover {
+  opacity: 1;
+}
+
+pre {
+  position: relative; /* ensures absolute button positioning works */
+}
