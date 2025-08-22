@@ -19,12 +19,25 @@ To use neural rendering in your CARLA simulations, use the NVIDIA Neural Reconst
 
 ## Before you Begin
 
+### Prerequisites
+
 Before you get started, make sure you have satisifed the following prerequisites:
 
 - Ubuntu 22.04
 - [CARLA 0.9.16 or newer package installed](https://carla.readthedocs.io/en/latest/download/) (use the Nightly Build before the 0.9.16 release)
 - [CUDA 12.8 or higher](https://developer.nvidia.com/cuda-downloads)
 - Python 3.10+
+
+### Hugging face account
+
+The installation downloads some sample datasets from Hugging Face. To complete the installation, you must have a Hugging Face account and create a token.
+
+* If you don't already have a Hugging Face account, [create one](https://huggingface.co/join) and log in.
+* Agree to share your contact information to access the dataset:
+    * Find the dataset on the Hugging face website [here](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec)
+    * Click on *&#10004; Agree and access repository*
+* [Create a token](https://huggingface.co/settings/tokens) with *Read* permissions
+* Save the token in a safe place and enter it when prompted during the installation
 
 ## Setup
 
