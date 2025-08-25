@@ -7,6 +7,7 @@ Creating a custom prop in CARLA is quick and straightforward. Follow these steps
 * __[Add the new prop to the JSON configuration](#add-the-new-prop-to-the-json-configuration-file)__ 
 * __[Use the new prop in simulation](#use-the-new-prop-in-the-simulation)__
 * __[Make a CARLA package with new props](#make-a-carla-package-with-new-props)__ 
+* __[Use a static mesh as a prop](#use-static-mesh-as-a-prop-through-the-api)__ 
 
 ---
 
@@ -108,3 +109,29 @@ When the export process is finished, the exported map package will be saved as a
 
 * **Linux**: `.tar.gz` archive in the `${CARLA_ROOT}/Dist` directory
 * **Windows**: `.zip` archive in the `${CARLA_ROOT}/Build/UE4Carla` directory
+
+---
+
+## Use static mesh as a prop through the API
+
+Static meshes already included in the CARLA content library can be nominated for use as props through the Python API using the `static.prop.mesh` blueprint. Locate the desired mesh in the CARLA content browser and take note of its path. For this example we will choose the Dodge Charger model from the `/Game/Carla/Static/Car/4Wheeled/ParkedVehicles` directory. 
+
+![parked_charger_in_content](img/content_tutorials/charger_static_mesh.png)
+
+We can use the following code to place the vehicle in the map as a prop:
+
+```py
+# Set the path for the chosen static mesh
+mesh_path = '/Game/Carla/Static/Car/4Wheeled/ParkedVehicles/Charger/SM_ChargerParked.SM_ChargerParked'
+spawn_point = carla.Transform(carla.Location(x=52.7, y=127.7, z=0), carla.Rotation())
+
+# Use the static.prop.mesh bp and set the mesh_path attribute
+parked_vehicle_bp = bp_lib.find('static.prop.mesh')
+parked_vehicle_bp.set_attribute('mesh_path', mesh_path)
+
+parked_vehicle = world.spawn_actor(mesh_bp, spawn_point)
+```
+
+![parked_charger_in_sim](img/content_tutorials/charger_in_sim.png)
+
+This method works both with the built-from-source version of CARLA and also a package version of CARLA, as long as the package contains the nominated static mesh in the correct location. 
