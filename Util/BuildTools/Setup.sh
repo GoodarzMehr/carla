@@ -581,7 +581,6 @@ fi
 mkdir -p ${LIBCARLA_INSTALL_SERVER_FOLDER}/include/
 cp -p -r ${EIGEN_INCLUDE}/* ${LIBCARLA_INSTALL_SERVER_FOLDER}/include/
 
-
 if ${USE_CHRONO} ; then
   # ==============================================================================
   # -- Get Eigen headers (Chrono dependency) -------------------------------------
@@ -611,7 +610,6 @@ if ${USE_CHRONO} ; then
       fi
     fi
     EIGEN_INCLUDE=$(realpath "${EIGEN_INSTALL_DIR}/include")
-
     mkdir -p ${CHRONO_SRC_DIR}/build
     pushd ${CHRONO_SRC_DIR}/build >/dev/null
     cmake -G "Ninja" \
