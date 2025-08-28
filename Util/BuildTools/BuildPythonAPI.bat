@@ -19,24 +19,25 @@ set "USAGE_STRING=Usage: %FILE_N% [-h^|--help] [--build-wheel] [--rebuild]  [--c
 
 set REMOVE_INTERMEDIATE=false
 set BUILD_PYTHONAPI=true
-set BUILD_PYTHONAPI_WHEEL=false
+set INSTALL_PYTHONPATH=true
 
 :arg-parse
 if not "%1"=="" (
     if "%1"=="--rebuild" (
         set REMOVE_INTERMEDIATE=true
         set BUILD_PYTHONAPI=true
+        set INSTALL_PYTHONAPI=true
     )
 
     if "%1"=="--build-wheel" (
-        set BUILD_PYTHONAPI_WHEEL=true
-        set BUILD_PYTHONAPI=false
+        set BUILD_PYTHONAPI=true
+        set INSTALL_PYTHONAPI=false
     )
 
     if "%1"=="--clean" (
         set REMOVE_INTERMEDIATE=true
         set BUILD_PYTHONAPI=false
-        set BUILD_PYTHONAPI_WHEEL=false
+        set INSTALL_PYTHONAPI=false
     )
 
     if "%1"=="-h" (
@@ -59,10 +60,8 @@ set PYTHON_LIB_PATH=%ROOT_PATH:/=\%PythonAPI\carla\
 
 if %REMOVE_INTERMEDIATE% == false (
     if %BUILD_PYTHONAPI% == false (
-        if %BUILD_PYTHONAPI_WHEEL% == false (
-          echo Nothing selected to be done.
-          goto :eof
-        )
+        echo Nothing selected to be done.
+        goto :eof
     )
 )
 
@@ -79,9 +78,7 @@ if %REMOVE_INTERMEDIATE% == true (
         )
     )
     if %BUILD_PYTHONAPI% == false (
-        if %BUILD_PYTHONAPI_WHEEL% == false (
-            goto good_exit
-        )
+        goto good_exit
     )
 )
 
@@ -98,16 +95,17 @@ if %errorlevel% neq 0 goto error_py
 rem Build for Python 3
 rem
 if %BUILD_PYTHONAPI%==true (
-    echo Building Python API for Python 3.
-    python -m pip install -e .
-    if %errorlevel% neq 0 goto error_build
-)
-
-rem Build wheeel for Python 3
-rem
-if %BUILD_PYTHONAPI_WHEEL%==true (
     echo Building Python API wheel for Python 3.
-    python -m build --wheel .
+    python -m build --wheel --outdir dist\.tmp .
+
+    set WHEEL_FILE=
+    for %%f in (dist\.tmp\*.whl) do set WHEEL_FILE=%%f
+
+    if %BUILD_PYTHONAPI%==true (
+        python -m pip install --force-reinstall "%WHEEL_FILE%"
+
+    copy "%WHEEL_FILE%" dist
+
     if %errorlevel% neq 0 goto error_build_wheel
 )
 
@@ -134,11 +132,6 @@ rem ============================================================================
     echo %FILE_N% [ERROR]  - Make sure "py" is installed.
     echo %FILE_N% [ERROR]  - py = python launcher. This utility is bundled with Python installation but not installed by default.
     echo %FILE_N% [ERROR]  - Make sure it is available on your Windows "py".
-    goto bad_exit
-
-:error_build
-    echo.
-    echo %FILE_N% [ERROR] An error occurred while building the PythonAPI.
     goto bad_exit
 
 :error_build_wheel

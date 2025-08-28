@@ -11,7 +11,7 @@ USAGE_STRING="Usage: $0 [-h|--help] [--rebuild] [--clean] [--python-version=VERS
 REMOVE_INTERMEDIATE=false
 BUILD_RSS_VARIANT=false
 BUILD_PYTHONAPI=true
-BUILD_PYTHONAPI_WHEEL=false
+INSTALL_PYTHONAPI=true
 
 OPTS=`getopt -o h --long help,config:,rebuild,clean,rss,carsim,python-version:,build-wheel,target-wheel-platform:,packages:,clean-intermediate,all,xml,target-archive:, -n 'parse-options' -- "$@"`
 
@@ -25,13 +25,14 @@ while [[ $# -gt 0 ]]; do
     --rebuild )
       REMOVE_INTERMEDIATE=true;
       BUILD_PYTHONAPI=true;
+      INSTALL_PYTHONAPI=true;
       shift ;;
     --python-version )
       PY_VERSION_LIST="$2"
       shift 2 ;;
     --build-wheel )
-      BUILD_PYTHONAPI_WHEEL=true;
-      BUILD_PYTHONAPI=false;
+      BUILD_PYTHONAPI=true;
+      INSTALL_PYTHONAPI=false;
       shift ;;
     --target-wheel-platform )
       TARGET_WHEEL_PLATFORM="$2"
@@ -42,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     --clean )
       REMOVE_INTERMEDIATE=true;
       BUILD_PYTHONAPI=false;
-      BUILD_PYTHONAPI_WHEEL=false;
+      INSTALL_PYTHONAPI=false;
       shift ;;
     -h | --help )
       echo "$DOC_STRING"
@@ -93,18 +94,20 @@ if ${BUILD_RSS_VARIANT} ; then
   export BUILD_RSS_VARIANT=${BUILD_RSS_VARIANT}
 fi
 
-# Add patchelf to the path. Auditwheel relies on patchelf to repair ELF files.
-export PATH="${LIBCARLA_INSTALL_CLIENT_FOLDER}/bin:${PATH}"
 
-for PY_VERSION in ${PY_VERSION_LIST[@]} ; do
-  if ${BUILD_PYTHONAPI} ; then
-    log "Building Python API for Python ${PY_VERSION}."
-    /usr/bin/env python${PY_VERSION} -m pip install -e .
-  fi
-
-  if ${BUILD_PYTHONAPI_WHEEL} ; then
+if ${BUILD_PYTHONAPI} ; then
+  # Add patchelf to the path. Auditwheel relies on patchelf to repair ELF files.
+  export PATH="${LIBCARLA_INSTALL_CLIENT_FOLDER}/bin:${PATH}"
+  
+  for PY_VERSION in ${PY_VERSION_LIST[@]} ; do
     log "Building Python API wheel for Python ${PY_VERSION}."
     /usr/bin/env python${PY_VERSION} -m build --wheel --outdir dist/.tmp .
+
+    if ${INSTALL_PYTHONAPI} ; then
+      log "Installing Python API for Python ${PY_VERSION}."
+      /usr/bin/env python${PY_VERSION} -m pip install --force-reinstall dist/.tmp/$(ls dist/.tmp | grep .whl)
+    fi
+
     if [[ -z ${TARGET_WHEEL_PLATFORM} ]] ; then
       cp dist/.tmp/$(ls dist/.tmp | grep .whl) dist
     else
@@ -113,9 +116,8 @@ for PY_VERSION in ${PY_VERSION_LIST[@]} ; do
       /usr/bin/env python${PY_VERSION} -m auditwheel repair --plat ${TARGET_WHEEL_PLATFORM} --wheel-dir dist dist/.tmp/$(ls dist/.tmp | grep ${TARGET_WHEEL_PLATFORM}.whl)
     fi
     rm -rf dist/.tmp
-  fi
-
-done
+  done
+fi
 
 # ==============================================================================
 # -- ...and we are done --------------------------------------------------------
