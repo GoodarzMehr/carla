@@ -128,7 +128,7 @@ __1. Using the content update script__: This script downloads the latest package
 __2. Using Git__: Using Git, you will establish a git repository for the content in the `${CARLA_ROOT}/Unreal/CarlaUE4/Content/Carla` directory. **This is the preferred method if you intend to commit content updates to CARLA (or your own fork of CARLA)**. From the root directory of the CARLA code repository, run the following command (if you have your own fork of the CARLA content, change the target remote repository accordingly):
 
 ```sh
-git clone https://bitbucket.org/carla-simulator/carla-content ${CARLA_ROOT}/Unreal/CarlaUE4/Content/Carla
+git clone -b master https://bitbucket.org/carla-simulator/carla-content ${CARLA_ROOT}/Unreal/CarlaUE4/Content/Carla
 ```
 
 #### Downloading the assets in an archive for a specific CARLA version
@@ -158,6 +158,8 @@ You may want to set the environment variable in your `.bashrc` or `.profile`, so
 ```sh
 cd ~
 gedit .bashrc # or .profile
+#OR, from the command line:
+#echo "export UE4_ROOT=~/UnrealEngine_4.27" >> ~/.bashrc
 ```
 
 ---
@@ -170,7 +172,13 @@ The following commands should be run from the root folder of the CARLA repositor
 
 The Python API client grants control over the simulation. Compilation of the Python API client is required the first time you build CARLA and again after you perform any updates. After the client is compiled, you will be able to run scripts to interact with the simulation.
 
-The following command compiles the Python API client:
+Install the Python prerequisites:
+
+```sh
+python3 -m pip install --upgrade -r ${CARLA_ROOT}/PythonAPI/carla/requirements.txt
+```
+
+Then build the Python API with the following command:
 
 ```sh
 make PythonAPI
@@ -218,10 +226,10 @@ The CARLA Python API wheel will be generated in `${CARLA_ROOT}/PythonAPI/carla/d
 
 ```sh
 # CARLA 0.9.16, Python 3.8
-pip3 install ${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.16-cp38-linux_x86_64.whl
+python3 -m pip install ${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.16-cp38-linux_x86_64.whl
 
 # CARLA 0.9.16, Python 3.10
-#pip3 install ${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.16-cp310-linux_x86_64.whl
+#python3 -m pip install ${CARLA_ROOT}/PythonAPI/carla/dist/carla-0.9.16-cp310-linux_x86_64.whl
 ```
 
 !!! Warning
