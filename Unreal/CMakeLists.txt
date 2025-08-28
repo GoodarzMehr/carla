@@ -415,14 +415,14 @@ function (
   carla_add_custom_target (
     ${TARGET_NAME}
     "Create a CARLA package in ${PACKAGE_CONFIGURATION} mode."
-    COMMAND
-      ${CARLA_UE_BUILD_COMMAND_PREFIX}
-      CarlaUnreal
-      ${UE_SYSTEM_NAME}
-      ${UE_BUILD_CONFIGURATION}
-      -project=${CARLA_UE_PROJECT_PATH}
-      -game
-      -buildscw
+    # COMMAND
+    #   ${CARLA_UE_BUILD_COMMAND_PREFIX}
+    #   CarlaUnreal
+    #   ${UE_SYSTEM_NAME}
+    #   ${UE_BUILD_CONFIGURATION}
+    #   -project=${CARLA_UE_PROJECT_PATH}
+    #   -game
+    #   -buildscw
     COMMAND
       ${CARLA_UE_UAT_COMMAND_PREFIX}
       BuildCookRun
