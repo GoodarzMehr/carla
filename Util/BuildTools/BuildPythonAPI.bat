@@ -15,32 +15,28 @@ rem -- Parse arguments ---------------------------------------------------------
 rem ============================================================================
 
 set DOC_STRING=Build and package CARLA Python API.
-set "USAGE_STRING=Usage: %FILE_N% [-h^|--help] [--rebuild]  [--clean]"
+set "USAGE_STRING=Usage: %FILE_N% [-h^|--help] [--build-wheel] [--rebuild]  [--clean]"
 
 set REMOVE_INTERMEDIATE=false
-set BUILD_FOR_PYTHON2=false
-set BUILD_FOR_PYTHON3=false
+set BUILD_PYTHONAPI=true
+set BUILD_PYTHONAPI_WHEEL=false
 
 :arg-parse
 if not "%1"=="" (
     if "%1"=="--rebuild" (
         set REMOVE_INTERMEDIATE=true
-        rem We don't provide support for py2 right now
-        set BUILD_FOR_PYTHON2=false
-        set BUILD_FOR_PYTHON3=true
+        set BUILD_PYTHONAPI=true
     )
 
-    if "%1"=="--py2" (
-        set BUILD_FOR_PYTHON2=true
+    if "%1"=="--build-wheel" (
+        set BUILD_PYTHONAPI_WHEEL=true
+        set BUILD_PYTHONAPI=false
     )
-
-    if "%1"=="--py3" (
-        set BUILD_FOR_PYTHON3=true
-    )
-
 
     if "%1"=="--clean" (
         set REMOVE_INTERMEDIATE=true
+        set BUILD_PYTHONAPI=false
+        set BUILD_PYTHONAPI_WHEEL=false
     )
 
     if "%1"=="-h" (
@@ -62,8 +58,8 @@ if not "%1"=="" (
 set PYTHON_LIB_PATH=%ROOT_PATH:/=\%PythonAPI\carla\
 
 if %REMOVE_INTERMEDIATE% == false (
-    if %BUILD_FOR_PYTHON3% == false (
-        if %BUILD_FOR_PYTHON2% == false (
+    if %BUILD_PYTHONAPI% == false (
+        if %BUILD_PYTHONAPI_WHEEL% == false (
           echo Nothing selected to be done.
           goto :eof
         )
@@ -82,8 +78,8 @@ if %REMOVE_INTERMEDIATE% == true (
             rmdir /s/q %%G
         )
     )
-    if %BUILD_FOR_PYTHON3% == false (
-        if %BUILD_FOR_PYTHON2% == false (
+    if %BUILD_PYTHONAPI% == false (
+        if %BUILD_PYTHONAPI_WHEEL% == false (
             goto good_exit
         )
     )
@@ -99,17 +95,19 @@ rem ============================================================================
 where python 1>nul
 if %errorlevel% neq 0 goto error_py
 
-rem Build for Python 2
-rem
-if %BUILD_FOR_PYTHON2%==true (
-    goto py2_not_supported
-)
-
 rem Build for Python 3
 rem
-if %BUILD_FOR_PYTHON3%==true (
+if %BUILD_PYTHONAPI%==true (
     echo Building Python API for Python 3.
-    python setup.py bdist_egg bdist_wheel
+    python -m pip install -e .
+    if %errorlevel% neq 0 goto error_build
+)
+
+rem Build wheeel for Python 3
+rem
+if %BUILD_PYTHONAPI_WHEEL%==true (
+    echo Building Python API wheel for Python 3.
+    python -m build --wheel .
     if %errorlevel% neq 0 goto error_build_wheel
 )
 
@@ -121,18 +119,13 @@ rem ============================================================================
 
 :success
     echo.
-    if %BUILD_FOR_PYTHON3%==true echo %FILE_N% Carla lib for python has been successfully installed in "%PYTHON_LIB_PATH%dist"!
+    if %BUILD_PYTHONAPI%==true echo %FILE_N% Carla lib for python has been successfully installed in "%PYTHON_LIB_PATH%dist"!
     goto good_exit
 
 :already_installed
     echo.
     echo %FILE_N% [ERROR] Already installed in "%PYTHON_LIB_PATH%dist"
     goto good_exit
-
-:py2_not_supported
-    echo.
-    echo %FILE_N% [ERROR] Python 2 is not currently suported in Windows.
-    goto bad_exit
 
 :error_py
     echo.
@@ -141,6 +134,11 @@ rem ============================================================================
     echo %FILE_N% [ERROR]  - Make sure "py" is installed.
     echo %FILE_N% [ERROR]  - py = python launcher. This utility is bundled with Python installation but not installed by default.
     echo %FILE_N% [ERROR]  - Make sure it is available on your Windows "py".
+    goto bad_exit
+
+:error_build
+    echo.
+    echo %FILE_N% [ERROR] An error occurred while building the PythonAPI.
     goto bad_exit
 
 :error_build_wheel
