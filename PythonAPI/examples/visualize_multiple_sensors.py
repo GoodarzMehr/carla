@@ -14,18 +14,6 @@ It can easily be configure for any different number of sensors.
 To do that, check lines 290-308.
 """
 
-import glob
-import os
-import sys
-
-try:
-    sys.path.append(glob.glob('../carla/dist/carla-*%d.%d-%s.egg' % (
-        sys.version_info.major,
-        sys.version_info.minor,
-        'win-amd64' if os.name == 'nt' else 'linux-x86_64'))[0])
-except IndexError:
-    pass
-
 import carla
 import argparse
 import random
@@ -105,14 +93,13 @@ class SensorManager:
         self.time_processing = 0.0
         self.tics_processing = 0
 
-        self.display_man.add_sensor(self)
+        # self.display_man.add_sensor(self)
 
     def init_sensor(self, sensor_type, transform, attached, sensor_options):
         if sensor_type == 'RGBCamera':
             camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
-            disp_size = self.display_man.get_display_size()
-            camera_bp.set_attribute('image_size_x', str(disp_size[0]))
-            camera_bp.set_attribute('image_size_y', str(disp_size[1]))
+            camera_bp.set_attribute('image_size_x', '1280')
+            camera_bp.set_attribute('image_size_y', '920')
 
             for key in sensor_options:
                 camera_bp.set_attribute(key, sensor_options[key])
@@ -168,86 +155,16 @@ class SensorManager:
         return self.sensor
 
     def save_rgb_image(self, image):
-        t_start = self.timer.time()
-
-        image.convert(carla.ColorConverter.Raw)
-        array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-        array = np.reshape(array, (image.height, image.width, 4))
-        array = array[:, :, :3]
-        array = array[:, :, ::-1]
-
-        if self.display_man.render_enabled():
-            self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
-
-        t_end = self.timer.time()
-        self.time_processing += (t_end-t_start)
-        self.tics_processing += 1
+        print("RGB received")
 
     def save_lidar_image(self, image):
-        t_start = self.timer.time()
-
-        disp_size = self.display_man.get_display_size()
-        lidar_range = 2.0*float(self.sensor_options['range'])
-
-        points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
-        points = np.reshape(points, (int(points.shape[0] / 4), 4))
-        lidar_data = np.array(points[:, :2])
-        lidar_data *= min(disp_size) / lidar_range
-        lidar_data += (0.5 * disp_size[0], 0.5 * disp_size[1])
-        lidar_data = np.fabs(lidar_data)  # pylint: disable=E1111
-        lidar_data = lidar_data.astype(np.int32)
-        lidar_data = np.reshape(lidar_data, (-1, 2))
-        lidar_img_size = (disp_size[0], disp_size[1], 3)
-        lidar_img = np.zeros((lidar_img_size), dtype=np.uint8)
-
-        lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
-
-        if self.display_man.render_enabled():
-            self.surface = pygame.surfarray.make_surface(lidar_img)
-
-        t_end = self.timer.time()
-        self.time_processing += (t_end-t_start)
-        self.tics_processing += 1
+        print("Lidar received")
 
     def save_semanticlidar_image(self, image):
-        t_start = self.timer.time()
-
-        disp_size = self.display_man.get_display_size()
-        lidar_range = 2.0*float(self.sensor_options['range'])
-
-        points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
-        points = np.reshape(points, (int(points.shape[0] / 6), 6))
-        lidar_data = np.array(points[:, :2])
-        lidar_data *= min(disp_size) / lidar_range
-        lidar_data += (0.5 * disp_size[0], 0.5 * disp_size[1])
-        lidar_data = np.fabs(lidar_data)  # pylint: disable=E1111
-        lidar_data = lidar_data.astype(np.int32)
-        lidar_data = np.reshape(lidar_data, (-1, 2))
-        lidar_img_size = (disp_size[0], disp_size[1], 3)
-        lidar_img = np.zeros((lidar_img_size), dtype=np.uint8)
-
-        lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
-
-        if self.display_man.render_enabled():
-            self.surface = pygame.surfarray.make_surface(lidar_img)
-
-        t_end = self.timer.time()
-        self.time_processing += (t_end-t_start)
-        self.tics_processing += 1
+        print("Semantic Lidar received")
 
     def save_radar_image(self, radar_data):
-        t_start = self.timer.time()
-        points = np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4'))
-        points = np.reshape(points, (len(radar_data), 4))
-
-        t_end = self.timer.time()
-        self.time_processing += (t_end-t_start)
-        self.tics_processing += 1
-
-    def render(self):
-        if self.surface is not None:
-            offset = self.display_man.get_display_offset(self.display_pos)
-            self.display_man.display.blit(self.surface, offset)
+        print("Radar received")
 
     def destroy(self):
         self.sensor.destroy()
@@ -285,7 +202,8 @@ def run_simulation(args, client):
 
         # Display Manager organize all the sensors an its display in a window
         # If can easily configure the grid and the total window size
-        display_manager = DisplayManager(grid_size=[2, 3], window_size=[args.width, args.height])
+        # display_manager = DisplayManager(grid_size=[2, 3], window_size=[args.width, args.height])
+        display_manager = None
 
         # Then, SensorManager can be used to spawn RGBCamera, LiDARs and SemanticLiDARs as needed
         # and assign each of them to a grid position, 
@@ -315,22 +233,22 @@ def run_simulation(args, client):
                 world.wait_for_tick()
 
             # Render received data
-            display_manager.render()
+            # display_manager.render()
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    call_exit = True
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == K_ESCAPE or event.key == K_q:
-                        call_exit = True
-                        break
+            # for event in pygame.event.get():
+            #     if event.type == pygame.QUIT:
+            #         call_exit = True
+            #     elif event.type == pygame.KEYDOWN:
+            #         if event.key == K_ESCAPE or event.key == K_q:
+            #             call_exit = True
+            #             break
 
-            if call_exit:
-                break
+            # if call_exit:
+            #     break
 
     finally:
-        if display_manager:
-            display_manager.destroy()
+        # if display_manager:
+            # display_manager.destroy()
 
         client.apply_batch([carla.command.DestroyActor(x) for x in vehicle_list])
 
