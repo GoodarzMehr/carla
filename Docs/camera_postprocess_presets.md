@@ -18,11 +18,11 @@ You can also create new post-process presets directly in the JSON files found in
 
 ## Using post-process presets for the RGB camera sensor
 
-Saved post-process presets can be loaded to modify the RGB camera sensor. When spawning a camera through the CARLA Python API, set the `post_process_profile` attribured of the camera blueprint to the name of the post-process preset you wish to use (the name of the JSON file minus the `.json` suffix):
+Saved post-process presets can be loaded to modify the RGB camera sensor. When spawning a camera in the simulation through the CARLA Python API, set the `post_process_profile` attribured of the camera blueprint to the name of the post-process preset you wish to use (the name of the JSON file minus the `.json` suffix):
 
 ```py
 camera_bp = bp_lib.find('sensor.camera.rgb')
 camera_bp.set_attribute('post_process_profile', 'GoPro')
-camera = world.spawn_actor(camera_bp, carla.Transform())
+camera = world.spawn_actor(camera_bp, carla.Transform(carla.location(0,0,1.5), carla.Rotation()))
 ```
 
