@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 rem BAT script that creates the client python api of LibCarla (carla.org).
 rem Run it through a cmd with the x64 Visual C++ Toolset enabled.
@@ -19,7 +19,7 @@ set "USAGE_STRING=Usage: %FILE_N% [-h^|--help] [--build-wheel] [--rebuild]  [--c
 
 set REMOVE_INTERMEDIATE=false
 set BUILD_PYTHONAPI=true
-set INSTALL_PYTHONPATH=true
+set INSTALL_PYTHONAPI=true
 
 :arg-parse
 if not "%1"=="" (
@@ -101,10 +101,12 @@ if %BUILD_PYTHONAPI%==true (
     set WHEEL_FILE=
     for %%f in (dist\.tmp\*.whl) do set WHEEL_FILE=%%f
 
-    if %BUILD_PYTHONAPI%==true (
-        python -m pip install --force-reinstall "%WHEEL_FILE%"
+    if %INSTALL_PYTHONAPI%==true (
+        python -m pip install --force-reinstall "!WHEEL_FILE!"
+    )
 
-    copy "%WHEEL_FILE%" dist
+    copy "!WHEEL_FILE!" dist
+    rmdir /s /q dist\.tmp
 
     if %errorlevel% neq 0 goto error_build_wheel
 )
