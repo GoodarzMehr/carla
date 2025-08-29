@@ -33,7 +33,7 @@ nav:
   - 'Blueprint library': 'bp_library.md'  
   - 'Tutorials': 'tutorials.md'
   - 'Downloads': 'download.md'
-  #- 'Extended documentation': 'ext_docs.md'
+  - 'Extended documentation': 'ext_docs.md'
 
 - CARLA Ecosystem:
   - 'MathWorks': 'large_map_roadrunner.md'
