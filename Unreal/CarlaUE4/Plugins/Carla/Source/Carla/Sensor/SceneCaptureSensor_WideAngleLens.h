@@ -222,6 +222,6 @@ protected:
   bool bRenderPerspective : 1;
   bool bRenderEquirectangular : 1;
   bool bFOVMaskEnable : 1;
-  bool bSelectiveRenderingEnabled : 1;
+  // bool bSelectiveRenderingEnabled : 1;
 
 };

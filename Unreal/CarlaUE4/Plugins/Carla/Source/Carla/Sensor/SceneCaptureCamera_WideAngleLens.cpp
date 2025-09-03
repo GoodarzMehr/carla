@@ -50,7 +50,7 @@ void ASceneCaptureCamera_WideAngleLens::EndPlay(const EEndPlayReason::Type EndPl
 void ASceneCaptureCamera_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick TickType, float DeltaSeconds)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureCamera_WideAngleLens::PostPhysTick);
-
+    /*
     ENQUEUE_RENDER_COMMAND(MeasureTime)([](auto& InRHICmdList)
     {
         std::chrono::time_point<std::chrono::high_resolution_clock> Time =
@@ -64,7 +64,7 @@ void ASceneCaptureCamera_WideAngleLens::PostPhysTick(UWorld* World, ELevelTick T
             FString::FromInt(Milliseconds);
         TRACE_CPUPROFILER_EVENT_SCOPE_TEXT(*ProfilerText);
     });
-
+    */
     FPixelReader::SendPixelsInRenderThread<ASceneCaptureCamera_WideAngleLens, FColor>(*this);
 }
 

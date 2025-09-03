@@ -814,37 +814,37 @@ namespace CameraModelUtil
 
 IMPLEMENT_SHADER_TYPE(,
     FWideAngleLensShader_Perspective,
-    TEXT("/Plugins/Carla/Shaders/Private/WideAngleLens.usf"),
+    TEXT("/Plugin/Carla/WideAngleLens.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FWideAngleLensShader_Stereographic,
-    TEXT("/Plugins/Carla/Shaders/Private/WideAngleLens.usf"),
+    TEXT("/Plugin/Carla/WideAngleLens.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FWideAngleLensShader_Equidistance,
-    TEXT("/Plugins/Carla/Shaders/Private/WideAngleLens.usf"),
+    TEXT("/Plugin/Carla/WideAngleLens.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FWideAngleLensShader_Equisolid,
-    TEXT("/Plugins/Carla/Shaders/Private/WideAngleLens.usf"),
+    TEXT("/Plugin/Carla/WideAngleLens.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FWideAngleLensShader_Orthogonal,
-    TEXT("/Plugins/Carla/Shaders/Private/WideAngleLens.usf"),
+    TEXT("/Plugin/Carla/WideAngleLens.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FWideAngleLensShader_Custom,
-    TEXT("/Plugins/Carla/Shaders/Private/WideAngleLens.usf"),
+    TEXT("/Plugin/Carla/WideAngleLens.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
@@ -852,36 +852,36 @@ IMPLEMENT_SHADER_TYPE(,
 
 IMPLEMENT_SHADER_TYPE(,
     FToPerspectiveShader_Perspective,
-    TEXT("/Plugins/Carla/Shaders/Private/ToPerspective.usf"),
+    TEXT("/Plugin/Carla/ToPerspective.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FToPerspectiveShader_Stereographic,
-    TEXT("/Plugins/Carla/Shaders/Private/ToPerspective.usf"),
+    TEXT("/Plugin/Carla/ToPerspective.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FToPerspectiveShader_Equidistance,
-    TEXT("/Plugins/Carla/Shaders/Private/ToPerspective.usf"),
+    TEXT("/Plugin/Carla/ToPerspective.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FToPerspectiveShader_Equisolid,
-    TEXT("/Plugins/Carla/Shaders/Private/ToPerspective.usf"),
+    TEXT("/Plugin/Carla/ToPerspective.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FToPerspectiveShader_Orthogonal,
-    TEXT("/Plugins/Carla/Shaders/Private/ToPerspective.usf"),
+    TEXT("/Plugin/Carla/ToPerspective.usf"),
     TEXT("MainCS"),
     SF_Compute);
 
 IMPLEMENT_SHADER_TYPE(,
     FToPerspectiveShader_Custom,
-    TEXT("/Plugins/Carla/Shaders/Private/ToPerspective.usf"),
+    TEXT("/Plugin/Carla/ToPerspective.usf"),
     TEXT("MainCS"),
     SF_Compute);
