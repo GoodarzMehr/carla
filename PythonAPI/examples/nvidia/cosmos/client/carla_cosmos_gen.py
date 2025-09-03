@@ -13,6 +13,7 @@ from typing import Dict, List, Sequence, Tuple
 from pathlib import Path
 import yaml
 import subprocess
+import time
 import numpy as np
 import cv2
 import carla
