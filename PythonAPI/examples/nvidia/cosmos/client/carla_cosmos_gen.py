@@ -1,5 +1,9 @@
-#!/usr/bin/env python3
+# SPDX-FileCopyrightText: © 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
 
+
+#!/usr/bin/env python3
 import argparse
 import multiprocessing as mp
 import logging
@@ -21,7 +25,6 @@ class AOV(Enum):
     SEMANTIC_SEGMENTATION = 2
     INSTANCE_SEGMENTATION = 3
     NORMALS = 4
-    COSMOS_VISUALIZATION = 5
 
 @dataclass
 class FrameBundle:
@@ -162,8 +165,7 @@ class SensorInfo:
     def _callback(self, data):
         conv_map = {
             AOV.RGB: carla.ColorConverter.Raw,
-            AOV.SEMANTIC_SEGMENTATION: carla.ColorConverter.CityScapesPalette,
-            AOV.COSMOS_VISUALIZATION: carla.ColorConverter.Raw
+            AOV.SEMANTIC_SEGMENTATION: carla.ColorConverter.CityScapesPalette
         }
         conv = conv_map.get(self.sensor_type, carla.ColorConverter.Raw)
         data.convert(conv)
@@ -209,8 +211,6 @@ def post_processing_worker(raw_q: mp.Queue, proc_q: mp.Queue):
             ids = reconstruct_ids_vectorized(frames[AOV.INSTANCE_SEGMENTATION])
             colored = apply_colormap_vectorized(ids, colormap_uint8)
             processed['INSTANCE_SEGMENTATION'] = colored
-        if AOV.COSMOS_VISUALIZATION in frames:
-            processed['HDMAP'] = frames[AOV.COSMOS_VISUALIZATION]
         proc_q.put((bundle.index, processed))
     logging.info(f"[{mp.current_process().name}] exiting")
 
@@ -246,9 +246,10 @@ def video_writer_worker(proc_q: mp.Queue, out_dir: Path, fps: float):
         w.release()
         tmp, final = paths[key]
         try:
-            subprocess.run(['ffmpeg', '-i', str(tmp), '-r', '24', '-c:v', 'libx264', 
-            '-y',  '-loglevel', 'error', str(final)], check=True, 
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['ffmpeg', '-i', str(tmp), '-vf', 'fps=24', '-vsync', 'cfr',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-frames:v', '120', '-y', '-loglevel', 
+            'error', str(final)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
         except subprocess.CalledProcessError as e:
             logging.error(f"FFmpeg failed for {key}: {e}")
         tmp.unlink(missing_ok=True)
@@ -319,11 +320,6 @@ def main():
             carla.Rotation(**tf.get('rotation',{}))
         )
         sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
-        
-        # If it's the cosmos visualization sensor, set it to ignore the ego vehicle
-        if entry['sensor'].upper() == 'COSMOS_VISUALIZATION':
-            sensor.set_ignored_vehicles([args.camera])  # Only this sensor ignores ego
-        
         sensor_infos.append(SensorInfo(sensor, AOV[entry['sensor'].upper()]))
 
     raw_q = mp.Queue()
