@@ -4,6 +4,7 @@
 
 #include "TaggedMaterials.generated.h"
 
+class UCarlaEpisode;
 
 UCLASS(BlueprintType)
 class CARLA_API UTaggedMaterialsRegistry : public UObject
