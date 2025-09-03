@@ -1,0 +1,25 @@
+{
+  "CosmosControlVisualization": {
+    "LineThickness": {
+      "default": 0.0,
+      "road_lines": 8.0,
+      "vehicle_boxes": 5.0,
+      "poles": 8.0,
+      "stop_lines": 8.0
+    },
+    "Colors": {
+      "lane_lines": [98, 183, 249],
+      "road_boundaries": [200, 36, 35],
+      "wait_lines": [185, 63, 34],
+      "crosswalks": [206, 131, 63],
+      "road_markings": [126, 204, 205],
+      "traffic_signs": [131, 175, 155],
+      "traffic_lights": [252, 157, 155],
+      "cars": [255, 0, 0],
+      "pedestrians": [0, 255, 0],
+      "poles": [66, 40, 144],
+      "trucks": [0, 0, 255],
+      "cyclists": [255, 255, 0]
+    }
+  }
+}

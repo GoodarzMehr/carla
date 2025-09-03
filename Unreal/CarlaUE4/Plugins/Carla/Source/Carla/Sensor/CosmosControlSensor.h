@@ -13,6 +13,7 @@
 #include "Components/LineBatchComponent.h"
 #include "Carla/Game/Tagger.h"
 #include "Carla/Sensor/UE4_Overridden/LineBatchComponent_CARLA.h"
+#include "Dom/JsonObject.h"
 #include "CosmosControlSensor.generated.h"
 
 /**
@@ -25,24 +26,33 @@ class CARLA_API ACosmosControlSensor : public AShaderBasedSensor
 
 public:
 
-  struct CosmosColors
+  struct CosmosRenderConfig
   {
-    static const FColor LaneLines;
-    static const FColor Lanes;
-    static const FColor Poles;
-    static const FColor RoadBoundaries;
-    static const FColor WaitLines;
-    static const FColor Crosswalks;
-    static const FColor RoadMarkings;
-    static const FColor TrafficSigns;
-    static const FColor TrafficLights;
-    static const FColor Cars;
-    static const FColor Pedestrians;
+    float RoadLineThickness = 8.0f;
+    float VehicleBoxThickness = 5.0f;
+    float PoleThickness = 8.0f;
+    float StopLineThickness = 8.0f;
+    
+    // Colors with defaults matching cosmos_writer
+    FColor LaneLinesColor = FColor(98, 183, 249, 255);
+    FColor RoadBoundariesColor = FColor(200, 36, 35, 255);
+    FColor WaitLinesColor = FColor(185, 63, 34, 255);
+    FColor CrosswalksColor = FColor(206, 131, 63, 255);
+    FColor RoadMarkingsColor = FColor(126, 204, 205, 255);
+    FColor TrafficSignsColor = FColor(131, 175, 155, 255);
+    FColor TrafficLightsColor = FColor(252, 157, 155, 255);
+    FColor CarsColor = FColor(255, 0, 0, 255);
+    FColor TrucksColor = FColor(0, 0, 255, 255);
+    FColor PedestriansColor = FColor(0, 255, 0, 255);
+    FColor CyclistsColor = FColor(255, 255, 0, 255);
+    FColor PolesColor = FColor(66, 40, 144, 255);
   };
 
 	static FActorDefinition GetSensorDefinition();
 
   ACosmosControlSensor(const FObjectInitializer& ObjectInitializer);
+  
+  virtual void Set(const FActorDescription &Description) override;
 
 protected:
 
@@ -65,12 +75,15 @@ protected:
 
 private:
   ULineBatchComponent_CARLA* GetDebugLineBatcher(bool bPersistentLines);
-  FColor GetColorByTag(carla::rpc::CityObjectLabel Tag, uint8 alpha = 255);
-
+  FColor GetColorByTag(carla::rpc::CityObjectLabel Tag);
+  void LoadConfigFromFile();
 
 private:
   bool added_persisted_stop_lines;
   bool added_persisted_route_lines;
   bool added_persisted_crosswalks;
   bool added_persisted_stencils;
+  
+  // Configuration for rendering parameters
+  CosmosRenderConfig RenderConfig;
 };

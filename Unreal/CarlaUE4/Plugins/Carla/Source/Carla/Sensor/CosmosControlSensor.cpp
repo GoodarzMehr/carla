@@ -7,6 +7,7 @@
 #include "Carla.h"
 #include "Carla/Sensor/CosmosControlSensor.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
+#include "Carla/Actor/ActorDefinition.h"
 
 #include "Carla/Sensor/PixelReader.h"
 
@@ -25,19 +26,11 @@
 #include "Carla/Actor/ActorRegistry.h"
 #include "Carla/Game/CarlaEpisode.h"
 #include "Engine/Public/ConvexVolume.h"
-
-const FColor ACosmosControlSensor::CosmosColors::LaneLines(98, 183, 249, 255);
-const FColor ACosmosControlSensor::CosmosColors::Lanes(56, 103, 221, 255);
-const FColor ACosmosControlSensor::CosmosColors::Poles(66, 40, 144, 255);
-const FColor ACosmosControlSensor::CosmosColors::RoadBoundaries(200, 36, 35, 255);
-const FColor ACosmosControlSensor::CosmosColors::WaitLines(185, 63, 34, 255);
-const FColor ACosmosControlSensor::CosmosColors::Crosswalks(206, 131, 63, 255);
-const FColor ACosmosControlSensor::CosmosColors::RoadMarkings(126, 204, 205, 255);
-const FColor ACosmosControlSensor::CosmosColors::TrafficSigns(131, 175, 155, 255);
-const FColor ACosmosControlSensor::CosmosColors::TrafficLights(252, 157, 155, 255);
-const FColor ACosmosControlSensor::CosmosColors::Cars(255, 0, 0, 255);
-const FColor ACosmosControlSensor::CosmosColors::Pedestrians(0, 255, 0, 255);
-
+#include "HAL/PlatformFilemanager.h"
+#include "Misc/FileHelper.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 FActorDefinition ACosmosControlSensor::GetSensorDefinition()
 {
@@ -61,6 +54,81 @@ ACosmosControlSensor::ACosmosControlSensor(
   PersistentLines->bOnlyOwnerSee = true;
 
   AddPostProcessingMaterial(TEXT("Material'/Carla/PostProcessingMaterials/CosmosLens.CosmosLens'"));
+}
+
+void ACosmosControlSensor::Set(const FActorDescription &Description)
+{
+  Super::Set(Description);
+  LoadConfigFromFile();
+}
+
+void ACosmosControlSensor::LoadConfigFromFile()
+{
+  // In packaged builds, FPaths::ProjectConfigDir() still points to the Config folder
+  // The packaging process preserves the Config directory structure
+  FString ConfigFilePath = FPaths::ProjectConfigDir() / TEXT("CosmosControlConfig.json");
+  
+  // Check if file exists
+  if (!FPaths::FileExists(ConfigFilePath))
+  {
+    UE_LOG(LogCarla, Log, TEXT("CosmosControlSensor: Config file not found at %s, using defaults"), *ConfigFilePath);
+    return;
+  }
+  
+  FString JsonString;
+  if (!FFileHelper::LoadFileToString(JsonString, *ConfigFilePath))
+  {
+    UE_LOG(LogCarla, Warning, TEXT("CosmosControlSensor: Failed to read config file, using defaults"));
+    return;
+  }
+  
+  TSharedPtr<FJsonObject> JsonObject;
+  TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+  
+  if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
+  {
+    UE_LOG(LogCarla, Warning, TEXT("CosmosControlSensor: Failed to parse config file"));
+    return;
+  }
+  
+  TSharedPtr<FJsonObject> Config = JsonObject->GetObjectField(TEXT("CosmosControlVisualization"));
+  if (!Config.IsValid()) return;
+  
+  // Load thickness values
+  if (auto Thickness = Config->GetObjectField(TEXT("LineThickness")))
+  {
+    RenderConfig.RoadLineThickness = Thickness->GetNumberField(TEXT("road_lines"));
+    RenderConfig.VehicleBoxThickness = Thickness->GetNumberField(TEXT("vehicle_boxes"));
+    RenderConfig.PoleThickness = Thickness->GetNumberField(TEXT("poles"));
+    RenderConfig.StopLineThickness = Thickness->GetNumberField(TEXT("stop_lines"));
+  }
+  
+  // Load color overrides
+  if (auto Colors = Config->GetObjectField(TEXT("Colors")))
+  {
+    auto LoadColor = [Colors](const FString& Key, FColor& Color) {
+      const TArray<TSharedPtr<FJsonValue>>* ColorArray;
+      if (Colors->TryGetArrayField(Key, ColorArray) && ColorArray->Num() == 3)
+      {
+        Color = FColor(
+          (*ColorArray)[0]->AsNumber(),
+          (*ColorArray)[1]->AsNumber(),
+          (*ColorArray)[2]->AsNumber(), 255);
+      }
+    };
+    
+    LoadColor(TEXT("lane_lines"), RenderConfig.LaneLinesColor);
+    LoadColor(TEXT("road_boundaries"), RenderConfig.RoadBoundariesColor);
+    LoadColor(TEXT("crosswalks"), RenderConfig.CrosswalksColor);
+    LoadColor(TEXT("road_markings"), RenderConfig.RoadMarkingsColor);
+    LoadColor(TEXT("traffic_signs"), RenderConfig.TrafficSignsColor);
+    LoadColor(TEXT("traffic_lights"), RenderConfig.TrafficLightsColor);
+    LoadColor(TEXT("cars"), RenderConfig.CarsColor);
+    LoadColor(TEXT("trucks"), RenderConfig.TrucksColor);
+    LoadColor(TEXT("pedestrians"), RenderConfig.PedestriansColor);
+    LoadColor(TEXT("cyclists"), RenderConfig.CyclistsColor);
+    LoadColor(TEXT("poles"), RenderConfig.PolesColor);
+  }
 }
 
 void ACosmosControlSensor::SetUpSceneCaptureComponent(USceneCaptureComponent2D &SceneCapture)
@@ -96,34 +164,29 @@ void ACosmosControlSensor::SetUpSceneCaptureComponent(USceneCaptureComponent2D &
   SceneCapture.ShowOnlyComponents.Emplace(PersistentLines);
 }
 
-FColor ACosmosControlSensor::GetColorByTag(carla::rpc::CityObjectLabel Tag, uint8 alpha)
+FColor ACosmosControlSensor::GetColorByTag(carla::rpc::CityObjectLabel Tag)
 {
-  FColor vis_color;
-
   switch (Tag) {
   case carla::rpc::CityObjectLabel::TrafficLight:
-    vis_color = CosmosColors::TrafficLights;
-    break;
+    return RenderConfig.TrafficLightsColor;
   case carla::rpc::CityObjectLabel::TrafficSigns:
-    vis_color = CosmosColors::TrafficSigns;
-    break;
+    return RenderConfig.TrafficSignsColor;
   case carla::rpc::CityObjectLabel::Poles:
-    vis_color = CosmosColors::Poles;
-    break;
+    return RenderConfig.PolesColor;
   case carla::rpc::CityObjectLabel::Car:
-  case carla::rpc::CityObjectLabel::Bicycle:
   case carla::rpc::CityObjectLabel::Bus:
   case carla::rpc::CityObjectLabel::Motorcycle:
   case carla::rpc::CityObjectLabel::Train:
+    return RenderConfig.CarsColor;
   case carla::rpc::CityObjectLabel::Truck:
-    vis_color = CosmosColors::Cars;
-    break;
+    return RenderConfig.TrucksColor;
+  case carla::rpc::CityObjectLabel::Bicycle:
+    return RenderConfig.CyclistsColor;
   case carla::rpc::CityObjectLabel::Pedestrians:
-    vis_color = CosmosColors::Pedestrians;
-    break;
+    return RenderConfig.PedestriansColor;
+  default:
+    return FColor::White;
   }
-
-  return vis_color.WithAlpha(alpha);
 }
 
 void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaSeconds)
@@ -133,8 +196,6 @@ void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, floa
   DynamicLines->Flush();
 
   int depth_prio = ESceneDepthPriorityGroup::SDPG_World;
-  int dist_alpha = CosmosColors::RoadBoundaries.A;
-  float cutoff_dist = 3000.0f;
   ACarlaGameModeBase* carla_game_mode = Cast<ACarlaGameModeBase>(World->GetAuthGameMode());
   auto* GameInstance = UCarlaStatics::GetGameInstance(World);
 
@@ -209,7 +270,7 @@ void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, floa
       }
     }
 
-    FColor vis_color = GetColorByTag(Tag, dist_alpha);
+    FColor vis_color = GetColorByTag(Tag);
 
     if (Tag == carla::rpc::CityObjectLabel::TrafficLight || Tag == carla::rpc::CityObjectLabel::TrafficSigns)
     {
@@ -223,16 +284,13 @@ void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, floa
       Tag == carla::rpc::CityObjectLabel::Train ||
       Tag == carla::rpc::CityObjectLabel::Truck)
     {
-      DrawDebugBox(World, bounds.Origin, bounds.BoxExtent, mesh_component->GetOwner()->GetActorRotation().Quaternion(), vis_color, false, -1, depth_prio, 10);
+      DrawDebugBox(World, bounds.Origin, bounds.BoxExtent, mesh_component->GetOwner()->GetActorRotation().Quaternion(), vis_color, false, -1, depth_prio, RenderConfig.VehicleBoxThickness);
     }
     else if (Tag == carla::rpc::CityObjectLabel::Poles)
     {
-      //Filtering out horizontal poles
-      //if (/*fmax(bounds.BoxExtent.X, bounds.BoxExtent.Y) > bounds.BoxExtent.Z && */!static_mesh_comp->GetStaticMesh()->GetFName().ToString().Contains("pole")) continue;
-      
       float half_height = fmax(bounds.BoxExtent.Z, box_extent.Z);
       float distance_to_road = mesh_component->GetComponentLocation().Z;
-      DrawDebugCapsule(World, mesh_component->GetComponentLocation() + FVector(0.0f, 0.0f, half_height), half_height + (distance_to_road > 250.0f ? 0.0f : distance_to_road), 0.1f, FQuat::Identity, vis_color, false, -1, depth_prio, 10);
+      DrawDebugCapsule(World, mesh_component->GetComponentLocation() + FVector(0.0f, 0.0f, half_height), half_height + (distance_to_road > 250.0f ? 0.0f : distance_to_road), 0.1f, FQuat::Identity, vis_color, false, -1, depth_prio, RenderConfig.PoleThickness);
     }
   }
 
@@ -246,11 +304,14 @@ void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, floa
     for (AActor* traffic_light : TrafficLights)
     {
       UBoxComponent* stop_box_collider = Cast<UBoxComponent>(traffic_light->GetComponentByClass(UBoxComponent::StaticClass()));
-      FVector ground_pos = FVector(stop_box_collider->GetComponentLocation().X, stop_box_collider->GetComponentLocation().Y, 0.0f);
-      DrawDebugLine(World,
-        ground_pos + -stop_box_collider->GetScaledBoxExtent().X * stop_box_collider->GetForwardVector() - 710.0f * stop_box_collider->GetRightVector(),
-        ground_pos + stop_box_collider->GetScaledBoxExtent().X * stop_box_collider->GetForwardVector() - 710.0f * stop_box_collider->GetRightVector(),
-        CosmosColors::WaitLines.WithAlpha(dist_alpha), true, -1, depth_prio, 10);
+      float stopLineOffset = RenderConfig.StopLineThickness * 0.5f + 2.0f; // Half thickness plus small buffer
+      FVector base_pos = FVector(stop_box_collider->GetComponentLocation().X, stop_box_collider->GetComponentLocation().Y, -stopLineOffset);
+      
+      FVector line_start = base_pos + -stop_box_collider->GetScaledBoxExtent().X * stop_box_collider->GetForwardVector() - 710.0f * stop_box_collider->GetRightVector();
+      FVector line_end = base_pos + stop_box_collider->GetScaledBoxExtent().X * stop_box_collider->GetForwardVector() - 710.0f * stop_box_collider->GetRightVector();
+      
+      DrawDebugLine(World, line_start, line_end, RenderConfig.WaitLinesColor, true, -1, depth_prio, RenderConfig.StopLineThickness);
+      
     }
   }
 
@@ -276,17 +337,24 @@ void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, floa
 
     auto DrawSpline = [&](ARoadSpline* spline)
     {
-      for (int i = 0, lenNumPoints = spline->SplineComponent->GetNumberOfSplinePoints() - 1; i < lenNumPoints; ++i)
+      int numPoints = spline->SplineComponent->GetNumberOfSplinePoints();
+      if (numPoints < 2) return;
+      
+      float offset = RenderConfig.RoadLineThickness;
+      FColor lineColor = spline->BoundaryType != ERoadSplineBoundaryType::Driving ?
+        RenderConfig.RoadBoundariesColor : 
+        RenderConfig.LaneLinesColor;
+      
+      for (int i = 0; i < numPoints - 1; ++i)
       {
-        const FVector p0 = spline->SplineComponent->GetLocationAtSplinePoint(i + 0, ESplineCoordinateSpace::World);
-        const FVector p1 = spline->SplineComponent->GetLocationAtSplinePoint(i + 1, ESplineCoordinateSpace::World);
+        FVector p0 = spline->SplineComponent->GetLocationAtSplinePoint(i + 0, ESplineCoordinateSpace::World);
+        FVector p1 = spline->SplineComponent->GetLocationAtSplinePoint(i + 1, ESplineCoordinateSpace::World);
+        p0.Z -= offset;
+        p1.Z -= offset;
 
-        const float Dist = (float)i / (float)lenNumPoints;
-        FColor debug_color = spline->BoundaryType != ERoadSplineBoundaryType::Driving ?
-          CosmosColors::RoadBoundaries.WithAlpha(dist_alpha) : CosmosColors::LaneLines.WithAlpha(dist_alpha);
-
-        DrawDebugLine(World, p0, p1, debug_color, true, -1.f, depth_prio, 5.0f);
+        DrawDebugLine(World, p0, p1, lineColor, true, -1.f, depth_prio, RenderConfig.RoadLineThickness);
       }
+      
     };
 
     for (TPair<int32, TArray<ARoadSpline*>> splines_pair : SplinesByRoadId)
@@ -414,7 +482,7 @@ void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, floa
               mesh_indices.Add(j + 1);
             }
             
-            DrawDebugMesh(World, mesh_vertices, mesh_indices, CosmosColors::Crosswalks.WithAlpha(dist_alpha), true, -1.0f, depth_prio);
+            DrawDebugMesh(World, mesh_vertices, mesh_indices, RenderConfig.CrosswalksColor, true, -1.0f, depth_prio);
             
             // for (int j = 0; j < current_polygon.Num(); ++j)
             // {
@@ -472,7 +540,7 @@ void ACosmosControlSensor::PostPhysTick(UWorld *World, ELevelTick TickType, floa
         0, 2, 3
       };
 
-      DrawDebugMesh(World, mesh_vertices, mesh_indices, CosmosColors::RoadMarkings.WithAlpha(dist_alpha), true, -1.0f, depth_prio);
+      DrawDebugMesh(World, mesh_vertices, mesh_indices, RenderConfig.RoadMarkingsColor, true, -1.0f, depth_prio);
     }
   }
 
