@@ -36,8 +36,6 @@ Use ARROWS or WASD keys for control.
     C            : change weather (Shift+C reverse)
     Backspace    : change vehicle
 
-    U            : next gbuffer
-
     O            : open/close all doors of vehicle
     T            : toggle vehicle's telemetry
 
@@ -131,7 +129,6 @@ try:
     from pygame.locals import K_r
     from pygame.locals import K_s
     from pygame.locals import K_t
-    from pygame.locals import K_u
     from pygame.locals import K_v
     from pygame.locals import K_w
     from pygame.locals import K_x
@@ -145,27 +142,6 @@ try:
     import numpy as np
 except ImportError:
     raise RuntimeError('cannot import numpy, make sure numpy package is installed')
-
-# Warmup frames for FPS statistics
-warmup_frames = 50
-
-gbuffer_names = [
-    'Final Color', # Image received using the regular `listen` method.
-    'Scene Color',
-    'Scene Depth',
-    'Scene Stencil',
-    'GBuffer A - WorldNormal + Object data',
-    'GBuffer B - HDR + Shading model + selective output mask',
-    'GBuffer C - Diffuse + indirect irradiance or ambient occlusion (depending on selective output mask)',
-    'GBuffer D - Material shading model info',
-    'GBuffer E - Precomputed shadow factor',
-    'GBuffer F - World tangent + anisotropy',
-    'Velocity',
-    'Screen-Space Ambient Occlusion',
-    'Custom Depth',
-    'Custom Stencil'
-]
-
 
 
 # ==============================================================================
@@ -198,7 +174,7 @@ def get_actor_blueprints(world, filter, generation):
     try:
         int_generation = int(generation)
         # Check if generation is in available generations
-        if int_generation in [1, 2]:
+        if int_generation in [1, 2, 3]:
             bps = [x for x in bps if int(x.get_attribute('generation')) == int_generation]
             return bps
         else:
@@ -246,7 +222,6 @@ class World(object):
         self._longitude_shift = args.longitude_shift
         self._fov_mask = args.fov_mask
         self._fov_fade_size = args.fov_fade_size
-        self._sensor_type = args.sensor_type
         self._kannala_brandt_params = [args.k0, args.k1, args.k2, args.k3]
         self.restart()
         self.world.on_tick(hud.on_world_tick)
@@ -274,7 +249,7 @@ class World(object):
         self.player_max_speed = 1.589
         self.player_max_speed_fast = 3.713
         # Keep same camera config if the camera manager exists.
-        cam_index = self.camera_manager.index if self.camera_manager is not None else self._sensor_type
+        cam_index = self.camera_manager.index if self.camera_manager is not None else 0
         cam_pos_index = self.camera_manager.transform_index if self.camera_manager is not None else 0
         # Get a random blueprint.
         blueprint_list = get_actor_blueprints(self.world, self._actor_filter, self._actor_generation)
@@ -282,6 +257,8 @@ class World(object):
             raise ValueError("Couldn't find any blueprints with the specified filters")
         blueprint = random.choice(blueprint_list)
         blueprint.set_attribute('role_name', self.actor_role_name)
+        if blueprint.has_attribute('terramechanics'):
+            blueprint.set_attribute('terramechanics', 'true')
         if blueprint.has_attribute('color'):
             color = random.choice(blueprint.get_attribute('color').recommended_values)
             blueprint.set_attribute('color', color)
@@ -323,7 +300,7 @@ class World(object):
         self.camera_manager = CameraManager(
             self.player, self.hud, self._gamma, self._fov, self._model,
             self._equirectangular, self._perspective, self._fov_mask, self._fov_fade_size,
-            self._longitude_shift, self._sensor_type, self._kannala_brandt_params)
+            self._longitude_shift, self._kannala_brandt_params)
         self.camera_manager.transform_index = cam_pos_index
         self.camera_manager.set_sensor(cam_index, notify=False)
         actor_type = get_actor_display_name(self.player)
@@ -412,7 +389,6 @@ class KeyboardControl(object):
         self._autopilot_enabled = start_in_autopilot
         self._ackermann_enabled = False
         self._ackermann_reverse = 1
-        
         if isinstance(world.player, carla.Vehicle):
             self._control = carla.VehicleControl()
             self._ackermann_control = carla.VehicleAckermannControl()
@@ -501,9 +477,6 @@ class KeyboardControl(object):
                             world.hud.notification("Enabled Vehicle Telemetry")
                         except Exception:
                             pass
-                elif event.key == K_u:
-                    if world.camera_manager.next_gbuffer():
-                        world.hud.notification(gbuffer_names[world.camera_manager.output_texture_id])
                 elif event.key > K_0 and event.key <= K_9:
                     index_ctrl = 0
                     if pygame.key.get_mods() & KMOD_CTRL:
@@ -517,7 +490,7 @@ class KeyboardControl(object):
                         world.recording_enabled = False
                         world.hud.notification("Recorder is OFF")
                     else:
-                        client.start_recorder("manual_recording.rec")
+                        client.start_recorder("manual_recording.log")
                         world.recording_enabled = True
                         world.hud.notification("Recorder is ON")
                 elif event.key == K_p and (pygame.key.get_mods() & KMOD_CTRL):
@@ -530,9 +503,9 @@ class KeyboardControl(object):
                     # disable autopilot
                     self._autopilot_enabled = False
                     world.player.set_autopilot(self._autopilot_enabled)
-                    world.hud.notification("Replaying file 'manual_recording.rec'")
+                    world.hud.notification("Replaying file 'manual_recording.log'")
                     # replayer
-                    client.replay_file("manual_recording.rec", world.recording_start, 0, 0)
+                    client.replay_file("manual_recording.log", world.recording_start, 0, 0)
                     world.camera_manager.set_sensor(current_index)
                 elif event.key == K_MINUS and (pygame.key.get_mods() & KMOD_CTRL):
                     if pygame.key.get_mods() & KMOD_SHIFT:
@@ -638,7 +611,7 @@ class KeyboardControl(object):
     def _parse_vehicle_keys(self, keys, milliseconds):
         if keys[K_UP] or keys[K_w]:
             if not self._ackermann_enabled:
-                self._control.throttle = min(self._control.throttle + 0.01, 1.00)
+                self._control.throttle = min(self._control.throttle + 0.1, 1.00)
             else:
                 self._ackermann_control.speed += round(milliseconds * 0.005, 2) * self._ackermann_reverse
         else:
@@ -719,12 +692,9 @@ class HUD(object):
         self._show_info = True
         self._info_text = []
         self._server_clock = pygame.time.Clock()
+
         self._show_ackermann_info = False
         self._ackermann_control = carla.VehicleAckermannControl()
-        self._frame_index = 0
-        self._fps_max = 0.0
-        self._fps_min = 10.0**100
-        self._fps_sum = 0.0
 
     def on_world_tick(self, timestamp):
         self._server_clock.tick()
@@ -749,13 +719,6 @@ class HUD(object):
         max_col = max(1.0, max(collision))
         collision = [x / max_col for x in collision]
         vehicles = world.world.get_actors().filter('vehicle.*')
-        
-        self._frame_index = self._frame_index + 1
-        if self._frame_index > warmup_frames: # Warmup frame count.
-            self._fps_max = max(self._fps_max, self.server_fps)
-            self._fps_min = min(self._fps_min, self.server_fps)
-            self._fps_sum += self.server_fps
-
         self._info_text = [
             'Server:  % 16.0f FPS' % self.server_fps,
             'Client:  % 16.0f FPS' % clock.get_fps(),
@@ -1132,18 +1095,16 @@ class RadarSensor(object):
 class CameraManager(object):
     def __init__(self, parent_actor, hud, gamma_correction,
                  fov, model, equirectangular, perspective, fov_mask, fov_fade_size,
-                 longitude_shift, sensor_type, kannala_brandt_params):
+                 longitude_shift, kannala_brandt_params):
         self.sensor = None
         self.surface = None
         self._parent = parent_actor
         self.hud = hud
         self.recording = False
-        self.output_texture_id = 0
         bound_x = 0.5 + self._parent.bounding_box.extent.x
         bound_y = 0.5 + self._parent.bounding_box.extent.y
         bound_z = 0.5 + self._parent.bounding_box.extent.z
         Attachment = carla.AttachmentType
-        k0, k1, k2, k3 = kannala_brandt_params
 
         if not self._parent.type_id.startswith("walker.pedestrian"):
             self._camera_transforms = [
@@ -1170,6 +1131,25 @@ class CameraManager(object):
             ['sensor.camera.semantic_segmentation.wide_angle_lens', cc.CityScapesPalette, 'Camera Semantic Segmentation (CityScapes Palette, Wide Angle Lens)', {}],
             ['sensor.camera.instance_segmentation.wide_angle_lens', cc.CityScapesPalette, 'Camera Instance Segmentation (CityScapes Palette, Wide Angle Lens)', {}],
             ['sensor.camera.instance_segmentation.wide_angle_lens', cc.Raw, 'Camera Instance Segmentation (Raw, Wide Angle Lens)', {}],
+
+            # ['sensor.camera.rgb', cc.Raw, 'Camera RGB', {}],
+            # ['sensor.camera.depth', cc.Raw, 'Camera Depth (Raw)', {}],
+            # ['sensor.camera.depth', cc.Depth, 'Camera Depth (Gray Scale)', {}],
+            # ['sensor.camera.depth', cc.LogarithmicDepth, 'Camera Depth (Logarithmic Gray Scale)', {}],
+            # ['sensor.camera.semantic_segmentation', cc.Raw, 'Camera Semantic Segmentation (Raw)', {}],
+            # ['sensor.camera.semantic_segmentation', cc.CityScapesPalette, 'Camera Semantic Segmentation (CityScapes Palette)', {}],
+            # ['sensor.camera.instance_segmentation', cc.CityScapesPalette, 'Camera Instance Segmentation (CityScapes Palette)', {}],
+            # ['sensor.camera.instance_segmentation', cc.Raw, 'Camera Instance Segmentation (Raw)', {}],
+            # ['sensor.camera.cosmos_visualization', cc.Raw, 'Cosmos Control Visualization', {}],
+            # ['sensor.lidar.ray_cast', None, 'Lidar (Ray-Cast)', {'range': '50'}],
+            # ['sensor.camera.dvs', cc.Raw, 'Dynamic Vision Sensor', {}],
+            # ['sensor.camera.rgb', cc.Raw, 'Camera RGB Distorted',
+            #     {'lens_circle_multiplier': '3.0',
+            #     'lens_circle_falloff': '3.0',
+            #     'chromatic_aberration_intensity': '0.5',
+            #     'chromatic_aberration_offset': '0'}],
+            # ['sensor.camera.optical_flow', cc.Raw, 'Optical Flow', {}],
+            # ['sensor.camera.normals', cc.Raw, 'Camera Normals', {}],
         ]
         world = self._parent.get_world()
         bp_library = world.get_blueprint_library()
@@ -1195,14 +1175,10 @@ class CameraManager(object):
                         bp.set_attribute('fov_fade_size', str(fov_fade_size))
                     if bp.has_attribute('longitude_offset'):
                         bp.set_attribute('longitude_offset', str(longitude_shift))
-                    if bp.has_attribute('k0'):
-                        bp.set_attribute('k0', str(k0))
-                    if bp.has_attribute('k1'):
-                        bp.set_attribute('k1', str(k1))
-                    if bp.has_attribute('k2'):
-                        bp.set_attribute('k2', str(k2))
-                    if bp.has_attribute('k3'):
-                        bp.set_attribute('k3', str(k3))
+                    for i in range(len(kannala_brandt_params)):
+                        name = f'k{i}'
+                        if bp.has_attribute(name):
+                            bp.set_attribute(name, str(kannala_brandt_params[i]))
                 for attr_name, attr_value in item[3].items():
                     bp.set_attribute(attr_name, attr_value)
             elif item[0].startswith('sensor.lidar'):
@@ -1221,7 +1197,6 @@ class CameraManager(object):
         self.set_sensor(self.index, notify=False, force_respawn=True)
 
     def set_sensor(self, index, notify=True, force_respawn=False):
-        self.output_texture_id = 0
         index = index % len(self.sensors)
         needs_respawn = True if self.index is None else \
             (force_respawn or (self.sensors[index][2] != self.sensors[self.index][2]))
@@ -1237,37 +1212,13 @@ class CameraManager(object):
             # We need to pass the lambda a weak reference to self to avoid
             # circular reference.
             weak_self = weakref.ref(self)
-            self.sensor.listen(
-                lambda image:
-                    CameraManager._parse_image(weak_self, image))
+            self.sensor.listen(lambda image: CameraManager._parse_image(weak_self, image))
         if notify:
             self.hud.notification(self.sensors[index][2])
         self.index = index
 
     def next_sensor(self):
         self.set_sensor(self.index + 1)
-    
-    def set_gbuffer(self, index):
-        weak_self = weakref.ref(self)
-        name = self.sensors[self.index][0]
-        if name != 'sensor.camera.rgb':
-            self.hud.notification('ERROR: Unsupported operation, see log for more info.')
-            print('ERROR: GBuffer methods are not available for the current sensor type"%s". Only "sensor.camera.rgb" is currently supported.' % name)
-            return False
-        if self.output_texture_id != 0:
-            self.sensor.stop_gbuffer(self.output_texture_id - 1)
-        self.output_texture_id = index % len(gbuffer_names)
-        adjusted_index = self.output_texture_id - 1
-        if self.output_texture_id != 0:
-            if not self.sensor.is_listening_gbuffer(adjusted_index):
-                self.sensor.listen_to_gbuffer(
-                    adjusted_index,
-                    lambda image, index = self.output_texture_id:
-                        CameraManager._parse_image(weak_self, image, index))
-        return True
-
-    def next_gbuffer(self):
-        return self.set_gbuffer(self.output_texture_id + 1)
 
     def toggle_recording(self):
         self.recording = not self.recording
@@ -1278,7 +1229,7 @@ class CameraManager(object):
             display.blit(self.surface, (0, 0))
 
     @staticmethod
-    def _parse_image(weak_self, image, index = 0):
+    def _parse_image(weak_self, image):
         self = weak_self()
         if not self:
             return
@@ -1312,8 +1263,6 @@ class CameraManager(object):
             array = array[:, :, ::-1]
             self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
         else:
-            if self.output_texture_id != index:
-                return
             image.convert(self.sensors[self.index][1])
             array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
             array = np.reshape(array, (image.height, image.width, 4))
@@ -1337,7 +1286,7 @@ def game_loop(args):
 
     try:
         client = carla.Client(args.host, args.port)
-        client.set_timeout(20.0)
+        client.set_timeout(2000.0)
 
         sim_world = client.get_world()
         if args.sync:
@@ -1382,13 +1331,6 @@ def game_loop(args):
             pygame.display.flip()
 
     finally:
-
-        print(
-            'Framerate stats:\n'+
-            'FPS Avg: {:.1f}\n'.format(hud._fps_sum / (hud._frame_index-warmup_frames))+
-            'FPS Min: {:.1f}\n'.format(hud._fps_min)+
-            'FPS Max: {:.1f}\n'.format(hud._fps_max)+
-            'Frame Count: {:d}\n'.format(hud._frame_index))
 
         if original_settings:
             sim_world.apply_settings(original_settings)
@@ -1468,10 +1410,6 @@ def main():
         '--longitude_shift',
         default=0.0,
         type=float)
-    argparser.add_argument(
-        '--sensor_type',
-        default=0,
-        type=int)
     argparser.add_argument(
         '--fov_fade_size',
         default=0.0,
