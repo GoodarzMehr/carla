@@ -33,6 +33,13 @@ static TAutoConsoleVariable<int32> CVarWideAngleSensorDumpAllFramesCubemap(
     TEXT("0: Disabled\n")
     TEXT("1: Enabled\n"));
 
+static TAutoConsoleVariable<int32> CVarWideAngleSensorSkipVFTR(
+    TEXT("Carla.WideAngleLens.SkipVFTR"),
+    0,
+    TEXT("If enabled, *_WideAngleLens sensors do not toggle r.VolumetricFog.TemporalReprojection when rendering.\n")
+    TEXT("0: Disabled\n")
+    TEXT("1: Enabled\n"));
+
 static auto WIDE_ANGLE_LENS_SENSOR_COUNTER_COUNTER = 0u;
 
 // =============================================================================
@@ -457,8 +464,13 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended);
 
-    FlushRenderingCommands();
-    GEngine->Exec(GetWorld(), TEXT("r.VolumetricFog.TemporalReprojection 0"));
+    bool SkipVFTR = CVarWideAngleSensorSkipVFTR.GetValueOnAnyThread();
+
+    if (!SkipVFTR)
+    {
+        FlushRenderingCommands();
+        GEngine->Exec(GetWorld(), TEXT("r.VolumetricFog.TemporalReprojection 0"));
+    }
 
     for (uint8 i = 0; i < 6; ++i)
         if (CubemapRenderMask & (1U << i))
@@ -549,8 +561,11 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
         ++FrameCounter;
     }
     
-    FlushRenderingCommands();
-    GEngine->Exec(GetWorld(), TEXT("r.VolumetricFog.TemporalReprojection 1"));
+    if (!SkipVFTR)
+    {
+        FlushRenderingCommands();
+        GEngine->Exec(GetWorld(), TEXT("r.VolumetricFog.TemporalReprojection 1"));
+    }
 }
 
 void ASceneCaptureSensor_WideAngleLens::BeginPlay()
