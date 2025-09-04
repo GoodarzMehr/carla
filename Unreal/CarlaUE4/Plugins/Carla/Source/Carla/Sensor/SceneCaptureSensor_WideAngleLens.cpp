@@ -457,6 +457,9 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended);
 
+    FlushRenderingCommands();
+    GEngine->Exec(world, TEXT("r.VolumetricFog.TemporalReprojection 0"));
+
     for (uint8 i = 0; i < 6; ++i)
         if (CubemapRenderMask & (1U << i))
             FaceCaptures[i]->CaptureScene();
@@ -545,6 +548,9 @@ void ASceneCaptureSensor_WideAngleLens::CaptureSceneExtended()
 
         ++FrameCounter;
     }
+    
+    FlushRenderingCommands();
+    GEngine->Exec(world, TEXT("r.VolumetricFog.TemporalReprojection 1"));
 }
 
 void ASceneCaptureSensor_WideAngleLens::BeginPlay()
