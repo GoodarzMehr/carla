@@ -1,4 +1,6 @@
-#include "TaggedMaterials.h"
+#include "Carla/Game/TaggedMaterials.h"
+#include "Carla/Game/CarlaEpisode.h"
+
 #include "ConstructorHelpers.h"
 #include "Interfaces/IPluginManager.h"
 #include "HAL/FileManager.h"
