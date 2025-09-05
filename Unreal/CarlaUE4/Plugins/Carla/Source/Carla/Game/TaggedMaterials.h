@@ -5,6 +5,10 @@
 #include "TaggedMaterials.generated.h"
 
 class UCarlaEpisode;
+class UMaterial;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
+class UMaterialExpression;
 
 UCLASS(BlueprintType)
 class CARLA_API UTaggedMaterialsRegistry : public UObject
