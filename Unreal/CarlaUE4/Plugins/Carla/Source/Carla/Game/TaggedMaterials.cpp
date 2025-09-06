@@ -3,13 +3,9 @@
 
 #include "ConstructorHelpers.h"
 #include "Interfaces/IPluginManager.h"
-#include "AssetRegistryModule.h"
 #include "HAL/FileManager.h"
 
-#include "Materials/MaterialInstance.h"
-#include "Materials/MaterialInstanceDynamic.h"
-#include "Materials/MaterialInstanceConstant.h"
-
+#include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionSetMaterialAttributes.h"
 #include "Materials/MaterialExpressionMakeMaterialAttributes.h"
