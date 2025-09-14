@@ -39,7 +39,18 @@ void LocalizationStage::Update(const unsigned long index) {
   const cg::Location vehicle_location = simulation_state.GetLocation(actor_id);
   const cg::Vector3D heading_vector = simulation_state.GetHeading(actor_id);
   const cg::Vector3D vehicle_velocity_vector = simulation_state.GetVelocity(actor_id);
+  const cg::Vector3D vehicle_acceleration_vector = simulation_state.GetAcceleration(actor_id);
+  
   const float vehicle_speed = vehicle_velocity_vector.Length();
+  const float vehicle_acceleration_magnitude = vehicle_acceleration_vector.Length();
+  
+  const float speed_limit = simulation_state.GetSpeedLimit(actor_id);
+
+  const float acceleration_sign = (cg::Math::Dot(heading_vector, vehicle_acceleration_vector) >= 0.0f) ? 1.0f : -1.0f;
+  
+  const float vehicle_acceleration = acceleration_sign * vehicle_acceleration_magnitude;
+
+  const CollisionState collision_state = simulation_state.GetImpendingCollision(actor_id);
 
   // Speed dependent waypoint horizon length.
   float horizon_length = std::max(vehicle_speed * HORIZON_RATE, MINIMUM_HORIZON_LENGTH);
@@ -112,11 +123,12 @@ void LocalizationStage::Update(const unsigned long index) {
 
   // Assign a lane change.
   const ChangeLaneInfo lane_change_info = parameters.GetForceLaneChange(actor_id);
+  
   bool force_lane_change = lane_change_info.change_lane;
   bool lane_change_direction = lane_change_info.direction;
 
   // Apply parameters for keep right rule and random lane changes.
-  if (!force_lane_change && vehicle_speed > MIN_LANE_CHANGE_SPEED){
+  if (!force_lane_change && (vehicle_speed > MIN_LANE_CHANGE_SPEED || vehicle_acceleration > 0.1f)) {
     const float perc_keep_right = parameters.GetKeepRightPercentage(actor_id);
     const float perc_random_leftlanechange = parameters.GetRandomLeftLaneChangePercentage(actor_id);
     const float perc_random_rightlanechange = parameters.GetRandomRightLaneChangePercentage(actor_id);
@@ -138,6 +150,28 @@ void LocalizationStage::Update(const unsigned long index) {
         lane_change_direction = FIFTYPERC > random_device.next();
       }
     }
+    if (collision_state.impending_prop_collision)
+    {
+      force_lane_change = true;
+      
+      const Buffer &waypoint_buffer = buffer_map.at(actor_id);
+
+      if (!waypoint_buffer.empty()) {
+        const SimpleWaypointPtr &current_waypoint = waypoint_buffer.front();
+        const SimpleWaypointPtr left_waypoint = current_waypoint->GetLeftWaypoint();
+        const SimpleWaypointPtr right_waypoint = current_waypoint->GetRightWaypoint();
+
+        if (left_waypoint != nullptr &&
+          track_traffic.GetPassingVehicles(left_waypoint->GetId()).size() == 0) {
+            lane_change_direction = false;
+        } else if (right_waypoint != nullptr &&
+          track_traffic.GetPassingVehicles(right_waypoint->GetId()).size() == 0) {
+            lane_change_direction = true;
+        } else {
+          force_lane_change = false;
+        }
+      }
+    }
   }
 
   const SimpleWaypointPtr front_waypoint = waypoint_buffer.front();
@@ -151,6 +185,7 @@ void LocalizationStage::Update(const unsigned long index) {
     if (done_with_previous_lane_change) last_lane_change_swpt.erase(actor_id);
   }
   bool auto_or_force_lane_change = parameters.GetAutoLaneChange(actor_id) || force_lane_change;
+
   bool front_waypoint_not_junction = !front_waypoint->CheckJunction();
 
   if (auto_or_force_lane_change

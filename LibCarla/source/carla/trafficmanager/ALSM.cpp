@@ -201,6 +201,8 @@ void ALSM::UpdateData(const bool hybrid_physics_mode, const Actor &vehicle,
   cg::Location vehicle_location = vehicle_transform.location;
   cg::Rotation vehicle_rotation = vehicle_transform.rotation;
   cg::Vector3D vehicle_velocity = vehicle->GetVelocity();
+  cg::Vector3D vehicle_acceleration = vehicle->GetAcceleration();
+  
   bool state_entry_present = simulation_state.ContainsActor(actor_id);
 
   // Initializing idle times.
@@ -246,9 +248,17 @@ void ALSM::UpdateData(const bool hybrid_physics_mode, const Actor &vehicle,
 
   // Updated kinematic state object.
   auto vehicle_ptr = boost::static_pointer_cast<cc::Vehicle>(vehicle);
-  KinematicState kinematic_state{vehicle_location, vehicle_rotation,
-                                  vehicle_velocity, vehicle_ptr->GetSpeedLimit(),
-                                  enable_physics, vehicle->IsDormant(), cg::Location()};
+  
+  KinematicState kinematic_state{
+    vehicle_location,
+    vehicle_rotation,
+    vehicle_velocity,
+    vehicle_acceleration,
+    vehicle_ptr->GetSpeedLimit(),
+    enable_physics,
+    vehicle->IsDormant(),
+    cg::Location()
+  };
 
   // Updated traffic light state object.
   TrafficLightState tl_state = {vehicle_ptr->GetTrafficLightState(), vehicle_ptr->IsAtTrafficLight()};
@@ -260,9 +270,10 @@ void ALSM::UpdateData(const bool hybrid_physics_mode, const Actor &vehicle,
   }
   else {
     cg::Vector3D dimensions = vehicle_ptr->GetBoundingBox().extent;
-    StaticAttributes attributes{ActorType::Vehicle, dimensions.x, dimensions.y, dimensions.z};
+    StaticAttributes attributes {ActorType::Vehicle, dimensions.x, dimensions.y, dimensions.z};
+    CollisionState collision_state {false, false, false, -1.0f};
 
-    simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
+    simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state, collision_state);
   }
 }
 
@@ -278,8 +289,20 @@ void ALSM::UpdateUnregisteredActorsData() {
     const cg::Location actor_location = actor_transform.location;
     const cg::Rotation actor_rotation = actor_transform.rotation;
     const cg::Vector3D actor_velocity = actor_ptr->GetVelocity();
+    const cg::Vector3D actor_acceleration = actor_ptr->GetAcceleration();
+    
     const bool actor_is_dormant = actor_ptr->IsDormant();
-    KinematicState kinematic_state {actor_location, actor_rotation, actor_velocity, -1.0f, true, actor_is_dormant, cg::Location()};
+    
+    KinematicState kinematic_state {
+      actor_location,
+      actor_rotation,
+      actor_velocity,
+      actor_acceleration,
+      -1.0f,
+      true,
+      actor_is_dormant,
+      cg::Location()
+    };
 
     TrafficLightState tl_state;
     ActorType actor_type = ActorType::Any;
@@ -287,6 +310,7 @@ void ALSM::UpdateUnregisteredActorsData() {
     std::vector<SimpleWaypointPtr> nearest_waypoints;
 
     bool state_entry_not_present = !simulation_state.ContainsActor(actor_id);
+    
     if (type_id.front() == 'v') {
       auto vehicle_ptr = boost::static_pointer_cast<cc::Vehicle>(actor_ptr);
       kinematic_state.speed_limit = vehicle_ptr->GetSpeedLimit();
@@ -297,8 +321,9 @@ void ALSM::UpdateUnregisteredActorsData() {
         dimensions = vehicle_ptr->GetBoundingBox().extent;
         actor_type = ActorType::Vehicle;
         StaticAttributes attributes {actor_type, dimensions.x, dimensions.y, dimensions.z};
+        CollisionState collision_state {false, false, false, -1.0f};
 
-        simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
+        simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state, collision_state);
       } else {
         simulation_state.UpdateKinematicState(actor_id, kinematic_state);
         simulation_state.UpdateTrafficLightState(actor_id, tl_state);
@@ -322,8 +347,28 @@ void ALSM::UpdateUnregisteredActorsData() {
         dimensions = walker_ptr->GetBoundingBox().extent;
         actor_type = ActorType::Pedestrian;
         StaticAttributes attributes {actor_type, dimensions.x, dimensions.y, dimensions.z};
+        CollisionState collision_state {false, false, false, -1.0f};
 
-        simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
+        simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state, collision_state);
+      } else {
+        simulation_state.UpdateKinematicState(actor_id, kinematic_state);
+      }
+
+      // Identify occupied waypoints.
+      SimpleWaypointPtr nearest_waypoint = local_map->GetWaypoint(actor_location);
+      nearest_waypoints.push_back(nearest_waypoint);
+    }
+    else if (type_id.rfind("static.prop", 0) == 0) {
+      auto prop_ptr = boost::static_pointer_cast<cc::Actor>(actor_ptr);
+
+      if (state_entry_not_present) {
+        dimensions = prop_ptr->GetBoundingBox().extent;
+
+        actor_type = ActorType::Other;
+        StaticAttributes attributes {actor_type, dimensions.x, dimensions.y, dimensions.z};
+        CollisionState collision_state {false, false, false, -1.0f};
+
+        simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state, collision_state);
       } else {
         simulation_state.UpdateKinematicState(actor_id, kinematic_state);
       }

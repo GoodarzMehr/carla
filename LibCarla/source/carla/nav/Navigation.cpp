@@ -641,7 +641,7 @@ namespace nav {
       std::lock_guard<std::mutex> lock(_mutex);
       index = _crowd->addAgent(point_from, &params);
       if (index == -1) {
-        logging::log("Vehicle agent not added to the crowd by some problem!");
+        //logging::log("Vehicle agent not added to the crowd by some problem!");
         return false;
       }
 

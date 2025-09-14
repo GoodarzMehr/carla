@@ -17,17 +17,17 @@ using constants::WaypointSelection::JUNCTION_LOOK_AHEAD;
 
 CollisionStage::CollisionStage(
   const std::vector<ActorId> &vehicle_id_list,
-  const SimulationState &simulation_state,
   const BufferMap &buffer_map,
   const TrackTraffic &track_traffic,
   const Parameters &parameters,
+  SimulationState &simulation_state,
   CollisionFrame &output_array,
   RandomGenerator &random_device)
   : vehicle_id_list(vehicle_id_list),
-    simulation_state(simulation_state),
     buffer_map(buffer_map),
     track_traffic(track_traffic),
     parameters(parameters),
+    simulation_state(simulation_state),
     output_array(output_array),
     random_device(random_device) {}
 
@@ -53,7 +53,7 @@ void CollisionStage::Update(const unsigned long index) {
       const float collision_radius_stop = COLLISION_RADIUS_STOP + length;
       collision_radius_square = SQUARE(collision_radius_stop);
     }
-    if (distance_to_leading > collision_radius_square) {
+    if (SQUARE(distance_to_leading) > collision_radius_square) {
         collision_radius_square = SQUARE(distance_to_leading);
     }
 
@@ -76,12 +76,16 @@ void CollisionStage::Update(const unsigned long index) {
                 return (cg::Math::DistanceSquared(e_loc, loc_1) < cg::Math::DistanceSquared(e_loc, loc_2));
               });
 
+    simulation_state.UpdateImpendingCollision(ego_actor_id, {false, false, false});
+    
     // Check every actor in the vicinity if it poses a collision hazard.
     for (auto iter = collision_candidate_ids.begin();
          iter != collision_candidate_ids.end() && !collision_hazard;
          ++iter) {
       const ActorId other_actor_id = *iter;
       const ActorType other_actor_type = simulation_state.GetType(other_actor_id);
+      
+      const float height = simulation_state.GetDimensions(other_actor_id).z;
 
       if (parameters.GetCollisionDetection(ego_actor_id, other_actor_id)
           && buffer_map.find(ego_actor_id) != buffer_map.end()
@@ -93,10 +97,31 @@ void CollisionStage::Update(const unsigned long index) {
           if ((other_actor_type == ActorType::Vehicle
                && parameters.GetPercentageIgnoreVehicles(ego_actor_id) <= random_device.next())
               || (other_actor_type == ActorType::Pedestrian
-                  && parameters.GetPercentageIgnoreWalkers(ego_actor_id) <= random_device.next())) {
+                  && parameters.GetPercentageIgnoreWalkers(ego_actor_id) <= random_device.next())
+                || (other_actor_type == ActorType::Other && height > 0.12f
+                    && parameters.GetPercentageRunningSign(ego_actor_id) <= random_device.next())) {
             collision_hazard = true;
             obstacle_id = other_actor_id;
             available_distance_margin = negotiation_result.second;
+
+            bool impending_prop_collision = false;
+            bool impending_pedestrian_collision = false;
+            bool impending_vehicle_collision = false;
+            
+            if (other_actor_type == ActorType::Other) {
+              impending_prop_collision = true;
+            }
+            if (other_actor_type == ActorType::Pedestrian) {
+              impending_pedestrian_collision = true;
+            }
+            if (other_actor_type == ActorType::Vehicle) {
+              impending_vehicle_collision = true;
+            }
+
+            simulation_state.UpdateImpendingCollision(
+              ego_actor_id,
+              {impending_prop_collision, impending_pedestrian_collision, impending_vehicle_collision, available_distance_margin}
+            );
           }
         }
       }

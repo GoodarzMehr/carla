@@ -52,10 +52,10 @@ using Polygon = bg::model::polygon<bg::model::d2::point_xy<double>>;
 class CollisionStage : Stage {
 private:
   const std::vector<ActorId> &vehicle_id_list;
-  const SimulationState &simulation_state;
   const BufferMap &buffer_map;
   const TrackTraffic &track_traffic;
   const Parameters &parameters;
+  SimulationState &simulation_state;
   CollisionFrame &output_array;
   // Structure keeping track of blocking lead vehicles.
   CollisionLockMap collision_locks;
@@ -92,10 +92,10 @@ private:
 
 public:
   CollisionStage(const std::vector<ActorId> &vehicle_id_list,
-                 const SimulationState &simulation_state,
                  const BufferMap &buffer_map,
                  const TrackTraffic &track_traffic,
                  const Parameters &parameters,
+                 SimulationState &simulation_state,
                  CollisionFrame &output_array,
                  RandomGenerator &random_device);
 
