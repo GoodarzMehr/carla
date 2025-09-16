@@ -1246,6 +1246,11 @@ void UActorBlueprintFunctionLibrary::MakePedestrianDefinition(
     TEXT("age"),
     EActorAttributeType::String,
     GetAge(Parameters.Age)});
+  
+  Definition.Attributes.Emplace(FActorAttribute{
+    TEXT("can_use_wheelchair"),
+    EActorAttributeType::Bool,
+    Parameters.bCanUseWheelChair ? TEXT("true") : TEXT("false") });
 
   if (Parameters.Speed.Num() > 0)
   {
@@ -1260,12 +1265,28 @@ void UActorBlueprintFunctionLibrary::MakePedestrianDefinition(
     Definition.Variations.Emplace(Speed);
   }
 
+  bool bCanUseWheelChair = Parameters.bCanUseWheelChair;
+
   FActorVariation IsInvincible;
   IsInvincible.Id = TEXT("is_invincible");
   IsInvincible.Type = EActorAttributeType::Bool;
   IsInvincible.RecommendedValues = { TEXT("true") };
-  IsInvincible.bRestrictToRecommended = false;
+  IsInvincible.bRestrictToRecommended = true;
   Definition.Variations.Emplace(IsInvincible);
+
+  FActorVariation WheelChairVariation;
+  WheelChairVariation.Id = TEXT("use_wheelchair");
+  WheelChairVariation.Type = EActorAttributeType::Bool;
+  if(bCanUseWheelChair)
+  {
+    WheelChairVariation.RecommendedValues = { TEXT("false"), TEXT("true") };
+  }
+  else
+  {
+    WheelChairVariation.RecommendedValues = { TEXT("false") };
+  }
+  WheelChairVariation.bRestrictToRecommended = false;
+  Definition.Variations.Emplace(WheelChairVariation);
 
   Success = CheckActorDefinition(Definition);
 }
