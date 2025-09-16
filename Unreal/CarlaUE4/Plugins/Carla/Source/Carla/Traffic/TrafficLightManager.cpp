@@ -291,6 +291,7 @@ void ATrafficLightManager::GenerateSignalsAndTrafficLights()
 
     TrafficLightsGenerated = true;
 
+    FString CurrentMapName = GetWorld()->GetMapName();
     // Get current map name
     if (CurrentMapName.Contains(TEXT("Town15"), ESearchCase::IgnoreCase))
     {
