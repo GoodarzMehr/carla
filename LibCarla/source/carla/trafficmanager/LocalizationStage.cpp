@@ -43,8 +43,6 @@ void LocalizationStage::Update(const unsigned long index) {
   
   const float vehicle_speed = vehicle_velocity_vector.Length();
   const float vehicle_acceleration_magnitude = vehicle_acceleration_vector.Length();
-  
-  const float speed_limit = simulation_state.GetSpeedLimit(actor_id);
 
   const float acceleration_sign = (cg::Math::Dot(heading_vector, vehicle_acceleration_vector) >= 0.0f) ? 1.0f : -1.0f;
   
@@ -128,7 +126,7 @@ void LocalizationStage::Update(const unsigned long index) {
   bool lane_change_direction = lane_change_info.direction;
 
   // Apply parameters for keep right rule and random lane changes.
-  if (!force_lane_change && (vehicle_speed > MIN_LANE_CHANGE_SPEED || vehicle_acceleration > 0.1f)) {
+  if (!force_lane_change && (vehicle_speed > MIN_LANE_CHANGE_SPEED)) {
     const float perc_keep_right = parameters.GetKeepRightPercentage(actor_id);
     const float perc_random_leftlanechange = parameters.GetRandomLeftLaneChangePercentage(actor_id);
     const float perc_random_rightlanechange = parameters.GetRandomRightLaneChangePercentage(actor_id);
