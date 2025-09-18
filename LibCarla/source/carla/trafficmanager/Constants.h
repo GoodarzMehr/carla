@@ -143,16 +143,16 @@ static const float MAX_DISTANCE_LIGHT_CHECK = 225.0f;
 } // namespace VehicleLight
 
 namespace PID {
-static const float MAX_THROTTLE = 0.85f;
-static const float MAX_BRAKE = 0.7f;
-static const float MAX_STEERING = 0.8f;
-static const float MAX_STEERING_DIFF = 0.15f;
+static const float MAX_THROTTLE = 0.9f;
+static const float MAX_BRAKE = 0.9f;
+static const float MAX_STEERING = 0.9f;
+static const float MAX_STEERING_DIFF = 0.2f;
 static const float DT = 0.05f;
 static const float INV_DT = 1.0f / DT;
-static const std::vector<float> LONGITUDIAL_PARAM = {12.0f, 0.05f, 0.02f};
-static const std::vector<float> LONGITUDIAL_HIGHWAY_PARAM = {20.0f, 0.05f, 0.01f};
+static const std::vector<float> LONGITUDIAL_PARAM = {10.0f, 0.05f, 0.8f};
+static const std::vector<float> LONGITUDIAL_HIGHWAY_PARAM = {16.0f, 0.05f, 1.6f};
 static const std::vector<float> LATERAL_PARAM = {4.0f, 0.02f, 0.08f};
-static const std::vector<float> LATERAL_HIGHWAY_PARAM = {2.0f, 0.02f, 0.04f};
+static const std::vector<float> LATERAL_HIGHWAY_PARAM = {1.6f, 0.02f, 0.16f};
 } // namespace PID
 
 namespace TrackTraffic {

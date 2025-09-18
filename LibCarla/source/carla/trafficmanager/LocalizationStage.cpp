@@ -477,6 +477,32 @@ SimpleWaypointPtr LocalizationStage::AssignLaneChange(const ActorId actor_id,
              !change_over_point->CheckJunction()) {
         change_over_point = change_over_point->GetNextWaypoint().front();
       }
+
+      const float front_distance = std::max(change_over_point->Distance(starting_point), MIN_WPT_DISTANCE);
+      const float back_distance = (vehicle_speed >= HIGHWAY_SPEED) ? 1.5f * MIN_WPT_DISTANCE : MIN_WPT_DISTANCE;
+
+      WaypointPtr moving_point = starting_point->GetWaypoint();
+
+      float distance = 0.0f;
+
+      for (distance = 2.0f; distance < front_distance; distance += 2.0f) {
+        if (moving_point != nullptr
+          && track_traffic.GetPassingVehicles(moving_point->GetId()).size() != 0) {
+          change_over_point = nullptr;
+          break;
+        } else {
+          moving_point = starting_point->GetWaypoint()->GetNext(distance).front();
+        }
+      }
+      for (distance = 2.0f; distance < back_distance; distance += 2.0f) {
+        if (moving_point != nullptr
+          && track_traffic.GetPassingVehicles(moving_point->GetId()).size() != 0) {
+          change_over_point = nullptr;
+          break;
+        } else {
+          moving_point = starting_point->GetWaypoint()->GetPrevious(distance).front();
+        }
+      }
     }
   }
 
