@@ -180,7 +180,7 @@ LocationVector CollisionStage::GetBoundary(const ActorId actor_id) {
 
   const cg::Vector3D x_boundary_vector = heading_vector * (bbox_x + forward_extension);
   const auto perpendicular_vector = cg::Vector3D(-heading_vector.y, heading_vector.x, 0.0f).MakeSafeUnitVector(EPSILON);
-  const cg::Vector3D y_boundary_vector = perpendicular_vector * (bbox_y + forward_extension);
+  const cg::Vector3D y_boundary_vector = perpendicular_vector * (bbox_y);
 
   // Four corners of the vehicle in top view clockwise order (left-handed system).
   const cg::Location location = simulation_state.GetLocation(actor_id);
