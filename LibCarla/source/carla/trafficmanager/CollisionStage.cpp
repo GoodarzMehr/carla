@@ -79,6 +79,7 @@ void CollisionStage::Update(const unsigned long index) {
     simulation_state.UpdateImpendingCollision(ego_actor_id, {false, false, false});
     
     // Check every actor in the vicinity if it poses a collision hazard.
+    // Just to say I've made a change.
     for (auto iter = collision_candidate_ids.begin();
          iter != collision_candidate_ids.end() && !collision_hazard;
          ++iter) {
