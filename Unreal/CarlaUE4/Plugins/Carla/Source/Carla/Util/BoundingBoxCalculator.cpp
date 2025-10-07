@@ -54,15 +54,14 @@ FBoundingBox UBoundingBoxCalculator::GetActorBoundingBox(const AActor *Actor, ui
     auto Character = Cast<ACharacter>(Actor);
     if (Character != nullptr)
     {
-      auto Capsule = Character->GetCapsuleComponent();
-      if (Capsule != nullptr)
+      UActorComponent *ActorComp = Character->GetComponentByClass(USkeletalMeshComponent::StaticClass());
+      USkeletalMeshComponent* ParentComp = Cast<USkeletalMeshComponent>(ActorComp);
+
+      if (ParentComp != nullptr)
       {
-        const auto Radius = Capsule->GetScaledCapsuleRadius();
-        const auto HalfHeight = Capsule->GetScaledCapsuleHalfHeight();
-        // Characters have the pivot point centered.
-        FVector Origin = {0.0f, 0.0f, 0.0f};
-        FVector Extent = {Radius, Radius, HalfHeight};
-        return {Origin, Extent};
+        FBoundingBox Box = GetSkeletalMeshBoundingBoxFromComponent(ParentComp);
+
+        return Box;
       }
     }
     // Traffic sign.
@@ -218,6 +217,58 @@ FBoundingBox UBoundingBoxCalculator::GetCharacterBoundingBox(
   }
 
   return {};
+}
+
+FBoundingBox UBoundingBoxCalculator::GetPosedCharacterBoundingBox(
+    const ACharacter* Character,
+    uint8 InTagQueried)
+{
+  check(Character);
+
+  crp::CityObjectLabel TagQueried = (crp::CityObjectLabel)InTagQueried;
+  bool FilterByTag = TagQueried == crp::CityObjectLabel::Any ||
+                     TagQueried == crp::CityObjectLabel::Pedestrians;
+
+  UActorComponent *ActorComp = Character->GetComponentByClass(USkeletalMeshComponent::StaticClass());
+  USkeletalMeshComponent* ParentComp = Cast<USkeletalMeshComponent>(ActorComp);
+
+  if (ParentComp && FilterByTag)
+  {
+    FBoundingBox BoundingBox = GetSkeletalMeshBoundingBoxFromComponent(ParentComp);
+
+    BoundingBox.Origin = {0.0f, 0.0f, 0.0f};
+
+    auto& CompToWorldTransform = ParentComp->GetComponentTransform();
+
+    BoundingBox = ApplyTransformToBB(BoundingBox, CompToWorldTransform);
+
+    return BoundingBox;
+  }
+
+  return {};
+}
+
+// Add a new function that takes the SkeletalMeshComponent instead of just the mesh
+FBoundingBox UBoundingBoxCalculator::GetSkeletalMeshBoundingBoxFromComponent(
+  const USkeletalMeshComponent* SkeletalMeshComp)
+{
+  if(!SkeletalMeshComp || !SkeletalMeshComp->SkeletalMesh)
+  {
+    UE_LOG(LogCarla, Error, TEXT("GetSkeletalMeshBoundingBoxFromComponent no SkeletalMeshComponent or SkeletalMesh"));
+    return {};
+  }
+
+  // Force update to ensure current animation pose is used
+  const_cast<USkeletalMeshComponent*>(SkeletalMeshComp)->UpdateBounds();
+  
+  // Get the AABB in local space (component space)
+  FBox LocalBox = SkeletalMeshComp->CalcBounds(FTransform::Identity).GetBox();
+  
+  // Extract origin and extent in local space
+  FVector Origin = {0.0f, 0.0f, 0.0f};
+  FVector Extent = LocalBox.GetExtent();
+
+  return {Origin, Extent};
 }
 
 void UBoundingBoxCalculator::GetTrafficLightBoundingBox(
@@ -452,7 +503,7 @@ TArray<FBoundingBox> UBoundingBoxCalculator::GetBBsOfActor(
   const ACharacter* Character = Cast<ACharacter>(Actor);
   if (Character)
   {
-    FBoundingBox BoundingBox = GetCharacterBoundingBox(Character, InTagQueried);
+    FBoundingBox BoundingBox = GetPosedCharacterBoundingBox(Character, InTagQueried);
     if(!BoundingBox.Extent.IsZero())
     {
       Result.Add(BoundingBox);

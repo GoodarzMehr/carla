@@ -159,7 +159,7 @@ void UObjectRegister::RegisterVehicle(ACarlaWheeledVehicle* Vehicle)
 void UObjectRegister::RegisterCharacter(ACharacter* Character)
 {
   check(Character);
-  FBoundingBox BB = UBoundingBoxCalculator::GetCharacterBoundingBox(Character);
+  FBoundingBox BB = UBoundingBoxCalculator::GetPosedCharacterBoundingBox(Character);
   RegisterEnvironmentObject(Character, BB, EnvironmentObjectType::Character, static_cast<uint8>(crp::CityObjectLabel::Pedestrians));
 }
 
