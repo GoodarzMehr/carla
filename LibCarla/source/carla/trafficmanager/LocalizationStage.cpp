@@ -39,7 +39,16 @@ void LocalizationStage::Update(const unsigned long index) {
   const cg::Location vehicle_location = simulation_state.GetLocation(actor_id);
   const cg::Vector3D heading_vector = simulation_state.GetHeading(actor_id);
   const cg::Vector3D vehicle_velocity_vector = simulation_state.GetVelocity(actor_id);
+  const cg::Vector3D vehicle_acceleration_vector = simulation_state.GetAcceleration(actor_id);
+
   const float vehicle_speed = vehicle_velocity_vector.Length();
+  const float vehicle_acceleration_magnitude = vehicle_acceleration_vector.Length();
+
+  const float acceleration_sign = (cg::Math::Dot(heading_vector, vehicle_acceleration_vector) >= 0.0f) ? 1.0f : -1.0f;
+
+  const float vehicle_acceleration = acceleration_sign * vehicle_acceleration_magnitude;
+
+  const CollisionState collision_state = simulation_state.GetImpendingCollision(actor_id);
 
   // Speed dependent waypoint horizon length.
   float horizon_length = std::max(vehicle_speed * HORIZON_RATE, MINIMUM_HORIZON_LENGTH);
@@ -112,11 +121,12 @@ void LocalizationStage::Update(const unsigned long index) {
 
   // Assign a lane change.
   const ChangeLaneInfo lane_change_info = parameters.GetForceLaneChange(actor_id);
+
   bool force_lane_change = lane_change_info.change_lane;
   bool lane_change_direction = lane_change_info.direction;
 
   // Apply parameters for keep right rule and random lane changes.
-  if (!force_lane_change && vehicle_speed > MIN_LANE_CHANGE_SPEED){
+  if (!force_lane_change && (vehicle_speed > MIN_LANE_CHANGE_SPEED)){
     const float perc_keep_slow = parameters.GetKeepSlowLanePercentage(actor_id);
     const float perc_random_leftlanechange = parameters.GetRandomLeftLaneChangePercentage(actor_id);
     const float perc_random_rightlanechange = parameters.GetRandomRightLaneChangePercentage(actor_id);
@@ -140,6 +150,28 @@ void LocalizationStage::Update(const unsigned long index) {
       force_lane_change = true;
       lane_change_direction = false;
     }
+    if (collision_state.impending_prop_collision)
+    {
+      force_lane_change = true;
+
+      const Buffer &waypoint_buffer = buffer_map.at(actor_id);
+
+      if (!waypoint_buffer.empty()) {
+        const SimpleWaypointPtr &current_waypoint = waypoint_buffer.front();
+        const SimpleWaypointPtr left_waypoint = current_waypoint->GetLeftWaypoint();
+        const SimpleWaypointPtr right_waypoint = current_waypoint->GetRightWaypoint();
+
+        if (left_waypoint != nullptr &&
+          track_traffic.GetPassingVehicles(left_waypoint->GetId()).size() == 0) {
+            lane_change_direction = false;
+        } else if (right_waypoint != nullptr &&
+          track_traffic.GetPassingVehicles(right_waypoint->GetId()).size() == 0) {
+            lane_change_direction = true;
+        } else {
+          force_lane_change = false;
+        }
+      }
+    }
   }
 
   const SimpleWaypointPtr front_waypoint = waypoint_buffer.front();
@@ -153,6 +185,7 @@ void LocalizationStage::Update(const unsigned long index) {
     if (done_with_previous_lane_change) last_lane_change_swpt.erase(actor_id);
   }
   bool auto_or_force_lane_change = parameters.GetAutoLaneChange(actor_id) || force_lane_change;
+
   bool front_waypoint_not_junction = !front_waypoint->CheckJunction();
 
   if (auto_or_force_lane_change
@@ -449,6 +482,32 @@ SimpleWaypointPtr LocalizationStage::AssignLaneChange(const ActorId actor_id,
       while (change_over_point->DistanceSquared(starting_point) < SQUARE(change_over_distance) &&
              !change_over_point->CheckJunction()) {
         change_over_point = change_over_point->GetNextWaypoint().front();
+      }
+
+      const float front_distance = std::max(change_over_point->Distance(starting_point), MIN_WPT_DISTANCE);
+      const float back_distance = (vehicle_speed >= HIGHWAY_SPEED) ? 1.5f * MIN_WPT_DISTANCE : MIN_WPT_DISTANCE;
+
+      WaypointPtr moving_point = starting_point->GetWaypoint();
+
+      float distance = 0.0f;
+
+      for (distance = 2.0f; distance < front_distance; distance += 2.0f) {
+        if (moving_point != nullptr
+          && track_traffic.GetPassingVehicles(moving_point->GetId()).size() != 0) {
+          change_over_point = nullptr;
+          break;
+        } else {
+          moving_point = starting_point->GetWaypoint()->GetNext(distance).front();
+        }
+      }
+      for (distance = 2.0f; distance < back_distance; distance += 2.0f) {
+        if (moving_point != nullptr
+          && track_traffic.GetPassingVehicles(moving_point->GetId()).size() != 0) {
+          change_over_point = nullptr;
+          break;
+        } else {
+          moving_point = starting_point->GetWaypoint()->GetPrevious(distance).front();
+        }
       }
     }
   }

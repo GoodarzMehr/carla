@@ -22,7 +22,8 @@ AProceduralBuilding::AProceduralBuilding()
 UHierarchicalInstancedStaticMeshComponent* AProceduralBuilding::GetHISMComp(
     const UStaticMesh* SM)
 {
-
+  if(!SM) return nullptr;
+  
   FString SMName = SM->GetName();
 
   UHierarchicalInstancedStaticMeshComponent** HISMCompPtr = HISMComps.Find(SMName);

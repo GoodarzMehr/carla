@@ -64,6 +64,7 @@ void MotionPlanStage::Update(const unsigned long index) {
   const ActorId actor_id = vehicle_id_list.at(index);
   const cg::Location vehicle_location = simulation_state.GetLocation(actor_id);
   const cg::Vector3D vehicle_velocity = simulation_state.GetVelocity(actor_id);
+  const cg::Vector3D vehicle_acceleration = simulation_state.GetAcceleration(actor_id);
   const cg::Rotation vehicle_rotation = simulation_state.GetRotation(actor_id);
   const float vehicle_speed = vehicle_velocity.Length();
   const cg::Vector3D vehicle_heading = simulation_state.GetHeading(actor_id);
@@ -122,8 +123,11 @@ void MotionPlanStage::Update(const unsigned long index) {
     // Update the simulation state with the new transform of the vehicle after teleporting it.
     KinematicState kinematic_state{teleportation_transform.location,
                                    teleportation_transform.rotation,
-                                   vehicle_velocity, vehicle_speed_limit,
-                                   vehicle_physics_enabled, simulation_state.IsDormant(actor_id),
+                                   vehicle_velocity,
+                                   vehicle_acceleration,
+                                   vehicle_speed_limit,
+                                   vehicle_physics_enabled,
+                                   simulation_state.IsDormant(actor_id),
                                    teleportation_transform.location};
     simulation_state.UpdateKinematicState(actor_id, kinematic_state);
   }
@@ -294,7 +298,8 @@ bool MotionPlanStage::SafeAfterJunction(const LocalizationData &localization,
       for (const ActorId &blocking_id: difference) {
         cg::Location blocking_actor_location = simulation_state.GetLocation(blocking_id);
         if (cg::Math::DistanceSquared(blocking_actor_location, mid_point) < SQUARE(MAX_JUNCTION_BLOCK_DISTANCE)
-            && simulation_state.GetVelocity(blocking_id).SquaredLength() < SQUARE(AFTER_JUNCTION_MIN_SPEED)) {
+            && simulation_state.GetVelocity(blocking_id).SquaredLength() < SQUARE(AFTER_JUNCTION_MIN_SPEED)
+            && simulation_state.GetType(blocking_id) != ActorType::Other) {
           safe_after_junction = false;
           break;
         }

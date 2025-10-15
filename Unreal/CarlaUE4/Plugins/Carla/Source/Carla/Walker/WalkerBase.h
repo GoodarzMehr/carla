@@ -33,4 +33,8 @@ public:
   {
     SetLifeSpan(AfterLifeSpan);
   }
+
+  // Called after adding wheelschairs as they have no tag.
+  UFUNCTION(BlueprintCallable)
+  void TagWheelchair();
 };

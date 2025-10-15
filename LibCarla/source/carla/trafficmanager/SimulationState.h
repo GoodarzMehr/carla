@@ -11,6 +11,7 @@ namespace traffic_manager {
 enum ActorType {
   Vehicle,
   Pedestrian,
+  Other,
   Any
 };
 
@@ -18,6 +19,7 @@ struct KinematicState {
   cg::Location location;
   cg::Rotation rotation;
   cg::Vector3D velocity;
+  cg::Vector3D acceleration;
   float speed_limit;
   bool physics_enabled;
   bool is_dormant;
@@ -39,6 +41,14 @@ struct StaticAttributes {
 };
 using StaticAttributeMap = std::unordered_map<ActorId, StaticAttributes>;
 
+struct CollisionState {
+  bool impending_prop_collision;
+  bool impending_pedestrian_collision;
+  bool impending_vehicle_collision;
+  float distance_to_collision;
+};
+using CollisionStateMap = std::unordered_map<ActorId, CollisionState>;
+
 /// This class holds the state of all the vehicles in the simlation.
 class SimulationState {
 
@@ -51,6 +61,8 @@ private:
   StaticAttributeMap static_attribute_map;
   // Structure containing dynamic traffic light related state of actors.
   TrafficLightStateMap tl_state_map;
+  // Structure containing dynamic collision related state of actors.
+  CollisionStateMap collision_state_map;
 
 public :
   SimulationState();
@@ -59,7 +71,8 @@ public :
   void AddActor(ActorId actor_id,
                 KinematicState kinematic_state,
                 StaticAttributes attributes,
-                TrafficLightState tl_state);
+                TrafficLightState tl_state,
+                CollisionState collision_state);
 
   // Method to verify if an actor is present currently present in the simulation state.
   bool ContainsActor(ActorId actor_id) const;
@@ -76,6 +89,8 @@ public :
 
   void UpdateTrafficLightState(ActorId actor_id, TrafficLightState state);
 
+  void UpdateImpendingCollision(ActorId actor_id, CollisionState state);
+
   cg::Location GetLocation(const ActorId actor_id) const;
 
   cg::Location GetHybridEndLocation(const ActorId actor_id) const;
@@ -86,11 +101,15 @@ public :
 
   cg::Vector3D GetVelocity(const ActorId actor_id) const;
 
+  cg::Vector3D GetAcceleration(const ActorId actor_id) const;
+
   float GetSpeedLimit(const ActorId actor_id) const;
 
   bool IsPhysicsEnabled(const ActorId actor_id) const;
 
   bool IsDormant(const ActorId actor_id) const;
+
+  CollisionState GetImpendingCollision(const ActorId actor_id) const;
 
   cg::Location GetHeroLocation(const ActorId actor_id) const;
 

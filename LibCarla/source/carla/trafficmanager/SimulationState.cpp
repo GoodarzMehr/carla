@@ -9,11 +9,13 @@ SimulationState::SimulationState() {}
 void SimulationState::AddActor(ActorId actor_id,
                                KinematicState kinematic_state,
                                StaticAttributes attributes,
-                               TrafficLightState tl_state) {
+                               TrafficLightState tl_state,
+                               CollisionState collision_state) {
   actor_set.insert(actor_id);
   kinematic_state_map.insert({actor_id, kinematic_state});
   static_attribute_map.insert({actor_id, attributes});
   tl_state_map.insert({actor_id, tl_state});
+  collision_state_map.insert({actor_id, collision_state});
 }
 
 bool SimulationState::ContainsActor(ActorId actor_id) const {
@@ -54,6 +56,10 @@ void SimulationState::UpdateTrafficLightState(ActorId actor_id, TrafficLightStat
   tl_state_map.at(actor_id) = state;
 }
 
+void SimulationState::UpdateImpendingCollision(ActorId actor_id, CollisionState state) {
+  collision_state_map.at(actor_id) = state;
+}
+
 cg::Location SimulationState::GetLocation(ActorId actor_id) const {
   return kinematic_state_map.at(actor_id).location;
 }
@@ -74,6 +80,10 @@ cg::Vector3D SimulationState::GetVelocity(ActorId actor_id) const {
   return kinematic_state_map.at(actor_id).velocity;
 }
 
+cg::Vector3D SimulationState::GetAcceleration(ActorId actor_id) const {
+  return kinematic_state_map.at(actor_id).acceleration;
+}
+
 float SimulationState::GetSpeedLimit(ActorId actor_id) const {
   return kinematic_state_map.at(actor_id).speed_limit;
 }
@@ -84,6 +94,10 @@ bool SimulationState::IsPhysicsEnabled(ActorId actor_id) const {
 
 bool SimulationState::IsDormant(ActorId actor_id) const {
   return kinematic_state_map.at(actor_id).is_dormant;
+}
+
+CollisionState SimulationState::GetImpendingCollision(ActorId actor_id) const {
+  return collision_state_map.at(actor_id);
 }
 
 TrafficLightState SimulationState::GetTLS(ActorId actor_id) const {

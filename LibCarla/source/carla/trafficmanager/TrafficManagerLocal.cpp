@@ -45,10 +45,10 @@ TrafficManagerLocal::TrafficManagerLocal(
                                          random_device)),
 
     collision_stage(CollisionStage(vehicle_id_list,
-                                   simulation_state,
                                    buffer_map,
                                    track_traffic,
                                    parameters,
+                                   simulation_state,
                                    collision_frame,
                                    random_device)),
 

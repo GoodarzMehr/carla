@@ -60,13 +60,13 @@ static const float MIN_SAFE_INTERVAL_LENGTH = 0.5f * SAFE_DISTANCE_AFTER_JUNCTIO
 } // namespace WaypointSelection
 
 namespace LaneChange {
-static const float MINIMUM_LANE_CHANGE_DISTANCE = 20.0f;
+static const float MINIMUM_LANE_CHANGE_DISTANCE = 14.0f;
 static const float MAXIMUM_LANE_OBSTACLE_DISTANCE = 50.0f;
 static const float MAXIMUM_LANE_OBSTACLE_CURVATURE = 0.6f;
 static const float INTER_LANE_CHANGE_DISTANCE = 10.0f;
 static const float MIN_WPT_DISTANCE = 5.0f;
-static const float MAX_WPT_DISTANCE = 20.0f;
-static const float MIN_LANE_CHANGE_SPEED = 5.0f;
+static const float MAX_WPT_DISTANCE = 14.0f;
+static const float MIN_LANE_CHANGE_SPEED = 4.0f;
 static const float FIFTYPERC = 50.0f;
 } // namespace LaneChange
 
@@ -80,7 +80,7 @@ static const float COLLISION_RADIUS_STOP = 8.0f;
 static const float COLLISION_RADIUS_MIN = 20.0f;
 static const float COLLISION_RADIUS_RATE = 2.65f;
 static const float MAX_LOCKING_EXTENSION = 10.0f;
-static const float WALKER_TIME_EXTENSION = 1.5f;
+static const float WALKER_TIME_EXTENSION = 2.0f;
 static const float SQUARE_ROOT_OF_TWO = 1.414f;
 static const float VERTICAL_OVERLAP_THRESHOLD = 4.0f;
 static const float EPSILON = 2.0f * std::numeric_limits<float>::epsilon();
@@ -143,16 +143,16 @@ static const float MAX_DISTANCE_LIGHT_CHECK = 225.0f;
 } // namespace VehicleLight
 
 namespace PID {
-static const float MAX_THROTTLE = 0.85f;
-static const float MAX_BRAKE = 0.7f;
-static const float MAX_STEERING = 0.8f;
-static const float MAX_STEERING_DIFF = 0.15f;
+static const float MAX_THROTTLE = 0.9f;
+static const float MAX_BRAKE = 0.9f;
+static const float MAX_STEERING = 0.9f;
+static const float MAX_STEERING_DIFF = 0.2f;
 static const float DT = 0.05f;
 static const float INV_DT = 1.0f / DT;
-static const std::vector<float> LONGITUDIAL_PARAM = {12.0f, 0.05f, 0.02f};
-static const std::vector<float> LONGITUDIAL_HIGHWAY_PARAM = {20.0f, 0.05f, 0.01f};
+static const std::vector<float> LONGITUDIAL_PARAM = {10.0f, 0.05f, 0.8f};
+static const std::vector<float> LONGITUDIAL_HIGHWAY_PARAM = {16.0f, 0.05f, 1.6f};
 static const std::vector<float> LATERAL_PARAM = {4.0f, 0.02f, 0.08f};
-static const std::vector<float> LATERAL_HIGHWAY_PARAM = {2.0f, 0.02f, 0.04f};
+static const std::vector<float> LATERAL_HIGHWAY_PARAM = {1.6f, 0.02f, 0.16f};
 } // namespace PID
 
 namespace TrackTraffic {
