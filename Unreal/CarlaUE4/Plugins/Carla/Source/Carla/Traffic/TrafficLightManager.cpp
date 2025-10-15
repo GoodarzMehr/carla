@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -13,6 +13,7 @@
 #include "Runtime/CoreUObject/Public/UObject/ConstructorHelpers.h"
 
 #include "UObject/ConstructorHelpers.h"
+#include "EngineUtils.h"
 
 #include <compiler/disable-ue4-macros.h>
 #include <carla/rpc/String.h>
@@ -293,6 +294,7 @@ void ATrafficLightManager::GenerateSignalsAndTrafficLights()
 
     FString CurrentMapName = GetWorld()->GetMapName();
     // Get current map name
+    FString CurrentMapName = GetWorld()->GetMapName();
     if (CurrentMapName.Contains(TEXT("Town15"), ESearchCase::IgnoreCase))
     {
       AdjustAllSignsToHeightGround();

@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -7,6 +7,7 @@
 #pragma once
 
 #include "carla/geom/GeoLocation.h"
+#include "carla/geom/GeoProjection.h"
 #include "carla/Iterator.h"
 #include "carla/ListView.h"
 #include "carla/NonCopyable.h"
@@ -32,6 +33,10 @@ namespace road {
 
     const geom::GeoLocation &GetGeoReference() const {
       return _geo_reference;
+    }
+
+    const geom::GeoProjection &GetGeoProjection() const {
+      return _geo_projection;
     }
 
     std::unordered_map<RoadId, Road> &GetRoads();
@@ -95,6 +100,8 @@ namespace road {
     MapData() = default;
 
     geom::GeoLocation _geo_reference;
+
+    geom::GeoProjection _geo_projection;
 
     std::unordered_map<RoadId, Road> _roads;
 

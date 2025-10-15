@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Computer Vision Center (CVC) at the Universitat Autonoma
+// Copyright (c) 2025 Computer Vision Center (CVC) at the Universitat Autonoma
 // de Barcelona (UAB).
 //
 // This work is licensed under the terms of the MIT license.
@@ -36,6 +36,12 @@
 #include "CarlaServerResponse.h"
 #include "Carla/Util/BoundingBoxCalculator.h"
 #include "Misc/FileHelper.h"
+#include "Carla/Cosmos/Exporter/CrosswalksExporter.h"
+#include "Carla/Cosmos/Exporter/RoadBoundaryExporter.h"
+#include "Carla/Cosmos/Exporter/LaneLineExporter.h"
+#include "Carla/Cosmos/Exporter/TrafficSignsExporter.h"
+#include "Carla/Cosmos/Exporter/WaitLinesExporter.h"
+#include "Carla/Cosmos/Exporter/RoadMarkingExporter.h"
 
 #include <compiler/disable-ue4-macros.h>
 #include <carla/Functional.h>
@@ -456,6 +462,122 @@ void FCarlaServer::FPimpl::BindActions()
       NamesStd.emplace_back(cr::FromFString(Name));
     }
     return NamesStd;
+  };
+
+  // ~~ Cosmos Export Functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  BIND_SYNC(export_cosmos_crosswalks) << [this](const std::string& session_id, const std::string& output_path) -> R<std::string>
+  {
+    REQUIRE_CARLA_EPISODE();
+    ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    if (!GameMode)
+    {
+      RESPOND_ERROR("unable to find CARLA game mode");
+    }
+    FString SessionIdFString = cr::ToFString(session_id);
+    FString OutputPathFString = cr::ToFString(output_path);
+    FString ErrorMessage;
+    bool bSuccess = UCrosswalksExporter::ExportCosmosCrosswalk(Episode->GetWorld(), SessionIdFString, OutputPathFString, ErrorMessage);
+    if (!bSuccess)
+    {
+      RESPOND_ERROR_FSTRING(ErrorMessage);
+    }
+    return std::string("Success");
+  };
+
+  BIND_SYNC(export_cosmos_road_boundaries) << [this](const std::string& session_id, const std::string& output_path) -> R<std::string>
+  {
+    REQUIRE_CARLA_EPISODE();
+    ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    if (!GameMode)
+    {
+      RESPOND_ERROR("unable to find CARLA game mode");
+    }
+    FString SessionIdFString = cr::ToFString(session_id);
+    FString OutputPathFString = cr::ToFString(output_path);
+    FString ErrorMessage;
+    bool bSuccess = URoadBoundaryExporter::ExportCosmosRoadBoundaries(Episode->GetWorld(), SessionIdFString, OutputPathFString, ErrorMessage);
+    if (!bSuccess)
+    {
+      RESPOND_ERROR_FSTRING(ErrorMessage);
+    }
+    return std::string("Success");
+  };
+
+  BIND_SYNC(export_cosmos_lane_lines) << [this](const std::string& session_id, const std::string& output_path) -> R<std::string>
+  {
+    REQUIRE_CARLA_EPISODE();
+    ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    if (!GameMode)
+    {
+      RESPOND_ERROR("unable to find CARLA game mode");
+    }
+    FString SessionIdFString = cr::ToFString(session_id);
+    FString OutputPathFString = cr::ToFString(output_path);
+    FString ErrorMessage;
+    bool bSuccess = ULaneLineExporter::ExportCosmosLaneLines(Episode->GetWorld(), SessionIdFString, OutputPathFString, ErrorMessage);
+    if (!bSuccess)
+    {
+      RESPOND_ERROR_FSTRING(ErrorMessage);
+    }
+    return std::string("Success");
+  };
+
+  BIND_SYNC(export_cosmos_traffic_signs) << [this](const std::string& session_id, const std::string& output_path) -> R<std::string>
+  {
+    REQUIRE_CARLA_EPISODE();
+    ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    if (!GameMode)
+    {
+      RESPOND_ERROR("unable to find CARLA game mode");
+    }
+    FString SessionIdFString = cr::ToFString(session_id);
+    FString OutputPathFString = cr::ToFString(output_path);
+    FString ErrorMessage;
+    bool bSuccess = UTrafficSignsExporter::ExportCosmosTrafficSigns(Episode->GetWorld(), SessionIdFString, OutputPathFString, ErrorMessage);
+    if (!bSuccess)
+    {
+      RESPOND_ERROR_FSTRING(ErrorMessage);
+    }
+    return std::string("Success");
+  };
+
+  BIND_SYNC(export_cosmos_wait_lines) << [this](const std::string& session_id, const std::string& output_path) -> R<std::string>
+  {
+    REQUIRE_CARLA_EPISODE();
+    ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    if (!GameMode)
+    {
+      RESPOND_ERROR("unable to find CARLA game mode");
+    }
+    FString SessionIdFString = cr::ToFString(session_id);
+    FString OutputPathFString = cr::ToFString(output_path);
+    FString ErrorMessage;
+    bool bSuccess = UWaitLinesExporter::ExportCosmosWaitLines(Episode->GetWorld(), SessionIdFString, OutputPathFString, ErrorMessage);
+    if (!bSuccess)
+    {
+      RESPOND_ERROR_FSTRING(ErrorMessage);
+    }
+    return std::string("Success");
+  };
+
+  BIND_SYNC(export_cosmos_road_markings) << [this](const std::string& session_id, const std::string& output_path) -> R<std::string>
+  {
+    REQUIRE_CARLA_EPISODE();
+    ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(Episode->GetWorld());
+    if (!GameMode)
+    {
+      RESPOND_ERROR("unable to find CARLA game mode");
+    }
+    FString SessionIdFString = cr::ToFString(session_id);
+    FString OutputPathFString = cr::ToFString(output_path);
+    FString ErrorMessage;
+    bool bSuccess = URoadMarkingExporter::ExportCosmosRoadMarkings(Episode->GetWorld(), SessionIdFString, OutputPathFString, ErrorMessage);
+    if (!bSuccess)
+    {
+      RESPOND_ERROR_FSTRING(ErrorMessage);
+    }
+    return std::string("Success");
   };
 
   // ~~ Episode settings and info ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1355,7 +1477,7 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       UELocation = LargeMap->GlobalToLocalLocation(UELocation);
     }
     ECarlaServerResponse Response =
-        CarlaActor->AddActorForceAtLocation(UELocation, force.ToCentimeters().ToFVector());
+        CarlaActor->AddActorForceAtLocation(force.ToCentimeters().ToFVector(), UELocation);
     if (Response != ECarlaServerResponse::Success)
     {
       return RespondError(
@@ -3059,7 +3181,8 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
       double duration,
       uint32_t follow_id,
       bool replay_sensors,
-      const cr::Transform offset) -> R<std::string>
+      const cr::Transform offset,
+      std::string map_override) -> R<std::string>
   {
     REQUIRE_CARLA_EPISODE();
     return R<std::string>(Episode->GetRecorder()->ReplayFile(
@@ -3068,7 +3191,8 @@ BIND_SYNC(is_sensor_enabled_for_ros) << [this](carla::streaming::detail::stream_
         duration,
         follow_id,
         offset,
-        replay_sensors));
+        replay_sensors,
+        map_override));
   };
 
   BIND_SYNC(set_replayer_time_factor) << [this](double time_factor) -> R<void>
