@@ -6,7 +6,6 @@
 
 #include "Carla.h"
 #include "Carla/Sensor/SemanticSegmentationCamera.h"
-#include "Carla/Sensor/InstanceSegmentationCamera.h"
 
 #include "Actor/ActorBlueprintFunctionLibrary.h"
 
@@ -27,16 +26,9 @@ ASemanticSegmentationCamera::ASemanticSegmentationCamera(
       TEXT("Material'/Carla/PostProcessingMaterials/GTMaterial.GTMaterial'"));
 }
 
-void ASemanticSegmentationCamera::SetUpSceneCaptureComponent(USceneCaptureComponent2D &SceneCapture)
-{
-  Super::SetUpSceneCaptureComponent(SceneCapture);
-  AInstanceSegmentationCamera::SetUpSceneCaptureComponentForTagging(SceneCapture);
-}
-
 void ASemanticSegmentationCamera::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaSeconds)
 {
   TRACE_CPUPROFILER_EVENT_SCOPE(ASemanticSegmentationCamera::PostPhysTick);
 
-  AInstanceSegmentationCamera::PostPhysTickForTagging(*GetCaptureComponent2D());
   FPixelReader::SendPixelsInRenderThread<ASemanticSegmentationCamera, FColor>(*this);
 }
