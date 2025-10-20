@@ -1,5 +1,6 @@
 ## Latest Changes
 
+ * Added a hybrid solid-state LiDAR with adjustable parameters (blueprint attributes)
 ## CARLA 0.9.16
 
  * Added NVIDIA Cosmos Transfer1 integration
