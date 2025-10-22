@@ -70,129 +70,32 @@ FBoundingBox UBoundingBoxCalculator::GetActorBoundingBox(const AActor *Actor, ui
     auto TrafficSign = Cast<ATrafficSignBase>(Actor);
     if (TrafficSign != nullptr)
     {
-      // // first return a merge of the generated trigger boxes, if any
-      // auto TriggerVolumes = TrafficSign->GetTriggerVolumes();
-      // if (TriggerVolumes.Num() > 0)
-      // {
-      //   FBoundingBox Box = UBoundingBoxCalculator::CombineBoxes(TriggerVolumes);
-      //   FTransform Transform = Actor->GetActorTransform();
-      //   Box.Origin = Transform.InverseTransformPosition(Box.Origin);
-      //   Box.Rotation = Transform.InverseTransformRotation(Box.Rotation.Quaternion()).Rotator();
-      //   return Box;
-      // }
-      // // try to return the original bounding box
-      // auto TriggerVolume = TrafficSign->GetTriggerVolume();
-      // if (TriggerVolume != nullptr)
-      // {
-      //     auto Transform = TriggerVolume->GetRelativeTransform();
-      //     return
-      //     {
-      //         Transform.GetTranslation(),
-      //         TriggerVolume->GetScaledBoxExtent(),
-      //         Transform.GetRotation().Rotator()
-      //     };
-      // }
-      // else
-      // {
-      //   UE_LOG(LogCarla, Warning, TEXT("Traffic sign missing trigger volume: %s"), *Actor->GetName());
-      //   return {};
-      // }
-      // Get the static mesh components of the traffic sign
-      // Get the static mesh components of the traffic sign
-      // TArray<UStaticMeshComponent*> StaticMeshComps;
-      // Actor->GetComponents<UStaticMeshComponent>(StaticMeshComps);
-      
-      // if (StaticMeshComps.Num() > 0)
-      // {
-      //   // Calculate bounding box from the actual mesh components
-      //   TArray<FBoundingBox> BBs;
-      //   TArray<uint8> Tags;
-      //   GetBBsOfStaticMeshComponents(StaticMeshComps, BBs, Tags, InTagQueried);
-        
-      //   if (BBs.Num() > 0)
-      //   {
-      //     // Combine all mesh bounding boxes into one
-      //     FBoundingBox CombinedBB = CombineBBs(BBs);
-          
-      //     // Convert to local space (relative to actor)
-      //     FTransform Transform = Actor->GetActorTransform();
-      //     CombinedBB.Origin = Transform.InverseTransformPosition(CombinedBB.Origin);
-      //     CombinedBB.Rotation = Transform.InverseTransformRotation(CombinedBB.Rotation.Quaternion()).Rotator();
-          
-      //     return CombinedBB;
-      //   }
-      // }
-      // Get the static mesh components of the traffic sign
-      TArray<UStaticMeshComponent*> StaticMeshComps;
-      Actor->GetComponents<UStaticMeshComponent>(StaticMeshComps);
-      
-      if (StaticMeshComps.Num() > 0)
+      // first return a merge of the generated trigger boxes, if any
+      auto TriggerVolumes = TrafficSign->GetTriggerVolumes();
+      if (TriggerVolumes.Num() > 0)
       {
-        // Calculate bounding box from the actual mesh components
-        TArray<FBoundingBox> BBs;
-        TArray<uint8> Tags;
-        GetBBsOfStaticMeshComponents(StaticMeshComps, BBs, Tags, InTagQueried);
-
-        UE_LOG(LogCarla, Log, TEXT("Getting here"));
-
-        UE_LOG(LogCarla, Log, TEXT("Number of bounding boxes found: %d"), BBs.Num());
-        
-        if (BBs.Num() > 0)
-        {
-          // Combine all mesh bounding boxes into one
-          FBoundingBox CombinedBB = CombineBBs(BBs);
-          
-          // Apply Z-offset adjustment if the sign has been positioned
-          // Calculate the Z-offset by tracing to ground
-          FVector ActorLocation = Actor->GetActorLocation();
-          FVector AdjustedLocation = ActorLocation;
-          
-          // Create a simple line trace to find ground
-          const FVector Start = CombinedBB.Origin + FVector(0, 0, 200.0f);
-          const FVector End = CombinedBB.Origin - FVector(0, 0, 20000.0f);
-          
-          FHitResult HitResult;
-          FCollisionQueryParams CollisionParams;
-          CollisionParams.bTraceComplex = true;
-          CollisionParams.bReturnPhysicalMaterial = false;
-          CollisionParams.AddIgnoredActor(Actor);
-          
-          UWorld* World = Actor->GetWorld();
-          constexpr float ZOffsetSignToGround = 0.5f;
-
-          UE_LOG(LogCarla, Log, TEXT("Also Getting here"));
-
-          if (World)
+        FBoundingBox Box = UBoundingBoxCalculator::CombineBoxes(TriggerVolumes);
+        FTransform Transform = Actor->GetActorTransform();
+        Box.Origin = Transform.InverseTransformPosition(Box.Origin);
+        Box.Rotation = Transform.InverseTransformRotation(Box.Rotation.Quaternion()).Rotator();
+        return Box;
+      }
+      // try to return the original bounding box
+      auto TriggerVolume = TrafficSign->GetTriggerVolume();
+      if (TriggerVolume != nullptr)
+      {
+          auto Transform = TriggerVolume->GetRelativeTransform();
+          return
           {
-            UE_LOG(LogCarla, Log, TEXT("World is valid"));
-          }
-          
-          if (World && World->LineTraceSingleByChannel(
-              HitResult,
-              Start,
-              End,
-              ECC_WorldStatic,
-              CollisionParams))
-          {
-            // Calculate the Z-offset needed to place the bounding box at ground level
-            float GroundZ = HitResult.Location.Z + ZOffsetSignToGround;
-            float CurrentZ = CombinedBB.Origin.Z;
-            float ZOffset = GroundZ - CurrentZ;
-            
-            // Apply the Z-offset to the bounding box origin
-            CombinedBB.Origin.Z += ZOffset;
-            
-            UE_LOG(LogCarla, Log, TEXT("Adjusted traffic sign %s BB Z from %f to %f (offset: %f)"),
-                  *Actor->GetName(), CurrentZ, CombinedBB.Origin.Z, ZOffset);
-          }
-          
-          // Convert to local space (relative to actor)
-          FTransform Transform = Actor->GetActorTransform();
-          CombinedBB.Origin = Transform.InverseTransformPosition(CombinedBB.Origin);
-          CombinedBB.Rotation = Transform.InverseTransformRotation(CombinedBB.Rotation.Quaternion()).Rotator();
-          
-          return CombinedBB;
-        }
+              Transform.GetTranslation(),
+              TriggerVolume->GetScaledBoxExtent(),
+              Transform.GetRotation().Rotator()
+          };
+      }
+      else
+      {
+        UE_LOG(LogCarla, Warning, TEXT("Traffic sign missing trigger volume: %s"), *Actor->GetName());
+        return {};
       }
     }
     // Other, by default BB
@@ -470,15 +373,11 @@ void UBoundingBoxCalculator::GetBBsOfStaticMeshComponents(
 
     bool isCrosswalk = Comp->GetOwner()->GetName().Contains("crosswalk");
 
-    UE_LOG(LogCarla, Log, TEXT("Processing static mesh component %s of actor %s"), *Comp->GetName(), *Comp->GetOwner()->GetName());
-
     // Avoid duplication with SMComp and not visible meshes
     if( (!Comp->IsVisible() && !isCrosswalk) || Cast<UInstancedStaticMeshComponent>(Comp))
     {
       continue;
     }
-
-    UE_LOG(LogCarla, Log, TEXT("Getting here 2"));
 
     // Filter by tag
     crp::CityObjectLabel Tag = ATagger::GetTagOfTaggedComponent(*Comp);
@@ -486,8 +385,6 @@ void UBoundingBoxCalculator::GetBBsOfStaticMeshComponents(
 
     UStaticMesh* StaticMesh = Comp->GetStaticMesh();
     FBoundingBox BoundingBox = GetStaticMeshBoundingBox(StaticMesh);
-
-    UE_LOG(LogCarla, Log, TEXT("Name of static mesh: %s"), StaticMesh ? *StaticMesh->GetName() : TEXT("None"));
 
     if(StaticMesh)
     {
