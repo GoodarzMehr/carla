@@ -41,6 +41,12 @@ private:
     FBoundingBox& BoundingBox,
     EnvironmentObjectType Type,
     uint8 Tag);
+  
+  // bool AdjustSignHeightToGround(
+  //   FVector& SpawnLocation,
+  //   const FString& ActorName,
+  //   const TArray<AActor*>& ActorsToIgnore
+  // ) const;
 
   // bool AdjustSignHeightToGround(
   //     AActor* Actor,
