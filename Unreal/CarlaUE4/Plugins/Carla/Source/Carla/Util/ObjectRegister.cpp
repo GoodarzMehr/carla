@@ -43,6 +43,57 @@ void UObjectRegister::RegisterObjects(TArray<AActor*> Actors)
   // Empties the array but doesn't change memory allocations
   EnvironmentObjects.Reset();
 
+  // // FIRST: Adjust traffic sign heights before registering them
+  // TArray<AActor*> ActorsToIgnore;
+  // for(AActor* Actor : Actors)
+  // {
+  //   ATrafficSignBase* TrafficSign = Cast<ATrafficSignBase>(Actor);
+  //   if (TrafficSign && !TrafficSign->bPositioned)
+  //   {
+  //     FVector OriginalLocation = Actor->GetActorLocation();
+  //     FVector AdjustedLocation = OriginalLocation;
+      
+  //     // Use the same ground adjustment logic
+  //     if (AdjustSignHeightToGround(Actor, AdjustedLocation, ActorsToIgnore))
+  //     {
+  //       float ZOffset = AdjustedLocation.Z - OriginalLocation.Z;
+        
+  //       Actor->GetRootComponent()->SetMobility(EComponentMobility::Movable);
+        
+  //       // Get all static mesh components
+  //       TArray<UStaticMeshComponent*> StaticMeshComps;
+  //       Actor->GetComponents<UStaticMeshComponent>(StaticMeshComps);
+        
+  //       for (UStaticMeshComponent* MeshComp : StaticMeshComps)
+  //       {
+  //         if (!MeshComp) continue;
+          
+  //         // Skip if this has a mesh parent (it's a child)
+  //         USceneComponent* ParentComp = MeshComp->GetAttachParent();
+  //         if (ParentComp && Cast<UStaticMeshComponent>(ParentComp))
+  //         {
+  //           continue;
+  //         }
+          
+  //         // Move the mesh component down
+  //         FVector CompLocation = MeshComp->GetRelativeLocation();
+  //         CompLocation.Z -= ZOffset;
+  //         MeshComp->SetRelativeLocation(CompLocation);
+  //         MeshComp->UpdateBounds();
+  //       }
+        
+  //       Actor->UpdateComponentTransforms();
+  //       Actor->GetRootComponent()->SetMobility(EComponentMobility::Static);
+  //       TrafficSign->bPositioned = true;
+        
+  //       // UE_LOG(LogCarla, Log, TEXT("Adjusted traffic sign %s by %f cm during registration"), 
+  //       //        *Actor->GetName(), ZOffset);
+  //     }
+  //   }
+    
+  //   ActorsToIgnore.Add(Actor);
+  // }
+
   for(AActor* Actor : Actors)
   {
 
@@ -104,6 +155,42 @@ void UObjectRegister::RegisterObjects(TArray<AActor*> Actors)
 #endif // WITH_EDITOR
 
 }
+
+// bool UObjectRegister::AdjustSignHeightToGround(
+//     AActor* Actor, 
+//     FVector& AdjustedLocation, 
+//     const TArray<AActor*>& ActorsToIgnore) const
+// {
+//   UE_LOG(LogCarla, Log, TEXT("AdjustSignHeightToGround called for actor %s"), *Actor->GetName());
+//   UWorld* World = Actor->GetWorld();
+//   if (!World) return false;
+
+//   const FVector Start = AdjustedLocation + FVector(0, 0, 100000.0f);
+//   const FVector End = AdjustedLocation - FVector(0, 0, 100000.0f);
+
+//   FHitResult HitResult;
+//   FCollisionQueryParams CollisionParams;
+//   CollisionParams.bTraceComplex = true;
+//   CollisionParams.bReturnPhysicalMaterial = false;
+//   CollisionParams.AddIgnoredActors(ActorsToIgnore);
+
+//   constexpr float ZOffsetSignToGround = 0.5f;
+
+//   if (World->LineTraceSingleByChannel(
+//       HitResult,
+//       Start,
+//       End,
+//       ECC_WorldStatic,
+//       CollisionParams))
+//   {
+//     AdjustedLocation.Z = HitResult.Location.Z + ZOffsetSignToGround;
+//     UE_LOG(LogCarla, Log, TEXT("Adjusted actor %s to new Z location %f"), *Actor->GetName(), AdjustedLocation.Z);
+//     return true;
+//   }
+
+//   UE_LOG(LogCarla, Warning, TEXT("Could not adjust actor %s to ground, no hit detected"), *Actor->GetName());
+//   return false;
+// }
 
 void UObjectRegister::EnableEnvironmentObjects(const TSet<uint64>& EnvObjectIds, bool Enable)
 {

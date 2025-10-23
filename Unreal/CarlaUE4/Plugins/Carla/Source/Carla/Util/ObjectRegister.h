@@ -42,6 +42,11 @@ private:
     EnvironmentObjectType Type,
     uint8 Tag);
 
+  // bool AdjustSignHeightToGround(
+  //     AActor* Actor,
+  //     FVector& AdjustedLocation,
+  //     const TArray<AActor*>& ActorsToIgnore) const;
+
   void RegisterVehicle(ACarlaWheeledVehicle* Vehicle);
 
   void RegisterCharacter(ACharacter* Character);

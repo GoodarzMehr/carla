@@ -134,9 +134,11 @@ void ALargeMapManager::PostWorldOriginOffset(UWorld* InWorld, FIntVector InSrcOr
 #endif // WITH_EDITOR
 }
 
-
-
-bool ALargeMapManager::AdjustSignHeightToGround(FVector& SpawnLocation, const FString& ActorName, const TArray<AActor*>& ActorsToIgnore) const
+bool ALargeMapManager::AdjustSignHeightToGround(
+  FVector& SpawnLocation,
+  const FString& ActorName,
+  const TArray<AActor*>& ActorsToIgnore
+) const
 {
   const FVector Start = SpawnLocation + FVector(0, 0, 200.0f);
   const FVector End = SpawnLocation - FVector(0, 0, 10000.0f);
