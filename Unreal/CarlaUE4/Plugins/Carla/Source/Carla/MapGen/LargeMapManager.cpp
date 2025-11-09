@@ -988,6 +988,7 @@ void ALargeMapManager::ConvertDormantToActiveActors()
         *((View->GetActor()->GetActorLocation()).ToString()) \
       );
       ActiveActors.Add(Id);
+      ATagger::TagActor(*View->GetActor(), true, Id);
     }
     else
     {
