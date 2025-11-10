@@ -260,7 +260,7 @@ FBoundingBox UBoundingBoxCalculator::GetSkeletalMeshBoundingBoxFromComponent(
     return {};
   }
 
-  // Force update bounds to current pose
+  // Force update bounds
   const_cast<USkeletalMeshComponent*>(SkeletalMeshComp)->UpdateBounds();
   
   // Get bounds in component space (already includes current animation pose)
