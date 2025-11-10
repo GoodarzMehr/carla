@@ -22,7 +22,7 @@ CollisionStage::CollisionStage(
   const Parameters &parameters,
   SimulationState &simulation_state,
   CollisionFrame &output_array,
-  RandomGenerator &random_device)
+  UniformPRNG &random_device)
   : vehicle_id_list(vehicle_id_list),
     buffer_map(buffer_map),
     track_traffic(track_traffic),

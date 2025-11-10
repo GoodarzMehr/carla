@@ -21,7 +21,7 @@
 #include "carla/trafficmanager/AtomicActorSet.h"
 #include "carla/trafficmanager/InMemoryMap.h"
 #include "carla/trafficmanager/Parameters.h"
-#include "carla/trafficmanager/RandomGenerator.h"
+#include "carla/trafficmanager/UniformPRNG.h"
 #include "carla/trafficmanager/SimulationState.h"
 #include "carla/trafficmanager/TrackTraffic.h"
 #include "carla/trafficmanager/TrafficManagerBase.h"
@@ -61,6 +61,8 @@ private:
   cc::World world;
   /// Set of all actors registered with traffic manager.
   AtomicActorSet registered_vehicles;
+  // Set containing the ids of the registered large vehicles
+  std::unordered_map<ActorId, std::pair<float, bool>> large_vehicles;
   /// State counter to track changes in registered actors.
   int registered_vehicles_state;
   /// List of vehicles registered with the traffic manager in
@@ -106,7 +108,7 @@ private:
   /// Randomization seed.
   uint64_t seed {static_cast<uint64_t>(time(NULL))};
   /// Structure holding random devices per vehicle.
-  RandomGenerator random_device = RandomGenerator(seed);
+  UniformPRNG random_device = UniformPRNG(seed);
   std::vector<ActorId> marked_for_removal;
   /// Mutex to prevent vehicle registration during frame array re-allocation.
   std::mutex registration_mutex;
