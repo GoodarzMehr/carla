@@ -11,6 +11,7 @@
 #include "Carla/Util/BoundingBoxCalculator.h"
 #include "Carla/Traffic/TrafficSignBase.h"
 #include "Carla/Game/CarlaStatics.h"
+#include "Carla/Game/CarlaEpisode.h"
 #include "Carla/MapGen/LargeMapManager.h"
 
 #include "InstancedFoliageActor.h"
@@ -47,6 +48,10 @@ void UObjectRegister::RegisterObjects(TArray<AActor*> Actors)
   EnvironmentObjects.Reset();
   ObjectIdToComp.Reset();
 
+  UWorld* World = GetWorld();
+
+  UCarlaEpisode* Episode = UCarlaStatics::GetCurrentEpisode(World);
+
   for(AActor* Actor : Actors)
   {
 
@@ -54,32 +59,43 @@ void UObjectRegister::RegisterObjects(TArray<AActor*> Actors)
     // Discard Sky to not break the global ilumination
     if(ClassName.Equals("BP_Sky_C")) continue;
 
+    uint32_t cActorId = Actor->GetUniqueID();
+
+    if (Episode)
+    {
+      FCarlaActor* cActor = Episode->FindCarlaActor(Actor);
+      
+      if (cActor) {
+        cActorId = cActor->GetActorId();
+      }
+    }
+
     ACarlaWheeledVehicle* Vehicle = Cast<ACarlaWheeledVehicle>(Actor);
     if (Vehicle)
     {
-      RegisterVehicle(Vehicle);
+      RegisterVehicle(Vehicle, cActorId);
       continue;
     }
 
     ACharacter* Character = Cast<ACharacter>(Actor);
     if (Character)
     {
-      RegisterCharacter(Character);
+      RegisterCharacter(Character, cActorId);
       continue;
     }
 
     ATrafficLightBase* TrafficLight = Cast<ATrafficLightBase>(Actor);
     if(TrafficLight)
     {
-      RegisterTrafficLight(TrafficLight);
+      RegisterTrafficLight(TrafficLight, cActorId);
       continue;
     }
 
     RegisterISMComponents(Actor);
 
-    RegisterSMComponents(Actor);
+    RegisterSMComponents(Actor, cActorId);
 
-    RegisterSKMComponents(Actor);
+    RegisterSKMComponents(Actor, cActorId);
   }
 
 #if WITH_EDITOR
@@ -135,14 +151,15 @@ void UObjectRegister::RegisterEnvironmentObject(
     AActor* Actor,
     FBoundingBox& BoundingBox,
     EnvironmentObjectType Type,
-    uint8 Tag)
+    uint8 Tag,
+    uint64 CarlaActorId)
 {
   const FString ActorName = Actor->GetName();
   const char* ActorNameChar = TCHAR_TO_ANSI(*ActorName);
 
   FEnvironmentObject EnvironmentObject;
   EnvironmentObject.Transform = Actor->GetActorTransform();
-  EnvironmentObject.Id = CityHash64(ActorNameChar, ActorName.Len());
+  EnvironmentObject.Id = CarlaActorId == 0 ? CityHash64(ActorNameChar, ActorName.Len()) : CarlaActorId;
   EnvironmentObject.Name = ActorName;
   EnvironmentObject.Actor = Actor;
   EnvironmentObject.CanTick = Actor->IsActorTickEnabled();
@@ -152,22 +169,22 @@ void UObjectRegister::RegisterEnvironmentObject(
   EnvironmentObjects.Emplace(std::move(EnvironmentObject));
 }
 
-void UObjectRegister::RegisterVehicle(ACarlaWheeledVehicle* Vehicle)
+void UObjectRegister::RegisterVehicle(ACarlaWheeledVehicle* Vehicle, uint64 CarlaActorId)
 {
   check(Vehicle);
   FBoundingBox BB = UBoundingBoxCalculator::GetVehicleBoundingBox(Vehicle);
   auto Tag = ATagger::GetTagOfTaggedComponent(*Vehicle->GetMesh());
-  RegisterEnvironmentObject(Vehicle, BB, EnvironmentObjectType::Vehicle, static_cast<uint8>(Tag));
+  RegisterEnvironmentObject(Vehicle, BB, EnvironmentObjectType::Vehicle, static_cast<uint8>(Tag), CarlaActorId);
 }
 
-void UObjectRegister::RegisterCharacter(ACharacter* Character)
+void UObjectRegister::RegisterCharacter(ACharacter* Character, uint64 CarlaActorId)
 {
   check(Character);
   FBoundingBox BB = UBoundingBoxCalculator::GetCharacterBoundingBox(Character);
-  RegisterEnvironmentObject(Character, BB, EnvironmentObjectType::Character, static_cast<uint8>(crp::CityObjectLabel::Pedestrians));
+  RegisterEnvironmentObject(Character, BB, EnvironmentObjectType::Character, static_cast<uint8>(crp::CityObjectLabel::Pedestrians), CarlaActorId);
 }
 
-void UObjectRegister::RegisterTrafficLight(ATrafficLightBase* TrafficLight)
+void UObjectRegister::RegisterTrafficLight(ATrafficLightBase* TrafficLight, uint64 CarlaActorId)
 {
   check(TrafficLight);
 
@@ -193,7 +210,7 @@ void UObjectRegister::RegisterTrafficLight(ATrafficLightBase* TrafficLight)
 
     FEnvironmentObject EnvironmentObject;
     EnvironmentObject.Transform = Transform;
-    EnvironmentObject.Id = CityHash64(TCHAR_TO_ANSI(*SMName), SMName.Len());
+    EnvironmentObject.Id = CarlaActorId == 0 ? CityHash64(TCHAR_TO_ANSI(*SMName), SMName.Len()) : CarlaActorId;
     EnvironmentObject.Name = SMName;
     EnvironmentObject.Actor = TrafficLight;
     EnvironmentObject.CanTick = IsActorTickEnabled;
@@ -283,24 +300,26 @@ void UObjectRegister::RegisterISMComponents(AActor* Actor)
   }
 }
 
-void UObjectRegister::RegisterSMComponents(AActor* Actor)
+void UObjectRegister::RegisterSMComponents(AActor* Actor, uint64 CarlaActorId)
 {
   check(Actor);
 
   TArray<UStaticMeshComponent*> StaticMeshComps;
+  
   Actor->GetComponents<UStaticMeshComponent>(StaticMeshComps);
 
-  TArray<FBoundingBox> BBs;
   TArray<uint8> Tags;
+  TArray<FBoundingBox> BBs;
+  
   UBoundingBoxCalculator::GetBBsOfStaticMeshComponents(StaticMeshComps, BBs, Tags);
+  
   check(BBs.Num() == Tags.Num());
 
-  const FTransform Transform = Actor->GetTransform();
   const FString ActorName = Actor->GetName();
+  const FTransform Transform = Actor->GetTransform();
   const bool IsActorTickEnabled = Actor->IsActorTickEnabled();
-
-  ATrafficSignBase* TrafficSign = Cast<ATrafficSignBase>(Actor);
-  if (!IsValid(TrafficSign) || BBs.Num() == 0)
+  
+  if (BBs.Num() == 0)
   {
     return;
   }
@@ -313,14 +332,8 @@ void UObjectRegister::RegisterSMComponents(AActor* Actor)
     FTransform EffectiveTransform = Transform;
     FBoundingBox EffectiveBB = BBs[i];
 
-    if (TrafficSign)
-    {
-      EffectiveBB.Origin = Transform.InverseTransformPosition(BBs[i].Origin);
-      EffectiveBB.Rotation = FRotator(0, 0, 0);
-    }
-
     EnvironmentObject.Transform = EffectiveTransform;
-    EnvironmentObject.Id = CityHash64(TCHAR_TO_ANSI(*SMName), SMName.Len());
+    EnvironmentObject.Id = CarlaActorId == 0 ? CityHash64(TCHAR_TO_ANSI(*SMName), SMName.Len()) : CarlaActorId;
     EnvironmentObject.Name = SMName;
     EnvironmentObject.Actor = Actor;
     EnvironmentObject.CanTick = IsActorTickEnabled;
@@ -331,7 +344,7 @@ void UObjectRegister::RegisterSMComponents(AActor* Actor)
   }
 }
 
-void UObjectRegister::RegisterSKMComponents(AActor* Actor)
+void UObjectRegister::RegisterSKMComponents(AActor* Actor, uint64 CarlaActorId)
 {
   check(Actor);
 
@@ -353,7 +366,7 @@ void UObjectRegister::RegisterSKMComponents(AActor* Actor)
 
     FEnvironmentObject EnvironmentObject;
     EnvironmentObject.Transform = Transform;
-    EnvironmentObject.Id = CityHash64(TCHAR_TO_ANSI(*SKMName), SKMName.Len());
+    EnvironmentObject.Id = CarlaActorId == 0 ? CityHash64(TCHAR_TO_ANSI(*SKMName), SKMName.Len()) : CarlaActorId;
     EnvironmentObject.Name = SKMName;
     EnvironmentObject.Actor = Actor;
     EnvironmentObject.CanTick = IsActorTickEnabled;

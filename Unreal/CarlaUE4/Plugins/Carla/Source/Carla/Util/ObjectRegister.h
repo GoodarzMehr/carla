@@ -40,19 +40,20 @@ private:
     AActor* Actor,
     FBoundingBox& BoundingBox,
     EnvironmentObjectType Type,
-    uint8 Tag);
+    uint8 Tag,
+    uint64 CarlaActorId);
 
-  void RegisterVehicle(ACarlaWheeledVehicle* Vehicle);
+  void RegisterVehicle(ACarlaWheeledVehicle* Vehicle, uint64 CarlaActorId);
 
-  void RegisterCharacter(ACharacter* Character);
+  void RegisterCharacter(ACharacter* Character, uint64 CarlaActorId);
 
-  void RegisterTrafficLight(ATrafficLightBase* TrafficLight);
-
+  void RegisterTrafficLight(ATrafficLightBase* TrafficLight, uint64 CarlaActorId);
+  
   void RegisterISMComponents(AActor* Actor);
 
-  void RegisterSMComponents(AActor* Actor);
+  void RegisterSMComponents(AActor* Actor, uint64 CarlaActorId = 0);
 
-  void RegisterSKMComponents(AActor* Actor);
+  void RegisterSKMComponents(AActor* Actor, uint64 CarlaActorId = 0);
 
   void EnableEnvironmentObject(FEnvironmentObject& EnvironmentObject, bool Enable);
 
