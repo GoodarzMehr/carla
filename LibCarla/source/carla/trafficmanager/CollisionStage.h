@@ -72,13 +72,13 @@ private:
                                             const uint64_t reference_junction_look_ahead_index);
 
   // Method to calculate bounding box extention length ahead of the vehicle.
-  float GetBoundingBoxExtention(const ActorId actor_id);
+  float GetBoundingBoxExtention(const ActorId actor_id, const bool other_is_prop = false);
 
   // Method to calculate polygon points around the vehicle's bounding box.
   LocationVector GetBoundary(const ActorId actor_id);
 
   // Method to construct polygon points around the path boundary of the vehicle.
-  LocationVector GetGeodesicBoundary(const ActorId actor_id);
+  LocationVector GetGeodesicBoundary(const ActorId actor_id, const bool other_is_prop = false);
 
   Polygon GetPolygon(const LocationVector &boundary);
 

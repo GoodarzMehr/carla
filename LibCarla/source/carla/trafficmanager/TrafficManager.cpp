@@ -136,20 +136,12 @@ void TrafficManager::CreateTrafficManagerServer(
   };
 
   /// Define local constants
-  const std::vector<float> longitudinal_param = LONGITUDIAL_PARAM;
-  const std::vector<float> longitudinal_highway_param = LONGITUDIAL_HIGHWAY_PARAM;
-  const std::vector<float> lateral_param = LATERAL_PARAM;
-  const std::vector<float> lateral_highway_param = LATERAL_HIGHWAY_PARAM;
   const float perc_difference_from_limit = INITIAL_PERCENTAGE_SPEED_DIFFERENCE;
 
   std::pair<std::string, uint16_t> serverTM;
 
   /// Create local instance of TM
   TrafficManagerLocal* tm_ptr = new TrafficManagerLocal(
-    longitudinal_param,
-    longitudinal_highway_param,
-    lateral_param,
-    lateral_highway_param,
     perc_difference_from_limit,
     episode_proxy,
     port);

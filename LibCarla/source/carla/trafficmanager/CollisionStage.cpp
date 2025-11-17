@@ -142,13 +142,16 @@ void CollisionStage::Reset() {
   collision_locks.clear();
 }
 
-float CollisionStage::GetBoundingBoxExtention(const ActorId actor_id) {
+float CollisionStage::GetBoundingBoxExtention(const ActorId actor_id, const bool other_is_prop) {
 
   const float velocity = cg::Math::Dot(simulation_state.GetVelocity(actor_id), simulation_state.GetHeading(actor_id));
   float bbox_extension;
   // Using a function to calculate boundary length.
   float velocity_extension = VEL_EXT_FACTOR * velocity;
   bbox_extension = BOUNDARY_EXTENSION_MINIMUM + velocity_extension * velocity_extension;
+  if (other_is_prop) {
+    bbox_extension += PROP_EXTENSION_ADDITION;
+  }
   // If a valid collision lock present, change boundary length to maintain lock.
   if (collision_locks.find(actor_id) != collision_locks.end()) {
     const CollisionLock &lock = collision_locks.at(actor_id);
@@ -194,7 +197,7 @@ LocationVector CollisionStage::GetBoundary(const ActorId actor_id) {
   return bbox_boundary;
 }
 
-LocationVector CollisionStage::GetGeodesicBoundary(const ActorId actor_id) {
+LocationVector CollisionStage::GetGeodesicBoundary(const ActorId actor_id, const bool other_is_prop) {
   LocationVector geodesic_boundary;
 
   if (geodesic_boundary_map.find(actor_id) != geodesic_boundary_map.end()) {
@@ -203,7 +206,7 @@ LocationVector CollisionStage::GetGeodesicBoundary(const ActorId actor_id) {
     const LocationVector bbox = GetBoundary(actor_id);
 
     if (buffer_map.find(actor_id) != buffer_map.end()) {
-      float bbox_extension = GetBoundingBoxExtention(actor_id);
+      float bbox_extension = GetBoundingBoxExtention(actor_id, other_is_prop);
       const float specific_lead_distance = parameters.GetDistanceToLeadingVehicle(actor_id);
       bbox_extension = std::max(specific_lead_distance, bbox_extension);
       const float bbox_extension_square = SQUARE(bbox_extension);
@@ -289,6 +292,8 @@ GeometryComparison CollisionStage::GetGeometryBetweenActors(const ActorId refere
     key_parts = {other_actor_id, reference_vehicle_id};
   }
 
+  const ActorType other_actor_type = simulation_state.GetType(other_actor_id);
+
   uint64_t actor_id_key = 0u;
   actor_id_key |= key_parts.first;
   actor_id_key <<= 32;
@@ -307,7 +312,7 @@ GeometryComparison CollisionStage::GetGeometryBetweenActors(const ActorId refere
     const Polygon reference_polygon = GetPolygon(GetBoundary(reference_vehicle_id));
     const Polygon other_polygon = GetPolygon(GetBoundary(other_actor_id));
 
-    const Polygon reference_geodesic_polygon = GetPolygon(GetGeodesicBoundary(reference_vehicle_id));
+    const Polygon reference_geodesic_polygon = GetPolygon(GetGeodesicBoundary(reference_vehicle_id, other_actor_type == ActorType::Other));
 
     const Polygon other_geodesic_polygon = GetPolygon(GetGeodesicBoundary(other_actor_id));
 
@@ -352,8 +357,10 @@ std::pair<bool, float> CollisionStage::NegotiateCollision(const ActorId referenc
   float reference_vehicle_length = simulation_state.GetDimensions(reference_vehicle_id).x * SQUARE_ROOT_OF_TWO;
   float other_vehicle_length = simulation_state.GetDimensions(other_actor_id).x * SQUARE_ROOT_OF_TWO;
 
+  const ActorType other_actor_type = simulation_state.GetType(other_actor_id);
+
   float inter_vehicle_distance = cg::Math::DistanceSquared(reference_location, other_location);
-  float ego_bounding_box_extension = GetBoundingBoxExtention(reference_vehicle_id);
+  float ego_bounding_box_extension = GetBoundingBoxExtention(reference_vehicle_id, other_actor_type == ActorType::Other);
   float other_bounding_box_extension = GetBoundingBoxExtention(other_actor_id);
   // Calculate minimum distance between vehicle to consider collision negotiation.
   float inter_vehicle_length = reference_vehicle_length + other_vehicle_length;

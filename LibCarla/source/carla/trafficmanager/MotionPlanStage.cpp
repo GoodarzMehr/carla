@@ -16,6 +16,8 @@
 #include "carla/trafficmanager/MotionPlanStage.h"
 #include "carla/sensor/data/Color.h"
 
+#include "carla/trafficmanager/PIDParameters.h"
+
 namespace carla {
 namespace traffic_manager {
 
@@ -33,10 +35,6 @@ MotionPlanStage::MotionPlanStage(
   const Parameters &parameters,
   const BufferMap &buffer_map,
   TrackTraffic &track_traffic,
-  const std::vector<float> &urban_longitudinal_parameters,
-  const std::vector<float> &highway_longitudinal_parameters,
-  const std::vector<float> &urban_lateral_parameters,
-  const std::vector<float> &highway_lateral_parameters,
   const LocalizationFrame &localization_frame,
   const CollisionFrame&collision_frame,
   const TLFrame &tl_frame,
@@ -50,10 +48,6 @@ MotionPlanStage::MotionPlanStage(
     parameters(parameters),
     buffer_map(buffer_map),
     track_traffic(track_traffic),
-    urban_longitudinal_parameters(urban_longitudinal_parameters),
-    highway_longitudinal_parameters(highway_longitudinal_parameters),
-    urban_lateral_parameters(urban_lateral_parameters),
-    highway_lateral_parameters(highway_lateral_parameters),
     localization_frame(localization_frame),
     collision_frame(collision_frame),
     tl_frame(tl_frame),
@@ -79,6 +73,25 @@ void MotionPlanStage::Update(const unsigned long index) {
   const bool &tl_hazard = tl_frame.at(index);
   current_timestamp = world.GetSnapshot().GetTimestamp();
   StateEntry current_state;
+
+  std::string vehicle_type_id;
+  
+  auto cache_it = actor_type_cache.find(actor_id);
+  
+  if (cache_it != actor_type_cache.end()) {
+    vehicle_type_id = cache_it->second;
+  } else {
+    ActorPtr actor = world.GetActor(actor_id);
+    
+    if (actor) {
+      vehicle_type_id = actor->GetTypeId();
+      
+      actor_type_cache[actor_id] = vehicle_type_id;
+    }
+  }
+
+  // Get the PID configuration for this vehicle
+  const VehiclePIDConfig& pid_config = GetVehiclePIDConfig(vehicle_type_id);
 
   // Instanciating teleportation transform as current vehicle transform.
   cg::Transform teleportation_transform = cg::Transform(vehicle_location, vehicle_rotation);
@@ -201,12 +214,13 @@ void MotionPlanStage::Update(const unsigned long index) {
       // Select PID parameters.
       std::vector<float> longitudinal_parameters;
       std::vector<float> lateral_parameters;
+      
       if (vehicle_speed > HIGHWAY_SPEED) {
-        longitudinal_parameters = highway_longitudinal_parameters;
-        lateral_parameters = highway_lateral_parameters;
+        longitudinal_parameters = pid_config.highway_longitudinal;
+        lateral_parameters = pid_config.highway_lateral;
       } else {
-        longitudinal_parameters = urban_longitudinal_parameters;
-        lateral_parameters = urban_lateral_parameters;
+        longitudinal_parameters = pid_config.urban_longitudinal;
+        lateral_parameters = pid_config.urban_lateral;
       }
 
       // If physics is enabled for the vehicle, use PID controller.
@@ -593,11 +607,13 @@ float MotionPlanStage::GetThreePointCircleRadius(cg::Location first_location,
 void MotionPlanStage::RemoveActor(const ActorId actor_id) {
   pid_state_map.erase(actor_id);
   teleportation_instance.erase(actor_id);
+  actor_type_cache.erase(actor_id);
 }
 
 void MotionPlanStage::Reset() {
   pid_state_map.clear();
   teleportation_instance.clear();
+  actor_type_cache.clear();
 }
 
 } // namespace traffic_manager

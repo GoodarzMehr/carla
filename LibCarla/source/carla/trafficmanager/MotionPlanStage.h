@@ -12,6 +12,7 @@
 #include "carla/trafficmanager/SimulationState.h"
 #include "carla/trafficmanager/Stage.h"
 #include "carla/trafficmanager/TrackTraffic.h"
+#include "carla/trafficmanager/PIDParameters.h"
 
 namespace carla {
 namespace traffic_manager {
@@ -26,11 +27,6 @@ private:
   const Parameters &parameters;
   const BufferMap &buffer_map;
   TrackTraffic &track_traffic;
-  // PID paramenters for various road conditions.
-  const std::vector<float> urban_longitudinal_parameters;
-  const std::vector<float> highway_longitudinal_parameters;
-  const std::vector<float> urban_lateral_parameters;
-  const std::vector<float> highway_lateral_parameters;
   const LocalizationFrame &localization_frame;
   const CollisionFrame &collision_frame;
   const TLFrame &tl_frame;
@@ -40,6 +36,8 @@ private:
   // Structure to keep track of duration between teleportation
   // in hybrid physics mode.
   std::unordered_map<ActorId, cc::Timestamp> teleportation_instance;
+  // Cache to store actor types to avoid repeated calls.
+  std::unordered_map<ActorId, std::string> actor_type_cache;
   ControlFrame &output_array;
   cc::Timestamp current_timestamp;
   UniformPRNG &random_device;
@@ -83,10 +81,6 @@ public:
                   const Parameters &parameters,
                   const BufferMap &buffer_map,
                   TrackTraffic &track_traffic,
-                  const std::vector<float> &urban_longitudinal_parameters,
-                  const std::vector<float> &highway_longitudinal_parameters,
-                  const std::vector<float> &urban_lateral_parameters,
-                  const std::vector<float> &highway_lateral_parameters,
                   const LocalizationFrame &localization_frame,
                   const CollisionFrame &collision_frame,
                   const TLFrame &tl_frame,

@@ -50,11 +50,6 @@ using constants::HybridMode::HYBRID_MODE_DT;
 class TrafficManagerLocal : public TrafficManagerBase {
 
 private:
-  /// PID controller parameters.
-  std::vector<float> longitudinal_PID_parameters;
-  std::vector<float> longitudinal_highway_PID_parameters;
-  std::vector<float> lateral_PID_parameters;
-  std::vector<float> lateral_highway_PID_parameters;
   /// CARLA client connection object.
   carla::client::detail::EpisodeProxy episode_proxy;
   /// CARLA client and object.
@@ -118,11 +113,7 @@ private:
 
 public:
   /// Private constructor for singleton lifecycle management.
-  TrafficManagerLocal(std::vector<float> longitudinal_PID_parameters,
-                      std::vector<float> longitudinal_highway_PID_parameters,
-                      std::vector<float> lateral_PID_parameters,
-                      std::vector<float> lateral_highway_PID_parameters,
-                      float perc_decrease_from_limit,
+  TrafficManagerLocal(float perc_decrease_from_limit,
                       cc::detail::EpisodeProxy &episode_proxy,
                       uint16_t &RPCportTM);
 

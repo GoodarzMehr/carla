@@ -18,20 +18,11 @@ namespace traffic_manager {
 using namespace constants::FrameMemory;
 
 TrafficManagerLocal::TrafficManagerLocal(
-  std::vector<float> longitudinal_PID_parameters,
-  std::vector<float> longitudinal_highway_PID_parameters,
-  std::vector<float> lateral_PID_parameters,
-  std::vector<float> lateral_highway_PID_parameters,
   float perc_difference_from_limit,
   cc::detail::EpisodeProxy &episode_proxy,
   uint16_t &RPCportTM)
 
-  : longitudinal_PID_parameters(longitudinal_PID_parameters),
-    longitudinal_highway_PID_parameters(longitudinal_highway_PID_parameters),
-    lateral_PID_parameters(lateral_PID_parameters),
-    lateral_highway_PID_parameters(lateral_highway_PID_parameters),
-
-    episode_proxy(episode_proxy),
+  : episode_proxy(episode_proxy), 
     world(cc::World(episode_proxy)),
 
     localization_stage(LocalizationStage(vehicle_id_list,
@@ -66,10 +57,6 @@ TrafficManagerLocal::TrafficManagerLocal(
                                       parameters,
                                       buffer_map,
                                       track_traffic,
-                                      longitudinal_PID_parameters,
-                                      longitudinal_highway_PID_parameters,
-                                      lateral_PID_parameters,
-                                      lateral_highway_PID_parameters,
                                       localization_frame,
                                       collision_frame,
                                       tl_frame,
