@@ -176,11 +176,17 @@ void ALargeMapManager::AdjustAllSignsToHeightGround()
   }
 
   UCarlaEpisode* CarlaEpisode = UCarlaStatics::GetCurrentEpisode(World);
+  
+  ACarlaGameModeBase *GameMode = UCarlaStatics::GetGameMode(CarlaEpisode->GetWorld());
+
+  const boost::optional<carla::road::Map>& CarlaMap = GameMode->GetMap();
 
   TArray<AActor*> ActorsToIgnore;
   TArray<AActor*> ActorsToAdjustHeight;
   UGameplayStatics::GetAllActorsOfClass(World, ATrafficSignBase::StaticClass(), ActorsToAdjustHeight);
   ActorsToIgnore.Append(ActorsToAdjustHeight);
+
+  const float MinDistanceToWaypoint = 210.0f;
   
   for (AActor* Actor : ActorsToAdjustHeight)
   {
@@ -196,7 +202,44 @@ void ALargeMapManager::AdjustAllSignsToHeightGround()
 
     if (TrafficSign->bPositioned)
     {
-      float ZOffset = AdjustedLocation.Z - OriginalLocation.Z;
+      if (Actor->GetName().Contains("BP_Stop_v02"))
+      {
+        if (!CarlaMap.has_value())
+        {
+          LM_LOG(Warning, "No Carla map available to offset stop sign %s position", *Actor->GetName());
+          continue;
+        }
+        FVector GlobalLocation = LocalToGlobalLocation(AdjustedLocation);
+        
+        carla::geom::Location CarlaLocation = GlobalLocation;
+        
+        auto Waypoint = CarlaMap->GetClosestWaypointOnRoad(CarlaLocation);
+        
+        if (Waypoint.has_value())
+        { 
+          carla::geom::Transform WaypointTransform = CarlaMap->ComputeTransform(Waypoint.value());
+          carla::geom::Location WaypointLocation = WaypointTransform.location;
+          
+          // Calculate 2D distance
+          float dx = (CarlaLocation.x - WaypointLocation.x);
+          float dy = (CarlaLocation.y - WaypointLocation.y);
+          float Distance = FMath::Sqrt(dx*dx + dy*dy) * 100.0f;
+          
+          if (Distance <= MinDistanceToWaypoint)
+          {
+            FVector ForwardVector = Actor->GetActorForwardVector();
+            
+            AdjustedLocation += ForwardVector * (MinDistanceToWaypoint - Distance + 0.02f);
+
+            AdjustSignHeightToGround(AdjustedLocation, Actor->GetName(), ActorsToIgnore);
+            
+            LM_LOG(Log, "Offsetting stop sign %s (distance: %.2f cm) by %.2f cm", 
+                   *Actor->GetName(), Distance, MinDistanceToWaypoint - Distance + 0.02f);
+          }
+        }
+      }
+
+      FVector Offset = AdjustedLocation - OriginalLocation;
 
       Actor->GetRootComponent()->SetMobility(EComponentMobility::Movable);
 
@@ -208,11 +251,16 @@ void ALargeMapManager::AdjustAllSignsToHeightGround()
         if (!BoxComp) continue;
 
         FVector BoxLocation = BoxComp->GetRelativeLocation();
-        BoxLocation.Z -= ZOffset;
+        if (BoxComp->GetName().Contains("Stop Box"))
+        {
+          BoxLocation.Z -= Offset.Z;
+        } else {
+          BoxLocation -= Offset;
+        }
         BoxComp->SetRelativeLocation(BoxLocation);
       }
 
-      LM_LOG(Log, "Adjusted sign %s height by %f cm", *Actor->GetName(), ZOffset);
+      LM_LOG(Log, "Adjusted sign %s height by %f cm", *Actor->GetName(), Offset.Z);
 
       Actor->UpdateComponentTransforms();
       Actor->GetRootComponent()->SetMobility(EComponentMobility::Static);
