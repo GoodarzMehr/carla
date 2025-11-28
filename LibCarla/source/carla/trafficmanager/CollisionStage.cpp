@@ -76,7 +76,7 @@ void CollisionStage::Update(const unsigned long index) {
                 return (cg::Math::DistanceSquared(e_loc, loc_1) < cg::Math::DistanceSquared(e_loc, loc_2));
               });
     
-    simulation_state.UpdateImpendingCollision(ego_actor_id, {false, false, false});
+    simulation_state.UpdateImpendingCollision(ego_actor_id, {false, false, false, 10000.0f});
 
     // Check every actor in the vicinity if it poses a collision hazard.
     for (auto iter = collision_candidate_ids.begin();
