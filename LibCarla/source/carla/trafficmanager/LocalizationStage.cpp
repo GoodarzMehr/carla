@@ -152,7 +152,7 @@ void LocalizationStage::Update(const unsigned long index) {
       force_lane_change = true;
       lane_change_direction = false;
     }
-    if (collision_state.impending_prop_collision)
+    if (collision_state.impending_prop_collision || collision_state.impending_pedestrian_collision)
     {
       force_lane_change = true;
 
