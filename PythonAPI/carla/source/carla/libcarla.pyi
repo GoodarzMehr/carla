@@ -857,6 +857,9 @@ class CityObjectLabel(int, _CarlaEnum):
     Bus = 16
     Rider = 13
     Train = 17
+    Rock = 29
+    TrafficCone = 30
+    Barrier = 31
     Any = 255
 
 class Client:
