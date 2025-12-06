@@ -13,6 +13,7 @@
 #include "Carla/Game/CarlaStatics.h"
 #include "Carla/Game/CarlaEpisode.h"
 #include "Carla/MapGen/LargeMapManager.h"
+#include "Carla/Game/TaggedComponent.h"
 
 #include "InstancedFoliageActor.h"
 #include "GameFramework/Character.h"
@@ -456,4 +457,19 @@ void UObjectRegister::EnableISMComp(FEnvironmentObject& EnvironmentObject, bool 
   UInstancedStaticMeshComponent* ISMComp = Cast<UInstancedStaticMeshComponent>(SMComp);
   bool Result = ISMComp->UpdateInstanceTransform(Index, InstanceTransform, true, true);
 
+  TArray<USceneComponent*> ChildComponents;
+  
+  ISMComp->GetChildrenComponents(false, ChildComponents);
+  
+  for (USceneComponent* Child : ChildComponents)
+  {
+    UTaggedComponent* TaggedComp = Cast<UTaggedComponent>(Child);
+    
+    if (TaggedComp)
+    {
+      TaggedComp->MarkRenderStateDirty();
+      
+      break;
+    }
+  }
 }
