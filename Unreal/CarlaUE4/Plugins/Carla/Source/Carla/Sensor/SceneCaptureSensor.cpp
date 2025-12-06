@@ -64,6 +64,8 @@ ASceneCaptureSensor::ASceneCaptureSensor(const FObjectInitializer &ObjectInitial
   CaptureComponent2D->bCaptureEveryFrame = false;
   CaptureComponent2D->bAlwaysPersistRenderingState = true;
 
+  CaptureComponent2D->ShowFlags.SetGame(true);
+
   SceneCaptureSensor_local_ns::SetCameraDefaultOverrides(*CaptureComponent2D);
 
   ++SCENE_CAPTURE_COUNTER;
