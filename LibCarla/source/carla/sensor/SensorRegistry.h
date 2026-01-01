@@ -30,6 +30,7 @@
 #include "carla/sensor/s11n/GBufferUint8Serializer.h"
 #include "carla/sensor/s11n/GBufferFloatSerializer.h"
 #include "carla/sensor/s11n/V2XSerializer.h"
+#include "carla/sensor/s11n/VoxelDetectionSerializer.h"
 
 // 2. Add a forward-declaration of the sensor here.
 class ACollisionSensor;
@@ -140,5 +141,6 @@ namespace sensor {
 #include "Carla/Sensor/V2XSensor.h"
 #include "Carla/Sensor/CustomV2XSensor.h"
 #include "Carla/Sensor/HSSLidar.h"
+#include "Carla/Sensor/VoxelDetectionSensor.h"
 
 #endif // LIBCARLA_SENSOR_REGISTRY_WITH_SENSOR_INCLUDES

@@ -23,6 +23,7 @@
 #include <carla/sensor/data/V2XEvent.h>
 #include <carla/sensor/data/V2XData.h>
 #include <carla/sensor/data/LibITS.h>
+#include <carla/sensor/data/VoxelDetectionEvent.h>
 
 #include <carla/sensor/data/RadarData.h>
 
@@ -681,7 +682,7 @@ void export_sensor_data() {
   >("VoxelDetectionEvent", no_init)              // name, and disable construction.
   .def("__len__", &csd::VoxelDetectionEvent::size)
   .def("__iter__", iterator<csd::VoxelDetectionEvent>())
-  .def("__getitem__", +[](const csd::VoxelDetectionEvent &self, size_t pos) -> cr::SemanticId {
+  .def("__getitem__", +[](const csd::VoxelDetectionEvent &self, size_t pos) -> cr::ActorId {
     return self.at(pos);
   })
   ;

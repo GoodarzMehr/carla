@@ -27,34 +27,19 @@ namespace s11n {
     static Buffer Serialize(
         const SensorT &,
         const EpisodeT &episode,
-        const ActorListT &detected_actors) {
-      const uint32_t size_in_bytes = sizeof(ActorId) * detected_actors.Num();
+        const ActorListT &detected_voxels) {
+      const uint32_t size_in_bytes = static_cast<uint32_t>(sizeof(ActorId) * detected_voxels.Num());
       Buffer buffer{size_in_bytes};
       unsigned char *it = buffer.data();
-      for (auto *actor : detected_actors) {
-        if (actor)
-        {
-          auto curActor = episode.FindCarlaActor(actor);
-          if (curActor)
-          {
-            ActorId id = episode.FindCarlaActor(actor)->GetActorId();
-            std::memcpy(it, &id, sizeof(ActorId));
-            it += sizeof(ActorId);
-          }else{
-            ActorId id = 999999999;
-            std::memcpy(it, &id, sizeof(ActorId));
-            it += sizeof(ActorId);
-          } 
-        }else{
-          ActorId id = 0;
-          std::memcpy(it, &id, sizeof(ActorId));
-          it += sizeof(ActorId);
-        }
+      for (int32_t semantic_id : detected_voxels) {
+        ActorId id = static_cast<ActorId>(semantic_id);
+        std::memcpy(it, &id, sizeof(ActorId));
+        it += sizeof(ActorId);
       }
       return buffer;
     }
 
-  static SharedPtr<SensorData> Deserialize(RawData &&data);
+    static SharedPtr<SensorData> Deserialize(RawData &&data);
   };
 
 } // namespace s11n

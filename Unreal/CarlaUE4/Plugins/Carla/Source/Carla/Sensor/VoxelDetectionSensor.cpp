@@ -1,6 +1,5 @@
 ﻿#include "Carla/Sensor/VoxelDetectionSensor.h"
 #include "Carla.h"
-#include "Carla/rpc/ActorId.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 #include "Carla/Game/CarlaEpisode.h"
 #include "Carla/Util/BoundingBoxCalculator.h"
