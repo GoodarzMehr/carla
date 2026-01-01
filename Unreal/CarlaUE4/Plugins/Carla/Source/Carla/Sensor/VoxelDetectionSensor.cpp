@@ -179,7 +179,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 		}
 	}
 	auto DataStream = GetDataStream(*this);
-	DataStream.Send(*this, GetEpisode(), DetectedVoxels);
+	DataStream.SerializeAndSend(*this, GetEpisode(), DetectedVoxels);
 }
 
 void AVoxelDetectionSensor::VoxelDetection(TArray<FVector> BoxToDetected, TArray<AActor*>& IgnoreActors, Array3D<int32>& SemanticVoxels, Array3D<bool>& visited, FCriticalSection& Mutex)
