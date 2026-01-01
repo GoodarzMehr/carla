@@ -60,6 +60,7 @@ struct FCameraGBufferFloat;
 class AV2XSensor;
 class ACustomV2XSensor;
 class AHSSLidar;
+class AVoxelDetectionSensor;
 
 namespace carla {
 namespace sensor {
@@ -100,6 +101,7 @@ namespace sensor {
     std::pair<AV2XSensor *, s11n::CAMDataSerializer>,
     std::pair<ACustomV2XSensor *, s11n::CustomV2XDataSerializer>,
     std::pair<AHSSLidar *, s11n::LidarSerializer>
+    std::pair<AVoxelDetectionSensor *, s11n::VoxelDetectionSerializer>
     
 
   >;

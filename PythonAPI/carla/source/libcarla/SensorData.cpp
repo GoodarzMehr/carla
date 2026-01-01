@@ -665,12 +665,24 @@ void export_sensor_data() {
     })
   ;
 
-    class_<csd::CustomV2XEvent, bases<cs::SensorData>, boost::noncopyable, boost::shared_ptr<csd::CustomV2XEvent>>("CustomV2XEvent", no_init)
+  class_<csd::CustomV2XEvent, bases<cs::SensorData>, boost::noncopyable, boost::shared_ptr<csd::CustomV2XEvent>>("CustomV2XEvent", no_init)
     .def("get_message_count", &csd::CustomV2XEvent::GetMessageCount)
     .def("__len__", &csd::CustomV2XEvent::size)
     .def("__iter__", iterator<csd::CustomV2XEvent>())
     .def("__getitem__", +[](const csd::CustomV2XEvent &self, size_t pos) -> csd::CustomV2XData {
       return self.at(pos);
     })
+  ;
+
+  class_<
+    csd::VoxelDetectionEvent,
+    bases<cs::SensorData>,boost::noncopyable,
+    boost::shared_ptr<csd::VoxelDetectionEvent>
+  >("VoxelDetectionEvent", no_init)              // name, and disable construction.
+  .def("__len__", &csd::VoxelDetectionEvent::size)
+  .def("__iter__", iterator<csd::VoxelDetectionEvent>())
+  .def("__getitem__", +[](const csd::VoxelDetectionEvent &self, size_t pos) -> cr::SemanticId {
+    return self.at(pos);
+  })
   ;
 }
