@@ -100,7 +100,7 @@ namespace sensor {
     std::pair<FCameraGBufferFloat *, s11n::GBufferFloatSerializer>,
     std::pair<AV2XSensor *, s11n::CAMDataSerializer>,
     std::pair<ACustomV2XSensor *, s11n::CustomV2XDataSerializer>,
-    std::pair<AHSSLidar *, s11n::LidarSerializer>
+    std::pair<AHSSLidar *, s11n::LidarSerializer>,
     std::pair<AVoxelDetectionSensor *, s11n::VoxelDetectionSerializer>
     
 
