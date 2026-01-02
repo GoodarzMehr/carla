@@ -2,294 +2,404 @@
 #include "Carla.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 #include "Carla/Game/CarlaEpisode.h"
-#include "Carla/Util/BoundingBoxCalculator.h"
-#include "Carla/Vehicle/CarlaWheeledVehicle.h"
-#include "Kismet/KismetMathLibrary.h"
-#include "Kismet/KismetSystemLibrary.h"
-#include "Traffic/RoutePlanner.h"
 #include "Runtime/Core/Public/Async/ParallelFor.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/World.h"
+#include "CollisionQueryParams.h"
+#include <PxScene.h>
 
 TMap<int32, FLinearColor> AVoxelDetectionSensor::ColorMap = AVoxelDetectionSensor::CreateColorMap();
 
 AVoxelDetectionSensor::AVoxelDetectionSensor(const FObjectInitializer &ObjectInitializer)
   : Super(ObjectInitializer)
 {
-	PrimaryActorTick.bCanEverTick = true;
+    PrimaryActorTick.bCanEverTick = true;
 }
 
 FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 {
-	auto Definition = UActorBlueprintFunctionLibrary::MakeGenericSensorDefinition(
-		TEXT("other"),
-		TEXT("voxel_detection"));
+    auto Definition = UActorBlueprintFunctionLibrary::MakeGenericSensorDefinition(
+        TEXT("other"),
+        TEXT("voxel_detection"));
 
-	FActorVariation DetectedLen;
-	DetectedLen.Id = TEXT("range");
-	DetectedLen.Type = EActorAttributeType::Float;
-	DetectedLen.RecommendedValues = { TEXT("50.0") };
-	DetectedLen.bRestrictToRecommended = false;
+    FActorVariation Range;
+    Range.Id = TEXT("range");
+    Range.Type = EActorAttributeType::Float;
+    Range.RecommendedValues = { TEXT("50.0") };
+    Range.bRestrictToRecommended = false;
 
-	FActorVariation Top;
-	Top.Id = TEXT("upper_limit");
-	Top.Type = EActorAttributeType::Float;
-	Top.RecommendedValues = { TEXT("20.0") };
-	Top.bRestrictToRecommended = false;
-	
-	FActorVariation Bottom;
-	Bottom.Id = TEXT("lower_limit");
-	Bottom.Type = EActorAttributeType::Float;
-	Bottom.RecommendedValues = { TEXT("-5.0") };
-	Bottom.bRestrictToRecommended = false;
+    FActorVariation Top;
+    Top.Id = TEXT("upper_limit");
+    Top.Type = EActorAttributeType::Float;
+    Top.RecommendedValues = { TEXT("10.0") };
+    Top.bRestrictToRecommended = false;
+    
+    FActorVariation Bottom;
+    Bottom.Id = TEXT("lower_limit");
+    Bottom.Type = EActorAttributeType::Float;
+    Bottom.RecommendedValues = { TEXT("-5.0") };
+    Bottom.bRestrictToRecommended = false;
 
-	FActorVariation BoxSize;
-	BoxSize.Id = TEXT("voxel_size");
-	BoxSize.Type = EActorAttributeType::Float;
-	BoxSize.RecommendedValues = { TEXT("1.0f") };
-	BoxSize.bRestrictToRecommended = false;
+    FActorVariation VoxelSize;
+    VoxelSize.Id = TEXT("voxel_size");
+    VoxelSize.Type = EActorAttributeType::Float;
+    VoxelSize.RecommendedValues = { TEXT("0.5") };
+    VoxelSize.bRestrictToRecommended = false;
 
-	FActorVariation SelfIgnore;
-	SelfIgnore.Id = TEXT("ignore_self");
-	SelfIgnore.Type = EActorAttributeType::Int;
-	SelfIgnore.RecommendedValues = { TEXT("1") };
-	SelfIgnore.bRestrictToRecommended = false;
+    FActorVariation SelfIgnore;
+    SelfIgnore.Id = TEXT("ignore_self");
+    SelfIgnore.Type = EActorAttributeType::Int;
+    SelfIgnore.RecommendedValues = { TEXT("0") };
+    SelfIgnore.bRestrictToRecommended = false;
 
-	FActorVariation DrawDebug;
-	DrawDebug.Id = TEXT("draw_debug");
-	DrawDebug.Type = EActorAttributeType::Int;
-	DrawDebug.RecommendedValues = { TEXT("1") };
-	DrawDebug.bRestrictToRecommended = false;
+    FActorVariation DrawDebug;
+    DrawDebug.Id = TEXT("draw_debug");
+    DrawDebug.Type = EActorAttributeType::Int;
+    DrawDebug.RecommendedValues = { TEXT("0") };
+    DrawDebug.bRestrictToRecommended = false;
 
-	Definition.Variations.Append({ DetectedLen, Top, Bottom, BoxSize, SelfIgnore, DrawDebug });
+    Definition.Variations.Append({ Range, Top, Bottom, VoxelSize, SelfIgnore, DrawDebug });
 
-	return Definition;
+    return Definition;
 }
 
 void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 {
-	Super::Set(Description);
+    Super::Set(Description);
 
-	constexpr float M_TO_CM = 100.0f;
-	
-	this->DetectedLen = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
-		"range",
-		Description.Variations,
-		50.0f);
-	
-	this->Top = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
-		"upper_limit",
-		Description.Variations,
-		10.0f);
-	
-	this->Bottom = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
-		"lower_limit",
-		Description.Variations,
-		-1.0f);
+    constexpr float M_TO_CM = 100.0f;
+    
+    DetectedLen = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
+        "range", Description.Variations, 50.0f);
+    
+    Top = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
+        "upper_limit", Description.Variations, 10.0f);
+    
+    Bottom = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
+        "lower_limit", Description.Variations, -5.0f);
 
-	this->BoxSize = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
-		"voxel_size",
-		Description.Variations,
-		0.1f);
+    BoxSize = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(
+        "voxel_size", Description.Variations, 0.5f);
 
-	this->SelfIgnore = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt(
-		"ignore_self",
-		Description.Variations,
-		1);
+    SelfIgnore = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt(
+        "ignore_self", Description.Variations, 1);
 
-	this->DrawDebug = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt(
-		"draw_debug",
-		Description.Variations,
-		0);
+    DrawDebug = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt(
+        "draw_debug", Description.Variations, 0);
+
+    // Pre-calculate grid dimensions
+    GridSizeX = FMath::CeilToInt(2.0f * DetectedLen / BoxSize);
+    GridSizeY = FMath::CeilToInt(2.0f * DetectedLen / BoxSize);
+    GridSizeZ = FMath::CeilToInt((Top - Bottom) / BoxSize);
+    
+    UE_LOG(LogCarla, Log, TEXT("VoxelDetectionSensor: Grid size %d x %d x %d = %d voxels"), 
+        GridSizeX, GridSizeY, GridSizeZ, GridSizeX * GridSizeY * GridSizeZ);
 }
 
 void AVoxelDetectionSensor::SetOwner(AActor *NewOwner)
 {
-	Super::SetOwner(NewOwner);
+    Super::SetOwner(NewOwner);
+}
+
+FVector AVoxelDetectionSensor::VoxelToWorld(int32 X, int32 Y, int32 Z) const
+{
+    FVector LocalPos(
+        -DetectedLen + (X + 0.5f) * BoxSize,
+        -DetectedLen + (Y + 0.5f) * BoxSize,
+        Bottom + (Z + 0.5f) * BoxSize
+    );
+    return GetTransform().TransformPosition(LocalPos);
 }
 
 void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime)
 {
-	TArray<AActor*> ActorsToIgnore;
-	
-	if (SelfIgnore > 0)
-	{
-		ActorsToIgnore.Add(this->GetOwner());
-	}
-	
-	Array3D<int32> SemanticVoxels = Array3D<int32>(int(2*this->DetectedLen/this->BoxSize),int(2*this->DetectedLen/this->BoxSize),int((this->Top-this->Bottom)/this->BoxSize), -1);
-	Array3D<bool> visited = Array3D<bool>(int(2*this->DetectedLen/this->BoxSize),int(2*this->DetectedLen/this->BoxSize),int((this->Top-this->Bottom)/this->BoxSize), false);
-	const FVector Size = FVector{this->DetectedLen, this->DetectedLen, this->Top-this->Bottom};
-	const FVector Start = FVector{this->GetActorLocation().X,this->GetActorLocation().Y, this->GetActorLocation().Z + this->Top};
-	const FVector End = FVector{this->GetActorLocation().X,this->GetActorLocation().Y, this->GetActorLocation().Z + this->Bottom};
-	TArray<FHitResult> Hits;
-	// UKismetSystemLibrary::BoxOverlapActors()
-	UKismetSystemLibrary::BoxTraceMultiByProfile(
-		GetWorld(),
-		Start,
-		End,
-		Size,
-		this->GetActorRotation(),
-		FName("OverlapAll"),
-		true,
-		ActorsToIgnore,
-		EDrawDebugTrace::None,
-		Hits,
-		true,
-		FLinearColor::Red,
-		FLinearColor::Green);
-	FCriticalSection Mutex;
-	TArray<FVector> HitPoints;
-    for (auto Hit : Hits)
+    TRACE_CPUPROFILER_EVENT_SCOPE(AVoxelDetectionSensor::PostPhysTick);
+
+    const double StartTime = FPlatformTime::Seconds();
+    
+    const int32 TotalVoxels = GridSizeX * GridSizeY * GridSizeZ;
+    
+    // Initialize voxel grid with 0 (empty)
+    TArray<uint8> SemanticVoxels;
+    SemanticVoxels.SetNumZeroed(TotalVoxels);
+    
+    // Setup collision query
+    FCollisionQueryParams QueryParams(FName(TEXT("VoxelTrace")), true, this);
+    QueryParams.bTraceComplex = true;
+    QueryParams.bReturnPhysicalMaterial = false;
+    
+    if (SelfIgnore > 0 && GetOwner())
     {
-    	auto CurrentBoxLocation = this->FindNearestBoxLocation(Hit.ImpactPoint);
-    	int hitX = (CurrentBoxLocation.X+DetectedLen)/BoxSize - (fmod(CurrentBoxLocation.X+DetectedLen, BoxSize)>0?0:1);
-    	int hitY = (CurrentBoxLocation.Y+DetectedLen)/BoxSize - (fmod(CurrentBoxLocation.Y+DetectedLen, BoxSize)>0?0:1);
-    	int hitZ = (CurrentBoxLocation.Z - this->Bottom)/BoxSize - (fmod(CurrentBoxLocation.Z - this->Bottom, BoxSize)>0?0:1);
-    	if (hitX < 0 || hitX >= SemanticVoxels.getLength() ||
-			hitY < 0 || hitY >= SemanticVoxels.getWidth() ||
-			hitZ < 0 || hitZ >= SemanticVoxels.getHeight())
-		{
-			continue;;
-		}
-    	HitPoints.Emplace(CurrentBoxLocation);
-    	visited[hitX][hitY][hitZ] = true;
+        QueryParams.AddIgnoredActor(GetOwner());
     }
-	this->VoxelDetection(HitPoints, ActorsToIgnore, SemanticVoxels, visited, Mutex);
-	UE_LOG(LogTemp, Warning, TEXT("Tick"));
-	TArray<int32> DetectedVoxels;
-	
-	for (int x=0; x<SemanticVoxels.getLength(); ++x)
-	{
-		for (int y=0; y<SemanticVoxels.getWidth(); ++y)
-		{
-			for (int z=0; z<SemanticVoxels.getHeight(); ++z)
-			{
-				if (DrawDebug > 0 && SemanticVoxels[x][y][z] != -1)
-				{
-					FVector RelatePos = FVector{-DetectedLen+(2*x+1)*BoxSize/2, -DetectedLen+(2*y+1)*BoxSize/2, Bottom+(2*z+1)*BoxSize/2};
-					FVector Pos = UKismetMathLibrary::TransformLocation(this->GetTransform(), RelatePos);
-					FLinearColor thisColor = FLinearColor::Green;
-					if (ColorMap.Contains(SemanticVoxels[x][y][z]))
-					{
-						thisColor = ColorMap[SemanticVoxels[x][y][z]];
-					}
-					UKismetSystemLibrary::DrawDebugBox(GetWorld(), Pos, FVector{this->BoxSize/2, this->BoxSize/2, this->BoxSize/2},thisColor, this->GetActorRotation(), 1); // Debug
-				}
-				DetectedVoxels.Add(SemanticVoxels[x][y][z]);/**/
-			}
-		}
-	}
-	auto DataStream = GetDataStream(*this);
-	DataStream.SerializeAndSend(*this, GetEpisode(), DetectedVoxels);
-}
 
-void AVoxelDetectionSensor::VoxelDetection(TArray<FVector> BoxToDetected, TArray<AActor*>& IgnoreActors, Array3D<int32>& SemanticVoxels, Array3D<bool>& visited, FCriticalSection& Mutex)
-{
-	int count = 0;
-	ParallelFor(BoxToDetected.Num(),[&](int i)
-	{
-		TArray<FVector> ToDetected;
-		ToDetected.Emplace(BoxToDetected[i]);
-		while (ToDetected.Num() != 0)
-		{
-			TArray<FVector> NextBoxToDetect;
-			auto num = ToDetected.Num();
-			ParallelFor(num,[&](int i)
-			// for (int i=0; i < num; i++)
-			{
-				auto RelateBoxLocation = ToDetected[i];
-				int x = (RelateBoxLocation.X+DetectedLen)/BoxSize - (fmod(RelateBoxLocation.X+DetectedLen, BoxSize)>0?0:1);
-				int y = (RelateBoxLocation.Y+DetectedLen)/BoxSize - (fmod(RelateBoxLocation.Y+DetectedLen, BoxSize)>0?0:1);
-				int z = (RelateBoxLocation.Z-this->Bottom)/BoxSize - (fmod(RelateBoxLocation.Z-this->Bottom, BoxSize)>0?0:1);
-				FHitResult OutHits(ForceInit);
-				const FVector WorldBoxLocation = UKismetMathLibrary::TransformLocation(this->GetTransform(), RelateBoxLocation);
-				const FVector Start = FVector{WorldBoxLocation.X, WorldBoxLocation.Y, WorldBoxLocation.Z+this->BoxSize/2};
-				const FVector End = FVector{WorldBoxLocation.X, WorldBoxLocation.Y, WorldBoxLocation.Z-this->BoxSize/2};
-				const FVector Size = FVector{this->BoxSize/2, this->BoxSize/2, this->BoxSize/2};
-				UKismetSystemLibrary::BoxTraceSingleByProfile(
-					GetWorld(),
-					Start,
-					End,
-					Size,
-					this->GetActorRotation(),
-					FName("Vehicle"),
-					true,
-					IgnoreActors,
-					EDrawDebugTrace::None,
-					OutHits,
-					true);
-				if (OutHits.bBlockingHit)
-				{
-					const auto& CurrentEpisode = GetEpisode();
-					auto label = OutHits.Component->CustomDepthStencilValue;
-					SemanticVoxels[x][y][z] = OutHits.Component->CustomDepthStencilValue;
-				}else
-				{
-					return;
-				}
-				Mutex.Lock();
-				if (x-1 >= 0 && visited[x-1][y][z] == false)
-				{
-					NextBoxToDetect.Add(FVector{RelateBoxLocation.X-this->BoxSize, RelateBoxLocation.Y, RelateBoxLocation.Z});
-					visited[x-1][y][z] = true;
-				}
-				if (x+1 <= SemanticVoxels.getLength()-1 && visited[x+1][y][z] == false)
-				{
-					NextBoxToDetect.Add(FVector{RelateBoxLocation.X+this->BoxSize, RelateBoxLocation.Y, RelateBoxLocation.Z});
-					visited[x+1][y][z] = true;
-				}
-				// y axis expand
-				if (y-1 >= 0 && visited[x][y-1][z] == false)
-				{
-					NextBoxToDetect.Add(FVector{RelateBoxLocation.X, RelateBoxLocation.Y-this->BoxSize, RelateBoxLocation.Z});
-					visited[x][y-1][z] = true;
-				}
-				if (y+1 <= SemanticVoxels.getWidth()-1 && visited[x][y+1][z] == false)
-				{
-					NextBoxToDetect.Add(FVector{RelateBoxLocation.X, RelateBoxLocation.Y+this->BoxSize, RelateBoxLocation.Z});
-					visited[x][y+1][z] = true;
-				}
-				// z axis expand
-				if (z-1 >= 0 && visited[x][y][z-1] == false)
-				{
-					NextBoxToDetect.Add(FVector{RelateBoxLocation.X, RelateBoxLocation.Y, RelateBoxLocation.Z-this->BoxSize});
-					visited[x][y][z-1] = true;
-				}
-				if (z+1 <= SemanticVoxels.getHeight()-1 && visited[x][y][z+1] ==false)
-				{
-					NextBoxToDetect.Add(FVector{RelateBoxLocation.X, RelateBoxLocation.Y, RelateBoxLocation.Z+this->BoxSize});
-					visited[x][y][z+1] = true;
-				}
-				Mutex.Unlock();
-			});
-			ToDetected.Empty();
-			ToDetected.Append(NextBoxToDetect);
-		}
-	});
-	
-	// UE_LOG(LogTemp, Warning, TEXT("API Count: %d"), count);
-}
+    const FTransform SensorTransform = GetTransform();
+    const FTransform InvSensorTransform = SensorTransform.Inverse();
+    const float HalfVoxel = BoxSize * 0.5f;
+    const float InvBoxSize = 1.0f / BoxSize;
 
-const FVector AVoxelDetectionSensor::FindNearestBoxLocation(FVector ImpactPoint)
-{
-	auto pos = this->GetTransform();
-	auto actor_trans = this->GetActorTransform();
-	const FVector relateLocation = UKismetMathLibrary::InverseTransformLocation(this->GetTransform(), ImpactPoint);
-	int x,y,z;
-	if (relateLocation.X == -DetectedLen)
-	{
-		x = 0;
-	}
-	x = (relateLocation.X+DetectedLen)/BoxSize - (fmod(relateLocation.X+DetectedLen, BoxSize)>0?0:1);
-	if (relateLocation.Y == -DetectedLen)
-	{
-		y = 0;
-	}
-	y = (relateLocation.Y+DetectedLen)/BoxSize - (fmod(relateLocation.Y+DetectedLen, BoxSize)>0?0:1);
-	if (relateLocation.Z == this->GetActorLocation().Z + this->Bottom)
-	{
-		z = 0;
-	}
-	z = (relateLocation.Z - this->Bottom)/BoxSize - (fmod(relateLocation.Z -this->Bottom, BoxSize)>0?0:1);
-	return FVector{-DetectedLen+(2*x+1)*BoxSize/2, -DetectedLen+(2*y+1)*BoxSize/2, Bottom+(2*z+1)*BoxSize/2};
+    const double RaycastStart = FPlatformTime::Seconds();
+    
+    // Phase 1: Ray casting from 6 directions (±X, ±Y, ±Z) using ParallelLineTraceMultiByChannel
+    {
+        TRACE_CPUPROFILER_EVENT_SCOPE(VoxelRayCasting);
+        
+        // Direction 1 & 2: Rays along Z axis (top-down and bottom-up)
+        ParallelFor(GridSizeX * GridSizeY, [&](int32 Index)
+        {
+            const int32 X = Index / GridSizeY;
+            const int32 Y = Index % GridSizeY;
+            
+            const FVector LocalStart(
+                -DetectedLen + (X + 0.5f) * BoxSize,
+                -DetectedLen + (Y + 0.5f) * BoxSize,
+                Top + HalfVoxel
+            );
+            const FVector LocalEnd(LocalStart.X, LocalStart.Y, Bottom - HalfVoxel);
+            
+            const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
+            const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
+            
+            // Trace down (top to bottom)
+            TArray<FHitResult> Hits;
+            GetWorld()->ParallelLineTraceMultiByChannel(
+                Hits, WorldStart, WorldEnd,
+                ECC_GameTraceChannel2, QueryParams
+            );
+            
+            for (const FHitResult& Hit : Hits)
+            {
+                if (Hit.bBlockingHit && Hit.Component.IsValid())
+                {
+                    const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+                    const int32 Z = FMath::Clamp(
+                        FMath::FloorToInt((LocalHit.Z - Bottom) * InvBoxSize),
+                        0, GridSizeZ - 1
+                    );
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                    SemanticVoxels[FlatIndex] = FMath::Clamp(Hit.Component->CustomDepthStencilValue, 0, 255);
+                }
+            }
+            
+            // Trace up (bottom to top)
+            Hits.Reset();
+            GetWorld()->ParallelLineTraceMultiByChannel(
+                Hits, WorldEnd, WorldStart,
+                ECC_GameTraceChannel2, QueryParams
+            );
+            
+            for (const FHitResult& Hit : Hits)
+            {
+                if (Hit.bBlockingHit && Hit.Component.IsValid())
+                {
+                    const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+                    const int32 Z = FMath::Clamp(
+                        FMath::FloorToInt((LocalHit.Z - Bottom) * InvBoxSize),
+                        0, GridSizeZ - 1
+                    );
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                    if (SemanticVoxels[FlatIndex] == 0)
+                        SemanticVoxels[FlatIndex] = FMath::Clamp(Hit.Component->CustomDepthStencilValue, 0, 255);
+                }
+            }
+        });
+        
+        // Direction 3 & 4: Rays along X axis (left-to-right and right-to-left)
+        ParallelFor(GridSizeY * GridSizeZ, [&](int32 Index)
+        {
+            const int32 Y = Index / GridSizeZ;
+            const int32 Z = Index % GridSizeZ;
+            
+            const FVector LocalStart(
+                -DetectedLen - HalfVoxel,
+                -DetectedLen + (Y + 0.5f) * BoxSize,
+                Bottom + (Z + 0.5f) * BoxSize
+            );
+            const FVector LocalEnd(DetectedLen + HalfVoxel, LocalStart.Y, LocalStart.Z);
+            
+            const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
+            const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
+            
+            // Trace +X (left to right)
+            TArray<FHitResult> Hits;
+            GetWorld()->ParallelLineTraceMultiByChannel(
+                Hits, WorldStart, WorldEnd,
+                ECC_GameTraceChannel2, QueryParams
+            );
+            
+            for (const FHitResult& Hit : Hits)
+            {
+                if (Hit.bBlockingHit && Hit.Component.IsValid())
+                {
+                    const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+                    const int32 X = FMath::Clamp(
+                        FMath::FloorToInt((LocalHit.X + DetectedLen) * InvBoxSize),
+                        0, GridSizeX - 1
+                    );
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                    if (SemanticVoxels[FlatIndex] == 0)
+                        SemanticVoxels[FlatIndex] = FMath::Clamp(Hit.Component->CustomDepthStencilValue, 0, 255);
+                }
+            }
+            
+            // Trace -X (right to left)
+            Hits.Reset();
+            GetWorld()->ParallelLineTraceMultiByChannel(
+                Hits, WorldEnd, WorldStart,
+                ECC_GameTraceChannel2, QueryParams
+            );
+            
+            for (const FHitResult& Hit : Hits)
+            {
+                if (Hit.bBlockingHit && Hit.Component.IsValid())
+                {
+                    const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+                    const int32 X = FMath::Clamp(
+                        FMath::FloorToInt((LocalHit.X + DetectedLen) * InvBoxSize),
+                        0, GridSizeX - 1
+                    );
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                    if (SemanticVoxels[FlatIndex] == 0)
+                        SemanticVoxels[FlatIndex] = FMath::Clamp(Hit.Component->CustomDepthStencilValue, 0, 255);
+                }
+            }
+        });
+        
+        // Direction 5 & 6: Rays along Y axis (front-to-back and back-to-front)
+        ParallelFor(GridSizeX * GridSizeZ, [&](int32 Index)
+        {
+            const int32 X = Index / GridSizeZ;
+            const int32 Z = Index % GridSizeZ;
+            
+            const FVector LocalStart(
+                -DetectedLen + (X + 0.5f) * BoxSize,
+                -DetectedLen - HalfVoxel,
+                Bottom + (Z + 0.5f) * BoxSize
+            );
+            const FVector LocalEnd(LocalStart.X, DetectedLen + HalfVoxel, LocalStart.Z);
+            
+            const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
+            const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
+            
+            // Trace +Y (front to back)
+            TArray<FHitResult> Hits;
+            GetWorld()->ParallelLineTraceMultiByChannel(
+                Hits, WorldStart, WorldEnd,
+                ECC_GameTraceChannel2, QueryParams
+            );
+            
+            for (const FHitResult& Hit : Hits)
+            {
+                if (Hit.bBlockingHit && Hit.Component.IsValid())
+                {
+                    const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+                    const int32 Y = FMath::Clamp(
+                        FMath::FloorToInt((LocalHit.Y + DetectedLen) * InvBoxSize),
+                        0, GridSizeY - 1
+                    );
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                    if (SemanticVoxels[FlatIndex] == 0)
+                        SemanticVoxels[FlatIndex] = FMath::Clamp(Hit.Component->CustomDepthStencilValue, 0, 255);
+                }
+            }
+            
+            // Trace -Y (back to front)
+            Hits.Reset();
+            GetWorld()->ParallelLineTraceMultiByChannel(
+                Hits, WorldEnd, WorldStart,
+                ECC_GameTraceChannel2, QueryParams
+            );
+            
+            for (const FHitResult& Hit : Hits)
+            {
+                if (Hit.bBlockingHit && Hit.Component.IsValid())
+                {
+                    const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+                    const int32 Y = FMath::Clamp(
+                        FMath::FloorToInt((LocalHit.Y + DetectedLen) * InvBoxSize),
+                        0, GridSizeY - 1
+                    );
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                    if (SemanticVoxels[FlatIndex] == 0)
+                        SemanticVoxels[FlatIndex] = FMath::Clamp(Hit.Component->CustomDepthStencilValue, 0, 255);
+                }
+            }
+        });
+    }
+    
+    const double RaycastEnd = FPlatformTime::Seconds();
+    
+    // Phase 2: Fill interior voxels between surface hits
+    const double FillStart = FPlatformTime::Seconds();
+    {
+        TRACE_CPUPROFILER_EVENT_SCOPE(FillInterior);
+        
+        ParallelFor(GridSizeX * GridSizeY, [&](int32 Index)
+        {
+            const int32 X = Index / GridSizeY;
+            const int32 Y = Index % GridSizeY;
+            
+            int32 LastLabel = 0;
+            int32 LastZ = -1;
+            
+            for (int32 Z = 0; Z < GridSizeZ; ++Z)
+            {
+                const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                const uint8 CurrentLabel = SemanticVoxels[FlatIndex];
+                
+                if (CurrentLabel > 0)
+                {
+                    // Fill gap if same label
+                    if (LastLabel == CurrentLabel && LastZ >= 0 && (Z - LastZ) <= 30)
+                    {
+                        for (int32 FillZ = LastZ + 1; FillZ < Z; ++FillZ)
+                        {
+                            const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + FillZ;
+                            if (SemanticVoxels[FillIndex] == 0)
+                                SemanticVoxels[FillIndex] = CurrentLabel;
+                        }
+                    }
+                    LastLabel = CurrentLabel;
+                    LastZ = Z;
+                }
+            }
+        });
+    }
+    const double FillEnd = FPlatformTime::Seconds();
+    
+    // Debug visualization
+    if (DrawDebug > 0)
+    {
+        for (int32 X = 0; X < GridSizeX; ++X)
+        {
+            for (int32 Y = 0; Y < GridSizeY; ++Y)
+            {
+                for (int32 Z = 0; Z < GridSizeZ; ++Z)
+                {
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+                    const uint8 Label = SemanticVoxels[FlatIndex];
+                    
+                    if (Label > 0)
+                    {
+                        FVector Pos = VoxelToWorld(X, Y, Z);
+                        FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
+                        DrawDebugBox(GetWorld(), Pos, FVector(BoxSize * 0.4f), GetActorQuat(), 
+                            Color.ToFColor(true), false, DeltaTime * 1.1f, 0, 1.0f);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Send data
+    auto DataStream = GetDataStream(*this);
+    DataStream.SerializeAndSend(*this, GetEpisode(), SemanticVoxels);
+    
+    const double EndTime = FPlatformTime::Seconds();
+    
+    // Performance logging
+    carla::log_warning("VoxelDetectionSensor: Raycasting %.1f ms, Fill %.1f ms, Total %.1f ms",
+        1000.0 * (RaycastEnd - RaycastStart),
+        1000.0 * (FillEnd - FillStart),
+        1000.0 * (EndTime - StartTime));
 }
-

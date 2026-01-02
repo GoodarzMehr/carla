@@ -679,10 +679,11 @@ void export_sensor_data() {
     csd::VoxelDetectionEvent,
     bases<cs::SensorData>,boost::noncopyable,
     boost::shared_ptr<csd::VoxelDetectionEvent>
-  >("VoxelDetectionEvent", no_init)              // name, and disable construction.
+  >("VoxelDetectionEvent", no_init)
+  .add_property("raw_data", &GetRawDataAsBuffer<csd::VoxelDetectionEvent>)
   .def("__len__", &csd::VoxelDetectionEvent::size)
   .def("__iter__", iterator<csd::VoxelDetectionEvent>())
-  .def("__getitem__", +[](const csd::VoxelDetectionEvent &self, size_t pos) -> cr::ActorId {
+  .def("__getitem__", +[](const csd::VoxelDetectionEvent &self, size_t pos) -> uint8_t {
     return self.at(pos);
   })
   ;

@@ -6,18 +6,18 @@
 
 #pragma once
 
-#include "carla/rpc/ActorId.h"
 #include "carla/sensor/data/Array.h"
+
+#include <cstdint>
 
 namespace carla {
 namespace sensor {
 namespace data {
 
-  class VoxelDetectionEvent : public Array<rpc::ActorId> {
+  class VoxelDetectionEvent : public Array<uint8_t> {
   public:
-
     explicit VoxelDetectionEvent(RawData &&data)
-      : Array<rpc::ActorId>(0u, std::move(data)) {}
+      : Array<uint8_t>(0u, std::move(data)) {}
   };
 
 } // namespace data

@@ -7,7 +7,6 @@
 #pragma once
 
 #include "carla/Memory.h"
-#include "carla/rpc/ActorId.h"
 #include "carla/sensor/RawData.h"
 
 #include <cstdint>
@@ -23,18 +22,15 @@ namespace s11n {
   class VoxelDetectionSerializer {
   public:
 
-    template <typename SensorT, typename EpisodeT, typename ActorListT>
+    template <typename SensorT, typename EpisodeT, typename VoxelArrayT>
     static Buffer Serialize(
         const SensorT &,
-        const EpisodeT &episode,
-        const ActorListT &detected_voxels) {
-      const uint32_t size_in_bytes = static_cast<uint32_t>(sizeof(ActorId) * detected_voxels.Num());
+        const EpisodeT &,
+        const VoxelArrayT &voxels) {
+      const uint32_t size_in_bytes = voxels.Num() * sizeof(uint8_t);
       Buffer buffer{size_in_bytes};
-      unsigned char *it = buffer.data();
-      for (int32_t semantic_id : detected_voxels) {
-        ActorId id = static_cast<ActorId>(semantic_id);
-        std::memcpy(it, &id, sizeof(ActorId));
-        it += sizeof(ActorId);
+      if (size_in_bytes > 0) {
+        std::memcpy(buffer.data(), voxels.GetData(), size_in_bytes);
       }
       return buffer;
     }
