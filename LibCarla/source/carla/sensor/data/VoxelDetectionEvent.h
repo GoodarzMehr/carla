@@ -15,7 +15,9 @@ namespace sensor {
 namespace data {
 
   class VoxelDetectionEvent : public Array<uint8_t> {
+  
   public:
+  
     explicit VoxelDetectionEvent(RawData &&data)
       : Array<uint8_t>(0u, std::move(data)) {}
   };

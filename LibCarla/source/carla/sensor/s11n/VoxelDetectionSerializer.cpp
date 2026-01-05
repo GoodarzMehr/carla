@@ -4,9 +4,9 @@
 // This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT>.
 
+#include "carla/sensor/data/VoxelDetectionEvent.h"
 #include "carla/sensor/s11n/VoxelDetectionSerializer.h"
 
-#include "carla/sensor/data/VoxelDetectionEvent.h"
 
 namespace carla {
 namespace sensor {

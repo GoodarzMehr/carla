@@ -7,9 +7,9 @@
 #include "VoxelDetectionSensor.generated.h"
 
 UCLASS()
-class CARLA_API AVoxelDetectionSensor : public ASensor
-{
-    GENERATED_BODY()
+class CARLA_API AVoxelDetectionSensor : public ASensor {
+    
+	GENERATED_BODY()
 
 public:
 
@@ -30,7 +30,8 @@ public:
     static TMap<int32, FLinearColor> CreateColorMap()
     {
         TMap<int32, FLinearColor> NewColorMap;
-        NewColorMap.Add(0, FLinearColor::FromSRGBColor(FColor(0, 0, 0, 0)));
+        
+		NewColorMap.Add(0, FLinearColor::FromSRGBColor(FColor(0, 0, 0, 0)));
         NewColorMap.Add(1, FLinearColor::FromSRGBColor(FColor(128, 64, 128, 255)));
         NewColorMap.Add(2, FLinearColor::FromSRGBColor(FColor(244, 35, 232, 255)));
         NewColorMap.Add(3, FLinearColor::FromSRGBColor(FColor(70, 70, 70, 255)));
@@ -62,19 +63,63 @@ public:
         NewColorMap.Add(29, FLinearColor::FromSRGBColor(FColor(110, 110, 110, 255)));
         NewColorMap.Add(30, FLinearColor::FromSRGBColor(FColor(255, 165, 0, 255)));
         NewColorMap.Add(31, FLinearColor::FromSRGBColor(FColor(200, 128, 128, 255)));
-        return NewColorMap;
+        
+		return NewColorMap;
     };
 
 private:
-    float BoxSize = 50.0f;   // In cm (0.5m default)
-    float Top = 1000.0f;     // In cm  
-    float Bottom = -100.0f;  // In cm
-    float DetectedLen = 5000.0f; // In cm (50m default)
+    static constexpr uint8 SemanticPriority[32] = {
+        0, // 0:  Unlabeled
+        7, // 1:  Road
+        7, // 2:  Sidewalk
+        1, // 3:  Building
+        1, // 4:  Wall
+        1, // 5:  Fence
+        1, // 6:  Pole
+        2, // 7:  Traffic light
+        2, // 8:  Traffic sign
+        1, // 9:  Vegetation
+        1, // 10: Terrain
+        1, // 11: Sky
+        6, // 12: Pedestrian
+        6, // 13: Rider
+        4, // 14: Car
+        3, // 15: Truck
+        3, // 16: Bus
+        1, // 17: Train
+        5, // 18: Motorcycle
+        5, // 19: Bicycle
+        1, // 20: Static
+        1, // 21: Dynamic
+        1, // 22: Other
+        1, // 23: Water
+        8, // 24: Road line
+        1, // 25: Ground
+        1, // 26: Bridge
+        1, // 27: Rail track
+        1, // 28: Guard rail
+        1, // 29: Rock
+        2, // 30: Traffic cone
+        2  // 31: Barrier
+    };
+
+	float BoxSize = 50.0f;
+    float Top = 1000.0f; 
+    float Bottom = -100.0f;
+    float BoxRange = 5000.0f;
     
     int32 GridSizeX = 0;
     int32 GridSizeY = 0;
     int32 GridSizeZ = 0;
     
-    int32 SelfIgnore = 0;
-    int32 DrawDebug = 0;
+    bool SelfIgnore = false;
+    bool DrawDebug = false;
+	bool UseTraceComplex = true;
+
+	bool UseZTop = true;
+	bool UseZBottom = true;
+	bool UseXFront = true;
+	bool UseXBack = true;
+	bool UseYRight = true;
+	bool UseYLeft = true;
 };

@@ -20,18 +20,20 @@ namespace sensor {
 namespace s11n {
 
   class VoxelDetectionSerializer {
+  
   public:
 
     template <typename SensorT, typename EpisodeT, typename VoxelArrayT>
-    static Buffer Serialize(
-        const SensorT &,
-        const EpisodeT &,
-        const VoxelArrayT &voxels) {
+    
+    static Buffer Serialize(const SensorT &, const EpisodeT &, const VoxelArrayT &voxels) {
       const uint32_t size_in_bytes = voxels.Num() * sizeof(uint8_t);
+      
       Buffer buffer{size_in_bytes};
+      
       if (size_in_bytes > 0) {
         std::memcpy(buffer.data(), voxels.GetData(), size_in_bytes);
       }
+      
       return buffer;
     }
 
