@@ -205,20 +205,30 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     {
         QueryParams.AddIgnoredActor(GetOwner());
     }
-
-    const FTransform SensorTransform = GetTransform();
-    const FTransform InvSensorTransform = SensorTransform.Inverse();
     
 	const float HalfVoxel = BoxSize * 0.5f;
     const float InvBoxSize = 1.0f / BoxSize;
 
 	const FVector BoxExtent(HalfVoxel, HalfVoxel, HalfVoxel);
 	const FQuat BoxRotation = FQuat::Identity;
+
+	FCollisionObjectQueryParams ObjectParams(FCollisionObjectQueryParams::AllObjects);
+	ObjectParams.RemoveObjectTypesToQuery(ECC_Vehicle);
+	ObjectParams.RemoveObjectTypesToQuery(ECC_Pawn);
+	ObjectParams.RemoveObjectTypesToQuery(ECC_Camera);
+	ObjectParams.RemoveObjectTypesToQuery(ECC_Visibility);
+	ObjectParams.RemoveObjectTypesToQuery(ECC_PhysicsBody);
+	ObjectParams.RemoveObjectTypesToQuery(ECC_Destructible);
     
-    // First, sweep boxes along the Z axis (top-to-bottom and bottom-to-top)
+	GetWorld()->GetPhysicsScene()->GetPxScene()->lockRead();
+
+	const FTransform SensorTransform = GetTransform();
+    const FTransform InvSensorTransform = SensorTransform.Inverse();
+    
+	// First, sweep boxes along the Z axis (top-to-bottom and bottom-to-top)
 	// and record the hits in each voxel column. Then, fill the voxels between
 	// the hit pairs.
-    {
+	{
         TRACE_CPUPROFILER_EVENT_SCOPE(VoxelRayCasting);
         
         ParallelFor(GridSizeX * GridSizeY, [&](int32 Index)
@@ -249,7 +259,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					WorldStart,
 					WorldEnd,
 					BoxRotation,
-					FCollisionObjectQueryParams::AllObjects,
+					ObjectParams,
 					FCollisionShape::MakeBox(BoxExtent),
 					QueryParams
 				);
@@ -300,7 +310,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					WorldEnd,
 					WorldStart,
 					BoxRotation,
-					FCollisionObjectQueryParams::AllObjects,
+					ObjectParams,
 					FCollisionShape::MakeBox(BoxExtent),
 					QueryParams
 				);
@@ -368,6 +378,17 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					}
 				}
 			}
+			
+			if (!UseZTop)
+			{
+				for (int32 Z = 0; Z < GridSizeZ; ++Z)
+				{
+					const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+
+					if (SemanticPriority[SemanticVoxelsZ[FlatIndex]] > SemanticPriority[SemanticVoxels[FlatIndex]])
+						SemanticVoxels[FlatIndex] = SemanticVoxelsZ[FlatIndex];
+				}
+			}
         });
     }
 
@@ -396,7 +417,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					WorldStart,
 					WorldEnd,
 					BoxRotation,
-					FCollisionObjectQueryParams::AllObjects,
+					ObjectParams,
 					FCollisionShape::MakeBox(BoxExtent),
 					QueryParams
 				);
@@ -429,7 +450,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					WorldEnd,
 					WorldStart,
 					BoxRotation,
-					FCollisionObjectQueryParams::AllObjects,
+					ObjectParams,
 					FCollisionShape::MakeBox(BoxExtent),
 					QueryParams
 				);
@@ -480,7 +501,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					WorldStart,
 					WorldEnd,
 					BoxRotation,
-					FCollisionObjectQueryParams::AllObjects,
+					ObjectParams,
 					FCollisionShape::MakeBox(BoxExtent),
 					QueryParams
 				);
@@ -513,7 +534,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					WorldEnd,
 					WorldStart,
 					BoxRotation,
-					FCollisionObjectQueryParams::AllObjects,
+					ObjectParams,
 					FCollisionShape::MakeBox(BoxExtent),
 					QueryParams
 				);
@@ -538,6 +559,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 			}
         });
     }
+	GetWorld()->GetPhysicsScene()->GetPxScene()->unlockRead();
     
     // Debug visualization.
     if (DrawDebug)
@@ -561,7 +583,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 				
 				FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
 				
-				DrawDebugBox(World, Pos, BoxExtent, ActorQuat, Color.ToFColor(true), true, DeltaTime * 1.1f, 0, 2.0f);
+				DrawDebugBox(World, Pos, BoxExtent, ActorQuat, Color.ToFColor(true), false, DeltaTime * 1.1f, 0, 2.0f);
 			}
 		}
     }
