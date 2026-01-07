@@ -115,6 +115,7 @@ private:
     bool SelfIgnore = false;
     bool DrawDebug = false;
 	bool UseTraceComplex = true;
+    FString ZFillMode = TEXT("None");
 
 	bool UseZTop = true;
 	bool UseZBottom = true;

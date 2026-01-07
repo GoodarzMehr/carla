@@ -65,6 +65,12 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     UseTraceComplex.RecommendedValues = { TEXT("True") };
     UseTraceComplex.bRestrictToRecommended = false;
 
+	FActorVariation ZFillMode;
+    ZFillMode.Id = TEXT("z_fill_mode");
+    ZFillMode.Type = EActorAttributeType::String;
+    ZFillMode.RecommendedValues = { TEXT("None") };
+    ZFillMode.bRestrictToRecommended = false;
+
 	FActorVariation UseZTop;
     UseZTop.Id = TEXT("use_z_top");
     UseZTop.Type = EActorAttributeType::Bool;
@@ -110,6 +116,7 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 			SelfIgnore,
 			DrawDebug,
 			UseTraceComplex,
+			ZFillMode,
 			UseZTop,
 			UseZBottom,
 			UseXFront,
@@ -141,6 +148,8 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     DrawDebug = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("draw_debug", Description.Variations, false);
 	
 	UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
+
+	ZFillMode = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToString("z_fill_mode", Description.Variations, TEXT("None"));
 	
 	UseZTop = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_z_top", Description.Variations, true);
 	
@@ -334,52 +343,109 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 				}
 			}
 			
-			if (!(FirstHitGround && OnlyHitGround))
+			if (ZFillMode != TEXT("None") && !(FirstHitGround && OnlyHitGround) && FirstHit && UseZTop)
 			{
-				// Find pairs of voxels from the two sweeps and fill between
-				// them if they have the same semantic class.
-				int32 StartZ = -1;
-				uint8 StartLabel = 0;
-				
-				for (int32 Z = 0; Z < GridSizeZ; ++Z)
+				if (ZFillMode == TEXT("Scanline") && UseZBottom)
 				{
-					const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-					const uint8 TopDownLabel = SemanticVoxels[FlatIndex];
-					const uint8 BottomUpLabel = SemanticVoxelsZ[FlatIndex];
+					// Find pairs of voxels from the two sweeps and fill between
+					// them if they have the same semantic class.
+					int32 StartZ = -1;
+					uint8 StartLabel = 0;
 					
-					// Check if we have a voxel from the bottom-up sweep
-					// (potential floor). If so, mark it as the start of a
-					// potential pair.
-					if (BottomUpLabel > 0)
+					for (int32 Z = 0; Z < GridSizeZ; ++Z)
 					{
-						StartZ = Z;
-						StartLabel = BottomUpLabel;
-					}
-					
-					// Check if we have a voxel from the top-down sweep
-					// (potential ceiling). If so, see if we have a matching
-					// start voxel to form a pair.
-					if (TopDownLabel > 0)
-					{
-						if (StartZ >= 0 && StartLabel == TopDownLabel)
+						const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+						const uint8 TopDownLabel = SemanticVoxels[FlatIndex];
+						const uint8 BottomUpLabel = SemanticVoxelsZ[FlatIndex];
+						
+						// Check if we have a voxel from the bottom-up sweep
+						// (potential floor). If so, mark it as the start of a
+						// potential pair.
+						if (BottomUpLabel > 0)
 						{
-							for (int32 FillZ = StartZ; FillZ < Z; ++FillZ)
-							{
-								const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + FillZ;
-								
-								if (SemanticPriority[StartLabel] > SemanticPriority[SemanticVoxels[FillIndex]])
-									SemanticVoxels[FillIndex] = StartLabel;
-							}
+							StartZ = Z;
+							StartLabel = BottomUpLabel;
 						}
 						
-						// Reset for the next potential pair.
-						StartZ = -1;
-						StartLabel = 0;
+						// Check if we have a voxel from the top-down sweep
+						// (potential ceiling). If so, see if we have a matching
+						// start voxel to form a pair.
+						if (TopDownLabel > 0)
+						{
+							if (StartZ >= 0 && StartLabel == TopDownLabel)
+							{
+								for (int32 FillZ = StartZ; FillZ < Z; ++FillZ)
+								{
+									const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + FillZ;
+									
+									if (SemanticPriority[StartLabel] > SemanticPriority[SemanticVoxels[FillIndex]])
+										SemanticVoxels[FillIndex] = StartLabel;
+								}
+							}
+						
+							// Reset for the next potential pair.
+							StartZ = -1;
+							StartLabel = 0;
+						}
+					}
+				}
+				if (ZFillMode == TEXT("BoxSweep"))
+				{
+					TArray<FHitResult> FillHits;
+
+					bool FirstHitReached = false;
+					
+					for (int32 Z = GridSizeZ - 1; Z > -1; --Z)
+					{	
+						const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+
+						if (!FirstHitReached && SemanticVoxels[FillIndex] > 0)
+							FirstHitReached = true;
+
+						if (FirstHitReached)
+						{
+							const FVector FillLocalStart(LocalColumnBase.X, LocalColumnBase.Y, Bottom + (Z + 1.0f) * BoxSize);
+							const FVector FillLocalEnd(LocalColumnBase.X, LocalColumnBase.Y, Bottom + Z * BoxSize);
+
+							const FVector FillWorldStart = SensorTransform.TransformPosition(FillLocalStart);
+							const FVector FillWorldEnd = SensorTransform.TransformPosition(FillLocalEnd);
+							
+							FillHits.Reset();
+
+							bool bFillHit = GetWorld()->ParallelSweepMultiByObjectType(
+								FillHits,
+								FillWorldStart,
+								FillWorldEnd,
+								BoxRotation,
+								ObjectParams,
+								FCollisionShape::MakeBox(BoxExtent),
+								QueryParams
+							);
+
+							if (bFillHit)
+							{
+								for (const FHitResult& Hit : FillHits)
+								{
+									if (Hit.bBlockingHit && Hit.Component.IsValid())
+									{	
+										if (Hit.Component->CustomDepthStencilValue == 1 || 
+											Hit.Component->CustomDepthStencilValue == 2 || 
+											Hit.Component->CustomDepthStencilValue == 10 || 
+											Hit.Component->CustomDepthStencilValue == 24 || 
+											Hit.Component->CustomDepthStencilValue == 25)
+											break;
+										
+										if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FillIndex]])
+											SemanticVoxels[FillIndex] = Hit.Component->CustomDepthStencilValue;
+									}
+								}
+							}
+						}
 					}
 				}
 			}
-			
-			if (!UseZTop)
+
+			if ((!UseZTop || ZFillMode == TEXT("None")) && UseZBottom)
 			{
 				for (int32 Z = 0; Z < GridSizeZ; ++Z)
 				{
@@ -559,6 +625,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 			}
         });
     }
+
 	GetWorld()->GetPhysicsScene()->GetPxScene()->unlockRead();
     
     // Debug visualization.
