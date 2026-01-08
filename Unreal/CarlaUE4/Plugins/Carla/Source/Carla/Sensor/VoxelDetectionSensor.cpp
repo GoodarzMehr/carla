@@ -59,11 +59,23 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     DrawDebug.RecommendedValues = { TEXT("False") };
     DrawDebug.bRestrictToRecommended = false;
 
+	FActorVariation ShowCalculationTime;
+    ShowCalculationTime.Id = TEXT("show_calculation_time");
+    ShowCalculationTime.Type = EActorAttributeType::Bool;
+    ShowCalculationTime.RecommendedValues = { TEXT("False") };
+    ShowCalculationTime.bRestrictToRecommended = false;
+
 	FActorVariation UseTraceComplex;
     UseTraceComplex.Id = TEXT("use_complex_collision");
     UseTraceComplex.Type = EActorAttributeType::Bool;
     UseTraceComplex.RecommendedValues = { TEXT("True") };
     UseTraceComplex.bRestrictToRecommended = false;
+
+	FActorVariation FullSweep;
+    FullSweep.Id = TEXT("full_sweep");
+    FullSweep.Type = EActorAttributeType::Bool;
+    FullSweep.RecommendedValues = { TEXT("True") };
+    FullSweep.bRestrictToRecommended = false;
 
 	FActorVariation ZFillMode;
     ZFillMode.Id = TEXT("z_fill_mode");
@@ -115,7 +127,9 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 			VoxelSize,
 			SelfIgnore,
 			DrawDebug,
+			ShowCalculationTime,
 			UseTraceComplex,
+			FullSweep,
 			ZFillMode,
 			UseZTop,
 			UseZBottom,
@@ -146,8 +160,12 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     SelfIgnore = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("ignore_self", Description.Variations, false);
 
     DrawDebug = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("draw_debug", Description.Variations, false);
+
+	ShowCalculationTime = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("show_calculation_time", Description.Variations, false);
 	
 	UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
+
+	FullSweep = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("full_sweep", Description.Variations, true);
 
 	ZFillMode = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToString("z_fill_mode", Description.Variations, TEXT("None"));
 	
@@ -194,6 +212,8 @@ FVector AVoxelDetectionSensor::VoxelToWorld(int32 X, int32 Y, int32 Z) const
 void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(AVoxelDetectionSensor::PostPhysTick);
+
+	const double StartTime = FPlatformTime::Seconds();
     
     const int32 TotalVoxels = GridSizeX * GridSizeY * GridSizeZ;
     
@@ -234,397 +254,431 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 	const FTransform SensorTransform = GetTransform();
     const FTransform InvSensorTransform = SensorTransform.Inverse();
     
-	// First, sweep boxes along the Z axis (top-to-bottom and bottom-to-top)
-	// and record the hits in each voxel column. Then, fill the voxels between
-	// the hit pairs.
+	
+	if (!FullSweep)
 	{
-        TRACE_CPUPROFILER_EVENT_SCOPE(VoxelRayCasting);
-        
-        ParallelFor(GridSizeX * GridSizeY, [&](int32 Index)
-        {
-			const int32 X = Index / GridSizeY;
-            const int32 Y = Index % GridSizeY;
-            
-            const FVector LocalColumnBase(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, 0.0f);
-            
-            const FVector LocalStart(LocalColumnBase.X, LocalColumnBase.Y, Top + HalfVoxel);
-            const FVector LocalEnd(LocalColumnBase.X, LocalColumnBase.Y, Bottom - HalfVoxel);
-            
-            const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
-            const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
-            
-            TArray<FHitResult> Hits;
-
-			bool FirstHit = false;
-			bool FirstHitGround = false;
-			bool OnlyHitGround = true;
-
-			int32 FirstZ = -1;
-            
-            if (UseZTop)
-			{
-				bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
-					Hits,
-					WorldStart,
-					WorldEnd,
-					BoxRotation,
-					ObjectParams,
-					FCollisionShape::MakeBox(BoxExtent),
-					QueryParams
-				);
-				
-				if (bHit)
-				{
-					for (const FHitResult& Hit : Hits)
-					{
-						if (Hit.bBlockingHit && Hit.Component.IsValid())
-						{
-							if (!FirstHit)
-							{
-								FirstHit = true;
-								
-								if (Hit.Component->CustomDepthStencilValue == 1 || 
-									Hit.Component->CustomDepthStencilValue == 2 || 
-									Hit.Component->CustomDepthStencilValue == 10 || 
-									Hit.Component->CustomDepthStencilValue == 24 || 
-									Hit.Component->CustomDepthStencilValue == 25)
-									FirstHitGround = true;
-							}
-							
-							const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
-							
-							const int32 Z = FMath::Clamp(FMath::FloorToInt((LocalHit.Z - Bottom) * InvBoxSize), 0, GridSizeZ - 1);
-							
-							if (FirstZ == -1)
-								FirstZ = Z;
-							
-							if (Z < FirstZ)
-								OnlyHitGround = false;
-							
-							const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-							
-							if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
-								SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
-						}
-					}
-				}
-			}
-
-			Hits.Reset();
-
-			if (UseZBottom && !(FirstHitGround && OnlyHitGround))
-			{
-				bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
-					Hits,
-					WorldEnd,
-					WorldStart,
-					BoxRotation,
-					ObjectParams,
-					FCollisionShape::MakeBox(BoxExtent),
-					QueryParams
-				);
-				
-				if (bHit)
-				{
-					for (const FHitResult& Hit : Hits)
-					{
-						if (Hit.bBlockingHit && Hit.Component.IsValid())
-						{
-							const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
-							
-							const int32 Z = FMath::Clamp(FMath::FloorToInt((LocalHit.Z - Bottom) * InvBoxSize), 0, GridSizeZ - 1);
-							
-							const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-							
-							if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxelsZ[FlatIndex]])
-								SemanticVoxelsZ[FlatIndex] = Hit.Component->CustomDepthStencilValue;
-						}
-					}
-				}
-			}
+		// First, sweep boxes along the Z axis (top-to-bottom and bottom-to-top)
+		// and record the hits in each voxel column. Then, fill the voxels between
+		// the hit pairs.
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(VoxelRayCasting);
 			
-			if (ZFillMode != TEXT("None") && !(FirstHitGround && OnlyHitGround) && FirstHit && UseZTop)
+			ParallelFor(GridSizeX * GridSizeY, [&](int32 Index)
 			{
-				if (ZFillMode == TEXT("Scanline") && UseZBottom)
+				const int32 X = Index / GridSizeY;
+				const int32 Y = Index % GridSizeY;
+				
+				const FVector LocalColumnBase(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, 0.0f);
+				
+				const FVector LocalStart(LocalColumnBase.X, LocalColumnBase.Y, Top + HalfVoxel);
+				const FVector LocalEnd(LocalColumnBase.X, LocalColumnBase.Y, Bottom - HalfVoxel);
+				
+				const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
+				const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
+				
+				TArray<FHitResult> Hits;
+
+				bool FirstHit = false;
+				bool FirstHitGround = false;
+				bool OnlyHitGround = true;
+
+				int32 FirstZ = -1;
+				int32 LastZ = -1;
+				
+				if (UseZTop)
 				{
-					// Find pairs of voxels from the two sweeps and fill between
-					// them if they have the same semantic class.
-					int32 StartZ = -1;
-					uint8 StartLabel = 0;
+					bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
+						Hits,
+						WorldStart,
+						WorldEnd,
+						BoxRotation,
+						ObjectParams,
+						FCollisionShape::MakeBox(BoxExtent),
+						QueryParams
+					);
 					
-					for (int32 Z = 0; Z < GridSizeZ; ++Z)
+					if (bHit)
 					{
-						const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-						const uint8 TopDownLabel = SemanticVoxels[FlatIndex];
-						const uint8 BottomUpLabel = SemanticVoxelsZ[FlatIndex];
-						
-						// Check if we have a voxel from the bottom-up sweep
-						// (potential floor). If so, mark it as the start of a
-						// potential pair.
-						if (BottomUpLabel > 0)
+						for (const FHitResult& Hit : Hits)
 						{
-							StartZ = Z;
-							StartLabel = BottomUpLabel;
-						}
-						
-						// Check if we have a voxel from the top-down sweep
-						// (potential ceiling). If so, see if we have a matching
-						// start voxel to form a pair.
-						if (TopDownLabel > 0)
-						{
-							if (StartZ >= 0 && StartLabel == TopDownLabel)
+							if (Hit.bBlockingHit && Hit.Component.IsValid())
 							{
-								for (int32 FillZ = StartZ; FillZ < Z; ++FillZ)
+								if (!FirstHit)
 								{
-									const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + FillZ;
+									FirstHit = true;
 									
-									if (SemanticPriority[StartLabel] > SemanticPriority[SemanticVoxels[FillIndex]])
-										SemanticVoxels[FillIndex] = StartLabel;
+									if (Hit.Component->CustomDepthStencilValue == 1 || 
+										Hit.Component->CustomDepthStencilValue == 2 || 
+										Hit.Component->CustomDepthStencilValue == 10 || 
+										Hit.Component->CustomDepthStencilValue == 24 || 
+										Hit.Component->CustomDepthStencilValue == 25)
+										FirstHitGround = true;
 								}
+								
+								const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+								
+								const int32 Z = FMath::Clamp(FMath::FloorToInt((LocalHit.Z - Bottom) * InvBoxSize), 0, GridSizeZ - 1);
+								
+								if (FirstZ == -1)
+									FirstZ = Z;
+								
+								if (Z < FirstZ)
+									OnlyHitGround = false;
+								
+								const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+								
+								if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
+									SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
 							}
-						
-							// Reset for the next potential pair.
-							StartZ = -1;
-							StartLabel = 0;
 						}
 					}
 				}
-				if (ZFillMode == TEXT("BoxSweep"))
+
+				Hits.Reset();
+
+				if (UseZBottom && !(FirstHitGround && OnlyHitGround))
 				{
-					TArray<FHitResult> FillHits;
-
-					bool FirstHitReached = false;
+					bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
+						Hits,
+						WorldEnd,
+						WorldStart,
+						BoxRotation,
+						ObjectParams,
+						FCollisionShape::MakeBox(BoxExtent),
+						QueryParams
+					);
 					
-					for (int32 Z = GridSizeZ - 1; Z > -1; --Z)
-					{	
-						const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-
-						if (!FirstHitReached && SemanticVoxels[FillIndex] > 0)
-							FirstHitReached = true;
-
-						if (FirstHitReached)
+					if (bHit)
+					{
+						for (const FHitResult& Hit : Hits)
 						{
-							const FVector FillLocalStart(LocalColumnBase.X, LocalColumnBase.Y, Bottom + (Z + 1.0f) * BoxSize);
-							const FVector FillLocalEnd(LocalColumnBase.X, LocalColumnBase.Y, Bottom + Z * BoxSize);
+							if (Hit.bBlockingHit && Hit.Component.IsValid())
+							{
+								const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+								
+								const int32 Z = FMath::Clamp(FMath::FloorToInt((LocalHit.Z - Bottom) * InvBoxSize), 0, GridSizeZ - 1);
 
-							const FVector FillWorldStart = SensorTransform.TransformPosition(FillLocalStart);
-							const FVector FillWorldEnd = SensorTransform.TransformPosition(FillLocalEnd);
+								if (LastZ == -1)
+									LastZ = Z;
+								
+								const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+								
+								if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxelsZ[FlatIndex]])
+									SemanticVoxelsZ[FlatIndex] = Hit.Component->CustomDepthStencilValue;
+							}
+						}
+					}
+				}
+				
+				if (ZFillMode != TEXT("None") && !(FirstHitGround && OnlyHitGround) && FirstHit && UseZTop)
+				{
+					if (ZFillMode == TEXT("Scanline") && UseZBottom)
+					{
+						// Find pairs of voxels from the two sweeps and fill between
+						// them if they have the same semantic class.
+						int32 StartZ = -1;
+						uint8 StartLabel = 0;
+						
+						for (int32 Z = LastZ; Z < FirstZ + 1; ++Z)
+						{
+							const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+							const uint8 TopDownLabel = SemanticVoxels[FlatIndex];
+							const uint8 BottomUpLabel = SemanticVoxelsZ[FlatIndex];
 							
-							FillHits.Reset();
+							// Check if we have a voxel from the bottom-up sweep
+							// (potential floor). If so, mark it as the start of a
+							// potential pair.
+							if (BottomUpLabel > 0)
+							{
+								StartZ = Z;
+								StartLabel = BottomUpLabel;
+							}
+							
+							// Check if we have a voxel from the top-down sweep
+							// (potential ceiling). If so, see if we have a matching
+							// start voxel to form a pair.
+							if (TopDownLabel > 0)
+							{
+								if (StartZ >= 0 && StartLabel == TopDownLabel)
+								{
+									for (int32 FillZ = StartZ; FillZ < Z; ++FillZ)
+									{
+										const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + FillZ;
+										
+										if (SemanticPriority[StartLabel] > SemanticPriority[SemanticVoxels[FillIndex]])
+											SemanticVoxels[FillIndex] = StartLabel;
+									}
+								}
+							
+								// Reset for the next potential pair.
+								StartZ = -1;
+								StartLabel = 0;
+							}
+						}
+					}
+					if (ZFillMode == TEXT("BoxSweep"))
+					{
+						if (LastZ == -1)
+							LastZ = 0;
+						
+						for (int32 Z = FirstZ; Z > (LastZ - 1); --Z)
+						{	
+							const int32 FillIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
 
-							bool bFillHit = GetWorld()->ParallelSweepMultiByObjectType(
-								FillHits,
-								FillWorldStart,
-								FillWorldEnd,
+							const FVector LocalPos(LocalColumnBase.X, LocalColumnBase.Y, Bottom + (Z + 0.5f) * BoxSize);
+
+							const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
+
+							TArray<FOverlapResult> Overlaps;
+														
+							bool bOverlap = GetWorld()->ParallelOverlapMultiByObjectType(
+								Overlaps,
+								WorldPos,
 								BoxRotation,
 								ObjectParams,
 								FCollisionShape::MakeBox(BoxExtent),
 								QueryParams
 							);
-
-							if (bFillHit)
+							
+							if (bOverlap)
 							{
-								for (const FHitResult& Hit : FillHits)
+								for (const FOverlapResult& Overlap : Overlaps)
 								{
-									if (Hit.bBlockingHit && Hit.Component.IsValid())
-									{	
-										if (Hit.Component->CustomDepthStencilValue == 1 || 
-											Hit.Component->CustomDepthStencilValue == 2 || 
-											Hit.Component->CustomDepthStencilValue == 10 || 
-											Hit.Component->CustomDepthStencilValue == 24 || 
-											Hit.Component->CustomDepthStencilValue == 25)
-											break;
-										
-										if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FillIndex]])
-											SemanticVoxels[FillIndex] = Hit.Component->CustomDepthStencilValue;
+									if (Overlap.Component.IsValid())
+									{
+										if (SemanticPriority[Overlap.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FillIndex]])
+											SemanticVoxels[FillIndex] = Overlap.Component->CustomDepthStencilValue;
 									}
 								}
 							}
 						}
 					}
 				}
-			}
 
-			if ((!UseZTop || ZFillMode == TEXT("None")) && UseZBottom)
-			{
-				for (int32 Z = 0; Z < GridSizeZ; ++Z)
+				if ((!UseZTop || ZFillMode == TEXT("None")) && UseZBottom)
 				{
-					const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-
-					if (SemanticPriority[SemanticVoxelsZ[FlatIndex]] > SemanticPriority[SemanticVoxels[FlatIndex]])
-						SemanticVoxels[FlatIndex] = SemanticVoxelsZ[FlatIndex];
-				}
-			}
-        });
-    }
-
-	// Next, sweep boxes along the X axis (front-to-back and back-to-front)
-	// and record the hits in each voxel row.
-	{
-        ParallelFor(GridSizeY * GridSizeZ, [&](int32 Index)
-        {
-            const int32 Y = Index / GridSizeZ;
-            const int32 Z = Index % GridSizeZ;
-            
-            const FVector LocalRowBase(0.0f, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
-            
-            const FVector LocalStart(BoxRange + HalfVoxel, LocalRowBase.Y, LocalRowBase.Z);
-            const FVector LocalEnd(-BoxRange - HalfVoxel, LocalRowBase.Y, LocalRowBase.Z);
-            
-            const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
-            const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
-            
-            TArray<FHitResult> Hits;
-
-			if (UseXFront)
-			{
-				bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
-					Hits,
-					WorldStart,
-					WorldEnd,
-					BoxRotation,
-					ObjectParams,
-					FCollisionShape::MakeBox(BoxExtent),
-					QueryParams
-				);
-				
-				if (bHit)
-				{
-					for (const FHitResult& Hit : Hits)
+					if (LastZ == -1)
+						LastZ = 0;
+					
+					for (int32 Z = LastZ; Z < GridSizeZ; ++Z)
 					{
-						if (Hit.bBlockingHit && Hit.Component.IsValid())
-						{
-							const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+						const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
 
-							const int32 X = FMath::Clamp(FMath::FloorToInt((LocalHit.X + BoxRange) * InvBoxSize), 0, GridSizeX - 1);
-							
-							const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-							
-							if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
-								SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
+						if (SemanticPriority[SemanticVoxelsZ[FlatIndex]] > SemanticPriority[SemanticVoxels[FlatIndex]])
+							SemanticVoxels[FlatIndex] = SemanticVoxelsZ[FlatIndex];
+					}
+				}
+			});
+		}
+
+		// Next, sweep boxes along the X axis (front-to-back and back-to-front)
+		// and record the hits in each voxel row.
+		{
+			ParallelFor(GridSizeY * GridSizeZ, [&](int32 Index)
+			{
+				const int32 Y = Index / GridSizeZ;
+				const int32 Z = Index % GridSizeZ;
+				
+				const FVector LocalRowBase(0.0f, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+				
+				const FVector LocalStart(BoxRange + HalfVoxel, LocalRowBase.Y, LocalRowBase.Z);
+				const FVector LocalEnd(-BoxRange - HalfVoxel, LocalRowBase.Y, LocalRowBase.Z);
+				
+				const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
+				const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
+				
+				TArray<FHitResult> Hits;
+
+				if (UseXFront)
+				{
+					bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
+						Hits,
+						WorldStart,
+						WorldEnd,
+						BoxRotation,
+						ObjectParams,
+						FCollisionShape::MakeBox(BoxExtent),
+						QueryParams
+					);
+					
+					if (bHit)
+					{
+						for (const FHitResult& Hit : Hits)
+						{
+							if (Hit.bBlockingHit && Hit.Component.IsValid())
+							{
+								const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+
+								const int32 X = FMath::Clamp(FMath::FloorToInt((LocalHit.X + BoxRange) * InvBoxSize), 0, GridSizeX - 1);
+								
+								const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+								
+								if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
+									SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
+							}
 						}
 					}
 				}
-			}
 
-			Hits.Reset();
-            
-            if (UseXBack)
-			{
-				bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
-					Hits,
-					WorldEnd,
-					WorldStart,
-					BoxRotation,
-					ObjectParams,
-					FCollisionShape::MakeBox(BoxExtent),
-					QueryParams
-				);
+				Hits.Reset();
 				
-				if (bHit)
+				if (UseXBack)
 				{
-					for (const FHitResult& Hit : Hits)
+					bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
+						Hits,
+						WorldEnd,
+						WorldStart,
+						BoxRotation,
+						ObjectParams,
+						FCollisionShape::MakeBox(BoxExtent),
+						QueryParams
+					);
+					
+					if (bHit)
 					{
-						if (Hit.bBlockingHit && Hit.Component.IsValid())
+						for (const FHitResult& Hit : Hits)
 						{
-							const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
-							
-							const int32 X = FMath::Clamp(FMath::FloorToInt((LocalHit.X + BoxRange) * InvBoxSize), 0, GridSizeX - 1);
-							
-							const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-							
-							if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
-								SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
+							if (Hit.bBlockingHit && Hit.Component.IsValid())
+							{
+								const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+								
+								const int32 X = FMath::Clamp(FMath::FloorToInt((LocalHit.X + BoxRange) * InvBoxSize), 0, GridSizeX - 1);
+								
+								const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+								
+								if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
+									SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
+							}
 						}
 					}
 				}
-			}
-        });
+			});
+		}
+			
+		// Finally, sweep boxes along the Y axis (right-to-left and left-to-right)
+		// and record the hits in each voxel row.
+		{
+			ParallelFor(GridSizeX * GridSizeZ, [&](int32 Index)
+			{
+				const int32 X = Index / GridSizeZ;
+				const int32 Z = Index % GridSizeZ;
+				
+				const FVector LocalRowBase(-BoxRange + (X + 0.5f) * BoxSize, 0.0f, Bottom + (Z + 0.5f) * BoxSize);
+				
+				const FVector LocalStart(LocalRowBase.X, BoxRange + HalfVoxel, LocalRowBase.Z);
+				const FVector LocalEnd(LocalRowBase.X, -BoxRange - HalfVoxel, LocalRowBase.Z);
+				
+				const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
+				const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
+				
+				TArray<FHitResult> Hits;
+
+				if (UseYRight)
+				{
+					bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
+						Hits,
+						WorldStart,
+						WorldEnd,
+						BoxRotation,
+						ObjectParams,
+						FCollisionShape::MakeBox(BoxExtent),
+						QueryParams
+					);
+					
+					if (bHit)
+					{
+						for (const FHitResult& Hit : Hits)
+						{
+							if (Hit.bBlockingHit && Hit.Component.IsValid())
+							{
+								const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+								
+								const int32 Y = FMath::Clamp(FMath::FloorToInt((LocalHit.Y + BoxRange) * InvBoxSize), 0, GridSizeY - 1);
+								
+								const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+								
+								if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
+									SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
+							}
+						}
+					}
+				}
+
+				Hits.Reset();
+				
+				if (UseYLeft)
+				{
+					bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
+						Hits,
+						WorldEnd,
+						WorldStart,
+						BoxRotation,
+						ObjectParams,
+						FCollisionShape::MakeBox(BoxExtent),
+						QueryParams
+					);
+					
+					if (bHit)
+					{
+						for (const FHitResult& Hit : Hits)
+						{
+							if (Hit.bBlockingHit && Hit.Component.IsValid())
+							{
+								const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
+								
+								const int32 Y = FMath::Clamp(FMath::FloorToInt((LocalHit.Y + BoxRange) * InvBoxSize), 0, GridSizeY - 1);
+								
+								const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+								
+								if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
+									SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
+							}
+						}
+					}
+				}
+			});
+		}
 	}
-        
-    // Finally, sweep boxes along the Y axis (right-to-left and left-to-right)
-	// and record the hits in each voxel row.
+	else
+	// Check each voxel individually.
 	{
-        ParallelFor(GridSizeX * GridSizeZ, [&](int32 Index)
-        {
-            const int32 X = Index / GridSizeZ;
-            const int32 Z = Index % GridSizeZ;
-            
-            const FVector LocalRowBase(-BoxRange + (X + 0.5f) * BoxSize, 0.0f, Bottom + (Z + 0.5f) * BoxSize);
-            
-            const FVector LocalStart(LocalRowBase.X, BoxRange + HalfVoxel, LocalRowBase.Z);
-            const FVector LocalEnd(LocalRowBase.X, -BoxRange - HalfVoxel, LocalRowBase.Z);
-            
-            const FVector WorldStart = SensorTransform.TransformPosition(LocalStart);
-            const FVector WorldEnd = SensorTransform.TransformPosition(LocalEnd);
-            
-            TArray<FHitResult> Hits;
+		ParallelFor(GridSizeX * GridSizeY * GridSizeZ, [&](int32 Index)
+		{	
+			const int32 X = Index / (GridSizeY * GridSizeZ);
+			
+			const int32 Remainder = Index % (GridSizeY * GridSizeZ);
+			
+			const int32 Y = Remainder / GridSizeZ;
+			const int32 Z = Remainder % GridSizeZ;
 
-			if (UseYRight)
+			const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+
+			const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
+
+			TArray<FOverlapResult> Overlaps;
+										
+			bool bOverlap = GetWorld()->ParallelOverlapMultiByObjectType(
+				Overlaps,
+				WorldPos,
+				BoxRotation,
+				ObjectParams,
+				FCollisionShape::MakeBox(BoxExtent),
+				QueryParams
+			);
+			
+			if (bOverlap)
 			{
-				bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
-					Hits,
-					WorldStart,
-					WorldEnd,
-					BoxRotation,
-					ObjectParams,
-					FCollisionShape::MakeBox(BoxExtent),
-					QueryParams
-				);
-				
-				if (bHit)
+				for (const FOverlapResult& Overlap : Overlaps)
 				{
-					for (const FHitResult& Hit : Hits)
+					if (Overlap.Component.IsValid())
 					{
-						if (Hit.bBlockingHit && Hit.Component.IsValid())
-						{
-							const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
-							
-							const int32 Y = FMath::Clamp(FMath::FloorToInt((LocalHit.Y + BoxRange) * InvBoxSize), 0, GridSizeY - 1);
-							
-							const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-							
-							if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
-								SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
-						}
+						if (SemanticPriority[Overlap.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[Index]])
+							SemanticVoxels[Index] = Overlap.Component->CustomDepthStencilValue;
 					}
 				}
 			}
-
-			Hits.Reset();
-            
-            if (UseYLeft)
-			{
-				bool bHit = GetWorld()->ParallelSweepMultiByObjectType(
-					Hits,
-					WorldEnd,
-					WorldStart,
-					BoxRotation,
-					ObjectParams,
-					FCollisionShape::MakeBox(BoxExtent),
-					QueryParams
-				);
-				
-				if (bHit)
-				{
-					for (const FHitResult& Hit : Hits)
-					{
-						if (Hit.bBlockingHit && Hit.Component.IsValid())
-						{
-							const FVector LocalHit = InvSensorTransform.TransformPosition(Hit.ImpactPoint);
-							
-							const int32 Y = FMath::Clamp(FMath::FloorToInt((LocalHit.Y + BoxRange) * InvBoxSize), 0, GridSizeY - 1);
-							
-							const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-							
-							if (SemanticPriority[Hit.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
-								SemanticVoxels[FlatIndex] = Hit.Component->CustomDepthStencilValue;
-						}
-					}
-				}
-			}
-        });
-    }
+		});
+	}
 
 	GetWorld()->GetPhysicsScene()->GetPxScene()->unlockRead();
     
@@ -659,4 +713,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     auto DataStream = GetDataStream(*this);
 
     DataStream.SerializeAndSend(*this, GetEpisode(), SemanticVoxels);
+
+	const double EndTime = FPlatformTime::Seconds();
+	
+	if (ShowCalculationTime)
+		carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms");
 }
