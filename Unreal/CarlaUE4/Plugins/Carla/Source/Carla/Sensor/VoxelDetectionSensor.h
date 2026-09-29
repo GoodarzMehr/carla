@@ -119,6 +119,10 @@ private:
     bool FullSweep = true;
     FString ZFillMode = TEXT("None");
 
+    int32 ChunkX = 4;
+    int32 ChunkY = 4;
+    int32 ChunkZ = 4;
+
 	bool UseZTop = true;
 	bool UseZBottom = true;
 	bool UseXFront = true;

@@ -77,6 +77,24 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     FullSweep.RecommendedValues = { TEXT("True") };
     FullSweep.bRestrictToRecommended = false;
 
+	FActorVariation ChunkX;
+    ChunkX.Id = TEXT("chunk_x");
+    ChunkX.Type = EActorAttributeType::Int;
+    ChunkX.RecommendedValues = { TEXT("4") };
+    ChunkX.bRestrictToRecommended = false;
+
+	FActorVariation ChunkY;
+    ChunkY.Id = TEXT("chunk_y");
+    ChunkY.Type = EActorAttributeType::Int;
+    ChunkY.RecommendedValues = { TEXT("4") };
+    ChunkY.bRestrictToRecommended = false;
+
+	FActorVariation ChunkZ;
+	ChunkZ.Id = TEXT("chunk_z");
+	ChunkZ.Type = EActorAttributeType::Int;
+	ChunkZ.RecommendedValues = { TEXT("4") };
+	ChunkZ.bRestrictToRecommended = false;
+
 	FActorVariation ZFillMode;
     ZFillMode.Id = TEXT("z_fill_mode");
     ZFillMode.Type = EActorAttributeType::String;
@@ -130,6 +148,9 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 			ShowCalculationTime,
 			UseTraceComplex,
 			FullSweep,
+			ChunkX,
+			ChunkY,
+			ChunkZ,
 			ZFillMode,
 			UseZTop,
 			UseZBottom,
@@ -166,6 +187,12 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 	UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
 
 	FullSweep = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("full_sweep", Description.Variations, true);
+
+	ChunkX = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_x", Description.Variations, 4);
+
+	ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
+
+	ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 4);
 
 	ZFillMode = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToString("z_fill_mode", Description.Variations, TEXT("None"));
 	
@@ -642,38 +669,98 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 	else
 	// Check each voxel individually.
 	{
-		ParallelFor(GridSizeX * GridSizeY * GridSizeZ, [&](int32 Index)
+		const int32 SGridX = (GridSizeX + ChunkX - 1) / ChunkX;
+		const int32 SGridY = (GridSizeY + ChunkY - 1) / ChunkY;
+		const int32 SGridZ = (GridSizeZ + ChunkZ - 1) / ChunkZ;
+
+		FCollisionQueryParams ChunkQueryParams = QueryParams;
+        
+		ChunkQueryParams.bSkipNarrowPhase = true;
+		
+		ParallelFor(SGridX * SGridY * SGridZ, [&](int32 Index)
 		{	
-			const int32 X = Index / (GridSizeY * GridSizeZ);
+			const int32 CX = Index / (SGridY * SGridZ);
 			
-			const int32 Remainder = Index % (GridSizeY * GridSizeZ);
+			const int32 Remainder = Index % (SGridY * SGridZ);
 			
-			const int32 Y = Remainder / GridSizeZ;
-			const int32 Z = Remainder % GridSizeZ;
+			const int32 CY = Remainder / SGridZ;
+			const int32 CZ = Remainder % SGridZ;
 
-			const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+			const int32 XEnd = FMath::Min((CX + 1) * ChunkX, GridSizeX);
+            const int32 YEnd = FMath::Min((CY + 1) * ChunkY, GridSizeY);
+            const int32 ZEnd = FMath::Min((CZ + 1) * ChunkZ, GridSizeZ);
 
-			const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
+			const float LocalMinX = -BoxRange + CX * ChunkX * BoxSize;
+			const float LocalMinY = -BoxRange + CY * ChunkY * BoxSize;
+			const float LocalMinZ = Bottom + CZ * ChunkZ * BoxSize;
 
-			TArray<FOverlapResult> Overlaps;
-										
-			bool bOverlap = GetWorld()->ParallelOverlapMultiByObjectType(
-				Overlaps,
-				WorldPos,
+			const float LocalMaxX = -BoxRange + XEnd * BoxSize;
+			const float LocalMaxY = -BoxRange + YEnd * BoxSize;
+			const float LocalMaxZ = Bottom + ZEnd * BoxSize;
+
+			FBox ChunkWorldBox;
+			
+			for (int32 Corner = 0; Corner < 8; ++Corner)
+			{
+				const FVector LocalCorner(
+					(Corner & 1) ? LocalMaxX : LocalMinX,
+					(Corner & 2) ? LocalMaxY : LocalMinY,
+					(Corner & 4) ? LocalMaxZ : LocalMinZ
+				);
+
+				ChunkWorldBox.Add(SensorTransform.TransformPosition(LocalCorner));
+			}
+
+			ChunkWorldBox.ExpandBy(0.1f);
+
+			TArray<FOverlapResult> ChunkOverlaps;
+
+			bool bChunkEmpty = !GetWorld()->ParallelOverlapMultiByObjectType(
+				ChunkOverlaps,
+				ChunkWorldBox.GetCenter(),
 				BoxRotation,
 				ObjectParams,
-				FCollisionShape::MakeBox(BoxExtent),
-				QueryParams
+				FCollisionShape::MakeBox(ChunkWorldBox.GetExtent()),
+				ChunkQueryParams
 			);
+
+			if (bChunkEmpty)
+				continue;
+
+			for (int32 X = CX * ChunkX; X < XEnd; ++X)
+            {
+                for (int32 Y = CY * ChunkY; Y < YEnd; ++Y)
+                {
+                    for (int32 Z = CZ * ChunkZ; Z < ZEnd; ++Z)
+                    {
+						const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
 			
-			if (bOverlap)
-			{
-				for (const FOverlapResult& Overlap : Overlaps)
-				{
-					if (Overlap.Component.IsValid())
-					{
-						if (SemanticPriority[Overlap.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[Index]])
-							SemanticVoxels[Index] = Overlap.Component->CustomDepthStencilValue;
+						const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+
+						const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
+
+						TArray<FOverlapResult> Overlaps;
+										
+						bool bOverlap = GetWorld()->ParallelOverlapMultiByObjectType(
+							Overlaps,
+							WorldPos,
+							BoxRotation,
+							ObjectParams,
+							FCollisionShape::MakeBox(BoxExtent),
+							QueryParams
+						);
+			
+						if (bOverlap)
+						{
+							for (const FOverlapResult& Overlap : Overlaps)
+							{
+								if (Overlap.Component.IsValid())
+								{
+									if (SemanticPriority[Overlap.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
+										SemanticVoxels[FlatIndex] = Overlap.Component->CustomDepthStencilValue;
+								}
+							}
+						}
 					}
 				}
 			}
