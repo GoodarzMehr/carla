@@ -698,7 +698,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 			const float LocalMaxY = -BoxRange + YEnd * BoxSize;
 			const float LocalMaxZ = Bottom + ZEnd * BoxSize;
 
-			FBox ChunkWorldBox;
+			FBox ChunkWorldBox(ForceInit);
 			
 			for (int32 Corner = 0; Corner < 8; ++Corner)
 			{
@@ -708,10 +708,10 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 					(Corner & 4) ? LocalMaxZ : LocalMinZ
 				);
 
-				ChunkWorldBox.Add(SensorTransform.TransformPosition(LocalCorner));
+				ChunkWorldBox += SensorTransform.TransformPosition(LocalCorner);
 			}
 
-			ChunkWorldBox.ExpandBy(0.1f);
+			ChunkWorldBox = ChunkWorldBox.ExpandBy(0.1f);
 
 			TArray<FOverlapResult> ChunkOverlaps;
 
@@ -725,7 +725,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 			);
 
 			if (bChunkEmpty)
-				continue;
+				return;
 
 			for (int32 X = CX * ChunkX; X < XEnd; ++X)
             {
