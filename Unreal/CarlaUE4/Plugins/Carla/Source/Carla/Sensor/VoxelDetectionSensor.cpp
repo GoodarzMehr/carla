@@ -186,6 +186,10 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     {
         QueryParams.AddIgnoredActor(GetOwner());
     }
+
+	FCollisionQueryParams ChunkQueryParams = QueryParams;
+        
+	ChunkQueryParams.bSkipNarrowPhase = true;
     
 	const float HalfVoxel = BoxSize * 0.5f;
 
@@ -208,6 +212,10 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 	const int32 SGridX = (GridSizeX + ChunkX - 1) / ChunkX;
 	const int32 SGridY = (GridSizeY + ChunkY - 1) / ChunkY;
 	const int32 SGridZ = (GridSizeZ + ChunkZ - 1) / ChunkZ;
+
+	const FVector AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
+	const FVector AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
+	const FVector AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
 	
 	ParallelFor(SGridX * SGridY * SGridZ, [&](int32 Index)
 	{	
@@ -233,18 +241,18 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 		const FVector LocalMin(LocalMinX, LocalMinY, LocalMinZ);
 		const FVector LocalMax(LocalMaxX, LocalMaxY, LocalMaxZ);
 
+		const FVector LocalHalfExtent = (LocalMax - LocalMin) * 0.5f;
+
 		const FVector ChunkCenter = SensorTransform.TransformPosition((LocalMin + LocalMax) * 0.5f);
 
-		const FVector ChunkExtent = (LocalMax - LocalMin) * 0.5f + FVector(0.1f);
-
-		const FCollisionShape ChunkShape = FCollisionShape::MakeBox(ChunkExtent);
+		const FVector ChunkWorldExtent = AbsAxisX * LocalHalfExtent.X + AbsAxisY * LocalHalfExtent.Y + AbsAxisZ * LocalHalfExtent.Z + FVector(0.1f);
 
 		bool bChunkEmpty = !GetWorld()->ParallelOverlapAnyTestByObjectType(
 			ChunkCenter,
-			VoxelRotation,
+			FQuat::Identity,
 			ObjectParams,
-			ChunkShape,
-			QueryParams
+			FCollisionShape::MakeBox(ChunkWorldExtent),
+			ChunkQueryParams
 		);
 
 		if (bChunkEmpty)
