@@ -198,7 +198,7 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     FActorVariation CandidateReuse;
     CandidateReuse.Id = TEXT("use_candidate_reuse");
     CandidateReuse.Type = EActorAttributeType::Bool;
-    CandidateReuse.RecommendedValues = { TEXT("True") };
+    CandidateReuse.RecommendedValues = { TEXT("False") };
     CandidateReuse.bRestrictToRecommended = false;
 
     FActorVariation ValidateReuse;
@@ -257,7 +257,7 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 
 	ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 4);
 
-    UseCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_candidate_reuse", Description.Variations, true);
+    UseCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_candidate_reuse", Description.Variations, false);
     ValidateCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("validate_candidate_reuse", Description.Variations, false);
 
     // Pre-calculate grid dimensions.
@@ -370,11 +370,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 	const FVector AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
 	const FVector AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
 	
-	ParallelFor(SGridX * SGridY * SGridZ, [&](int32 Index)
+	const int32 TotalChunks = SGridX * SGridY * SGridZ;
+    const auto ProcessChunk = [&](int32 Index)
 	{	
-        // PhysX locks belong to the querying thread. Keep mesh references and
-        // poses protected until this worker finishes all of its voxel tests.
-        physx::PxSceneReadLock SceneLock(*Scene);
 		const int32 CX = Index / (SGridY * SGridZ);
 		
 		const int32 Remainder = Index % (SGridY * SGridZ);
@@ -414,7 +412,10 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         if (UseCandidateReuse)
         {
             TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
-            physx::PxOverlapBuffer UnusedHits;
+            // PhysX requires touch storage for a multi-overlap even though our
+            // prefilter returns eNONE and never writes an overlap hit.
+            physx::PxOverlapHit UnusedHit;
+            physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
             const physx::PxQueryFilterData Filter(
                 PhysXInterface::StaticDynamicQueryFlags(QueryParams) | physx::PxQueryFlag::ePREFILTER);
             const physx::PxBoxGeometry ChunkGeometry(U2PVector(ChunkWorldExtent));
@@ -509,7 +510,20 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 		}
         if (ChunkMismatches)
             ValidationMismatches.Add(ChunkMismatches);
-	});
+    };
+
+    // lockRead() takes a shared mutex even when no writer is active. Lock once
+    // per batch on its executing thread, rather than once per tiny chunk.
+    const int32 NumBatches = FMath::Min(TotalChunks,
+        16 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
+    ParallelFor(NumBatches, [&](int32 Batch)
+    {
+        physx::PxSceneReadLock SceneLock(*Scene);
+        const int32 Begin = int32(int64(TotalChunks) * Batch / NumBatches);
+        const int32 End = int32(int64(TotalChunks) * (Batch + 1) / NumBatches);
+        for (int32 Index = Begin; Index < End; ++Index)
+            ProcessChunk(Index);
+    }, EParallelForFlags::Unbalanced);
 
     if (bValidate)
     {
@@ -552,5 +566,8 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 	const double EndTime = FPlatformTime::Seconds();
 	
 	if (ShowCalculationTime)
-		carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms");
+		carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime),
+                           " ms (mode: ", UseCandidateReuse ? "reuse" : "legacy",
+                           ", chunks: ", TotalChunks, ", batches: ", NumBatches,
+                           ", validation: ", bValidate ? "on" : "off", ")");
 }
