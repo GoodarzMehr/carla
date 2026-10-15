@@ -5,13 +5,119 @@
 
 #include "DrawDebugHelpers.h"
 #include "CollisionQueryParams.h"
+#include "CustomPhysXPayload.h"
+#include "Physics/PhysicsFiltering.h"
+#include "PhysicsInterfaceUtilsCore.h"
+#include "PhysicsEngine/BodyInstance.h"
+#include "PhysXInterfaceWrapper.h"
+#include "HAL/ThreadSafeCounter.h"
 
 #include "Engine/World.h"
 #include "Runtime/Core/Public/Async/ParallelFor.h"
 
 #include <PxScene.h>
+#include <PxSceneLock.h>
+#include <geometry/PxGeometryQuery.h>
+#include <extensions/PxShapeExt.h>
+
+namespace
+{
+    struct FVoxelCandidate
+    {
+        physx::PxGeometryHolder Geometry;
+        physx::PxTransform Pose;
+        physx::PxBounds3 Bounds;
+        uint8 Label;
+        uint8 Priority;
+
+        FVoxelCandidate(const physx::PxShape& Shape, const physx::PxRigidActor& Actor,
+                        uint8 InLabel, uint8 InPriority)
+            : Geometry(Shape.getGeometry())
+            , Pose(physx::PxShapeExt::getGlobalPose(Shape, Actor))
+            , Bounds(physx::PxGeometryQuery::getWorldBounds(Geometry.any(), Pose))
+            , Label(InLabel)
+            , Priority(InPriority)
+        {
+        }
+    };
+
+    // Engine's object-query callback is private. Use its public filter-data layout
+    // and the same component lookup, including welded bodies and custom payloads.
+    class FVoxelCandidateCollector final : public physx::PxQueryFilterCallback
+    {
+    public:
+        TArray<FVoxelCandidate, TInlineAllocator<16>> Candidates;
+
+        FVoxelCandidateCollector(const FCollisionQueryParams& InParams,
+                                 const FCollisionObjectQueryParams& InObjects,
+                                 const uint8* InPriorities, int32 InNumLabels)
+            : Params(InParams), Objects(InObjects), Priorities(InPriorities), NumLabels(InNumLabels)
+        {
+        }
+
+        physx::PxQueryHitType::Enum preFilter(const physx::PxFilterData&,
+            const physx::PxShape* Shape, const physx::PxRigidActor* Actor,
+            physx::PxHitFlags&) override
+        {
+            const physx::PxFilterData Filter = Shape->getQueryFilterData();
+            const uint32 Complexity = Params.bTraceComplex ? EPDF_ComplexCollision : EPDF_SimpleCollision;
+            FMaskFilter ShapeMask;
+            const ECollisionChannel Channel = GetCollisionChannelAndExtraFilter(Filter.word3, ShapeMask);
+            if (!(Filter.word3 & Complexity) ||
+                !(Objects.GetQueryBitfield() & (1u << Channel)) ||
+                (Objects.IgnoreMask & ShapeMask) || Params.bIgnoreTouches ||
+                Params.GetIgnoredActors().Contains(Filter.word0))
+            {
+                return physx::PxQueryHitType::eNONE;
+            }
+            if (Params.GetIgnoredComponents().Num() &&
+                Params.GetIgnoredComponents().Contains(Shape->getSimulationFilterData().word2))
+            {
+                return physx::PxQueryHitType::eNONE;
+            }
+
+            UPrimitiveComponent* Component = nullptr;
+            if (const FBodyInstance* Body = FPhysxUserData::Get<FBodyInstance>(Actor->userData))
+            {
+                Body = FPhysicsInterface::ShapeToOriginalBodyInstance(Body, Shape);
+                Component = Body->OwnerComponent.Get();
+            }
+            else if (const FCustomPhysXPayload* Payload =
+                     FPhysxUserData::Get<FCustomPhysXPayload>(Shape->userData))
+            {
+                Component = Payload->GetOwningComponent().Get();
+            }
+
+            if (Component)
+            {
+                const int32 Label = Component->CustomDepthStencilValue;
+                if (Label > 0 && Label < NumLabels && Priorities[Label] > 0)
+                {
+                    Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label]);
+                }
+            }
+
+            // Keep collecting broadphase candidates, but skip the chunk's narrow
+            // phase. No hits are returned, so there is no fixed hit-buffer limit.
+            return physx::PxQueryHitType::eNONE;
+        }
+
+        physx::PxQueryHitType::Enum postFilter(const physx::PxFilterData&,
+                                             const physx::PxQueryHit&) override
+        {
+            return physx::PxQueryHitType::eNONE;
+        }
+
+    private:
+        const FCollisionQueryParams& Params;
+        const FCollisionObjectQueryParams& Objects;
+        const uint8* Priorities;
+        int32 NumLabels;
+    };
+}
 
 TMap<int32, FLinearColor> AVoxelDetectionSensor::ColorMap = AVoxelDetectionSensor::CreateColorMap();
+constexpr uint8 AVoxelDetectionSensor::SemanticPriority[32];
 
 AVoxelDetectionSensor::AVoxelDetectionSensor(const FObjectInitializer &ObjectInitializer)
   : Super(ObjectInitializer)
@@ -89,6 +195,18 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 	ChunkZ.RecommendedValues = { TEXT("4") };
 	ChunkZ.bRestrictToRecommended = false;
 
+    FActorVariation CandidateReuse;
+    CandidateReuse.Id = TEXT("use_candidate_reuse");
+    CandidateReuse.Type = EActorAttributeType::Bool;
+    CandidateReuse.RecommendedValues = { TEXT("True") };
+    CandidateReuse.bRestrictToRecommended = false;
+
+    FActorVariation ValidateReuse;
+    ValidateReuse.Id = TEXT("validate_candidate_reuse");
+    ValidateReuse.Type = EActorAttributeType::Bool;
+    ValidateReuse.RecommendedValues = { TEXT("False") };
+    ValidateReuse.bRestrictToRecommended = false;
+
     Definition.Variations.Append(
 		{
 			Range,
@@ -102,6 +220,9 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 			ChunkX,
 			ChunkY,
 			ChunkZ,
+
+            CandidateReuse,
+            ValidateReuse,
 		}
 	);
 
@@ -135,6 +256,9 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 	ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
 
 	ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 4);
+
+    UseCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_candidate_reuse", Description.Variations, true);
+    ValidateCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("validate_candidate_reuse", Description.Variations, false);
 
     // Pre-calculate grid dimensions.
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
@@ -203,11 +327,40 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 	ObjectParams.RemoveObjectTypesToQuery(ECC_PhysicsBody);
 	ObjectParams.RemoveObjectTypesToQuery(ECC_Destructible);
     
-	GetWorld()->GetPhysicsScene()->GetPxScene()->lockRead();
+    physx::PxScene* const Scene = World->GetPhysicsScene()->GetPxScene();
 
 	const FTransform SensorTransform = GetTransform();
 
 	const FQuat VoxelRotation = SensorTransform.GetRotation();
+
+    const FCollisionShape VoxelShape = FCollisionShape::MakeBox(BoxExtent);
+    const FPhysicsShapeAdapter VoxelAdapter(VoxelRotation, VoxelShape);
+    const physx::PxQuat VoxelQuat = U2PQuat(VoxelAdapter.GetGeomOrientation());
+    const physx::PxVec3 VoxelWorldExtent = physx::PxGeometryQuery::getWorldBounds(
+        VoxelAdapter.GetGeometry(), physx::PxTransform(physx::PxVec3(0.0f), VoxelQuat)).getExtents();
+    const bool bValidate = UseCandidateReuse && ValidateCandidateReuse;
+    FThreadSafeCounter ValidationMismatches;
+
+    const auto QueryVoxelLabel = [&](const FVector& WorldPos)
+    {
+        TArray<FOverlapResult> Overlaps;
+        uint8 Label = 0;
+        World->ParallelOverlapMultiByObjectType(
+            Overlaps, WorldPos, VoxelRotation, ObjectParams, VoxelShape, QueryParams);
+        for (const FOverlapResult& Overlap : Overlaps)
+        {
+            if (const UPrimitiveComponent* Component = Overlap.Component.Get())
+            {
+                const int32 CandidateLabel = Component->CustomDepthStencilValue;
+                if (CandidateLabel >= 0 && CandidateLabel < UE_ARRAY_COUNT(SemanticPriority) &&
+                    SemanticPriority[CandidateLabel] > SemanticPriority[Label])
+                {
+                    Label = uint8(CandidateLabel);
+                }
+            }
+        }
+        return Label;
+    };
 	
 	const int32 SGridX = (GridSizeX + ChunkX - 1) / ChunkX;
 	const int32 SGridY = (GridSizeY + ChunkY - 1) / ChunkY;
@@ -219,6 +372,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 	
 	ParallelFor(SGridX * SGridY * SGridZ, [&](int32 Index)
 	{	
+        // PhysX locks belong to the querying thread. Keep mesh references and
+        // poses protected until this worker finishes all of its voxel tests.
+        physx::PxSceneReadLock SceneLock(*Scene);
 		const int32 CX = Index / (SGridY * SGridZ);
 		
 		const int32 Remainder = Index % (SGridY * SGridZ);
@@ -245,18 +401,51 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
 		const FVector ChunkCenter = SensorTransform.TransformPosition((LocalMin + LocalMax) * 0.5f);
 
-		const FVector ChunkWorldExtent = AbsAxisX * LocalHalfExtent.X + AbsAxisY * LocalHalfExtent.Y + AbsAxisZ * LocalHalfExtent.Z + FVector(0.1f);
+        // Bound the transformed voxel centers, then add the actual query
+        // half-extents. This also encloses fine queries at non-unit sensor scale.
+        const FVector CenterHalfExtent = LocalHalfExtent - BoxExtent;
+        const FVector ChunkWorldExtent = AbsAxisX * CenterHalfExtent.X +
+            AbsAxisY * CenterHalfExtent.Y + AbsAxisZ * CenterHalfExtent.Z +
+            P2UVector(VoxelWorldExtent) + FVector(0.1f);
 
-		bool bChunkEmpty = !GetWorld()->ParallelOverlapAnyTestByObjectType(
-			ChunkCenter,
-			FQuat::Identity,
-			ObjectParams,
-			FCollisionShape::MakeBox(ChunkWorldExtent),
-			ChunkQueryParams
-		);
+        FVoxelCandidateCollector Collector(QueryParams, ObjectParams,
+                                          SemanticPriority, UE_ARRAY_COUNT(SemanticPriority));
+        bool bChunkEmpty;
+        if (UseCandidateReuse)
+        {
+            TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
+            physx::PxOverlapBuffer UnusedHits;
+            const physx::PxQueryFilterData Filter(
+                PhysXInterface::StaticDynamicQueryFlags(QueryParams) | physx::PxQueryFlag::ePREFILTER);
+            const physx::PxBoxGeometry ChunkGeometry(U2PVector(ChunkWorldExtent));
+            const physx::PxTransform ChunkPose(U2PVector(ChunkCenter));
+            // The prefilter stores candidates and returns eNONE. The overlap
+            // return value is deliberately unused; no narrow-phase hits exist.
+            Scene->overlap(ChunkGeometry, ChunkPose, UnusedHits, Filter, &Collector);
+            // Mesh bounds can span large empty regions. Reject such candidates
+            // once here instead of repeating failed mesh tests for every voxel.
+            Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
+            {
+                return !physx::PxGeometryQuery::overlap(ChunkGeometry, ChunkPose,
+                                                       Candidate.Geometry.any(), Candidate.Pose);
+            });
+            Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
+            {
+                return A.Priority > B.Priority;
+            });
+            bChunkEmpty = Collector.Candidates.Num() == 0;
+        }
+        else
+        {
+            bChunkEmpty = !World->ParallelOverlapAnyTestByObjectType(
+                ChunkCenter, FQuat::Identity, ObjectParams,
+                FCollisionShape::MakeBox(ChunkWorldExtent), ChunkQueryParams);
+        }
 
-		if (bChunkEmpty)
+		if (bChunkEmpty && !bValidate)
 			return;
+
+        int32 ChunkMismatches = 0;
 
 		for (int32 X = CX * ChunkX; X < XEnd; ++X)
 		{
@@ -270,39 +459,68 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
 					const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
 
-					TArray<FOverlapResult> Overlaps;
-									
-					bool bOverlap = GetWorld()->ParallelOverlapMultiByObjectType(
-						Overlaps,
-						WorldPos,
-						VoxelRotation,
-						ObjectParams,
-						FCollisionShape::MakeBox(BoxExtent),
-						QueryParams
-					);
-		
-					if (bOverlap)
-					{
-						for (const FOverlapResult& Overlap : Overlaps)
-						{
-							if (Overlap.Component.IsValid())
-							{
-								if (SemanticPriority[Overlap.Component->CustomDepthStencilValue] > SemanticPriority[SemanticVoxels[FlatIndex]])
-									SemanticVoxels[FlatIndex] = Overlap.Component->CustomDepthStencilValue;
-							}
-						}
-					}
+                    if (!UseCandidateReuse)
+                    {
+                        SemanticVoxels[FlatIndex] = QueryVoxelLabel(WorldPos);
+                        continue;
+                    }
+
+                    const physx::PxTransform VoxelPose(U2PVector(WorldPos), VoxelQuat);
+                    const physx::PxBounds3 VoxelBounds = physx::PxBounds3::centerExtents(
+                        VoxelPose.p, VoxelWorldExtent);
+                    uint8 Label = 0;
+                    bool bPriorityTie = false;
+                    for (const FVoxelCandidate& Candidate : Collector.Candidates)
+                    {
+                        if (Candidate.Priority < SemanticPriority[Label])
+                            break;
+                        if (Candidate.Label == Label)
+                            continue;
+                        if (!Candidate.Bounds.intersects(VoxelBounds))
+                            continue;
+                        if (physx::PxGeometryQuery::overlap(VoxelAdapter.GetGeometry(), VoxelPose,
+                                                          Candidate.Geometry.any(), Candidate.Pose))
+                        {
+                            if (Label && Candidate.Label != Label)
+                            {
+                                // Different labels at equal maximum priority:
+                                // retain the original per-voxel PhysX hit order.
+                                bPriorityTie = true;
+                                break;
+                            }
+                            Label = Candidate.Label;
+                        }
+                    }
+                    if (bPriorityTie)
+                        Label = QueryVoxelLabel(WorldPos);
+
+                    if (bValidate)
+                    {
+                        const uint8 ReferenceLabel = QueryVoxelLabel(WorldPos);
+                        if (Label != ReferenceLabel)
+                        {
+                            ++ChunkMismatches;
+                            Label = ReferenceLabel;
+                        }
+                    }
+                    SemanticVoxels[FlatIndex] = Label;
 				}
 			}
 		}
+        if (ChunkMismatches)
+            ValidationMismatches.Add(ChunkMismatches);
 	});
 
-	GetWorld()->GetPhysicsScene()->GetPxScene()->unlockRead();
+    if (bValidate)
+    {
+        carla::log_warning("Candidate reuse validation: ", ValidationMismatches.GetValue(),
+                           " mismatched voxels out of ", TotalVoxels,
+                           " (reference labels used on mismatch)");
+    }
     
     // Debug visualization.
     if (DrawDebug)
     {
-        UWorld* World = GetWorld();
     	const FQuat ActorQuat = GetActorQuat();
 		
 		for (int32 FlatIndex = 0; FlatIndex < GridSizeX * GridSizeY * GridSizeZ; ++FlatIndex)

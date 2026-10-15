@@ -116,6 +116,8 @@ private:
     bool DrawDebug = false;
     bool ShowCalculationTime = false;
 	bool UseTraceComplex = true;
+    bool UseCandidateReuse = true;
+    bool ValidateCandidateReuse = false;
 
     int32 ChunkX = 4;
     int32 ChunkY = 4;
