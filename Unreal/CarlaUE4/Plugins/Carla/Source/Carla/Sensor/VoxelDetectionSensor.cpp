@@ -1,5 +1,6 @@
 ﻿#include "Carla.h"
 #include "Carla/Game/CarlaEpisode.h"
+#include "Carla/Game/CarlaEngine.h"
 #include "Carla/Sensor/VoxelDetectionSensor.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 
@@ -13,6 +14,7 @@
 
 #include "Engine/World.h"
 #include "Runtime/Core/Public/Async/ParallelFor.h"
+#include "Templates/IntegralConstant.h"
 
 #include <PxScene.h>
 #include <PxSceneLock.h>
@@ -21,6 +23,20 @@
 
 namespace
 {
+    struct FVoxelProfile
+    {
+        uint64 GatherCycles = 0;
+        uint64 CullCycles = 0;
+        uint64 FineCycles = 0;
+        uint64 TieCycles = 0;
+        uint64 Regions = 0;
+        uint64 Candidates = 0;
+        uint64 Chunks = 0;
+        uint64 Voxels = 0;
+        uint64 Tests = 0;
+        uint64 Ties = 0;
+    };
+
     struct FVoxelCandidate
     {
         physx::PxGeometryHolder Geometry;
@@ -196,6 +212,12 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     ChunkZ.RecommendedValues = { TEXT("8") };
     ChunkZ.bRestrictToRecommended = false;
 
+    FActorVariation SuperChunkFactor;
+    SuperChunkFactor.Id = TEXT("super_chunk_factor");
+    SuperChunkFactor.Type = EActorAttributeType::Int;
+    SuperChunkFactor.RecommendedValues = { TEXT("2"), TEXT("1"), TEXT("4"), TEXT("8") };
+    SuperChunkFactor.bRestrictToRecommended = true;
+
     Definition.Variations.Append(
         {
             Range,
@@ -209,6 +231,7 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
             ChunkX,
             ChunkY,
             ChunkZ,
+            SuperChunkFactor,
         }
     );
 
@@ -242,6 +265,13 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
 
     ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 8);
+
+    SuperChunkFactor = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("super_chunk_factor", Description.Variations, 2);
+    if (SuperChunkFactor < 1 || SuperChunkFactor > 8 || (SuperChunkFactor & (SuperChunkFactor - 1)))
+    {
+        UE_LOG(LogCarla, Warning, TEXT("VoxelDetectionSensor: super_chunk_factor must be 1, 2, 4, or 8; using 2"));
+        SuperChunkFactor = 2;
+    }
 
     // Pre-calculate grid dimensions.
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
@@ -338,38 +368,30 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         return Label;
     };
 
-    const int32 SGridX = (GridSizeX + ChunkX - 1) / ChunkX;
-    const int32 SGridY = (GridSizeY + ChunkY - 1) / ChunkY;
-    const int32 SGridZ = (GridSizeZ + ChunkZ - 1) / ChunkZ;
+    const int32 SGridX = GridSizeX / ChunkX + (GridSizeX % ChunkX != 0);
+    const int32 SGridY = GridSizeY / ChunkY + (GridSizeY % ChunkY != 0);
+    const int32 SGridZ = GridSizeZ / ChunkZ + (GridSizeZ % ChunkZ != 0);
+
+    const int32 PGridX = SGridX / SuperChunkFactor + (SGridX % SuperChunkFactor != 0);
+    const int32 PGridY = SGridY / SuperChunkFactor + (SGridY % SuperChunkFactor != 0);
+    const int32 PGridZ = SGridZ / SuperChunkFactor + (SGridZ % SuperChunkFactor != 0);
 
     const FVector AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
     const FVector AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
     const FVector AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
 
-    const int32 TotalChunks = SGridX * SGridY * SGridZ;
-    const auto ProcessChunk = [&](int32 Index)
+    struct FChunkBounds
     {
-        const int32 CX = Index / (SGridY * SGridZ);
+        physx::PxBoxGeometry Geometry;
+        physx::PxTransform Pose;
+    };
 
-        const int32 Remainder = Index % (SGridY * SGridZ);
-
-        const int32 CY = Remainder / SGridZ;
-        const int32 CZ = Remainder % SGridZ;
-
-        const int32 XEnd = FMath::Min((CX + 1) * ChunkX, GridSizeX);
-        const int32 YEnd = FMath::Min((CY + 1) * ChunkY, GridSizeY);
-        const int32 ZEnd = FMath::Min((CZ + 1) * ChunkZ, GridSizeZ);
-
-        const float LocalMinX = -BoxRange + CX * ChunkX * BoxSize;
-        const float LocalMinY = -BoxRange + CY * ChunkY * BoxSize;
-        const float LocalMinZ = Bottom + CZ * ChunkZ * BoxSize;
-
-        const float LocalMaxX = -BoxRange + XEnd * BoxSize;
-        const float LocalMaxY = -BoxRange + YEnd * BoxSize;
-        const float LocalMaxZ = Bottom + ZEnd * BoxSize;
-
-        const FVector LocalMin(LocalMinX, LocalMinY, LocalMinZ);
-        const FVector LocalMax(LocalMaxX, LocalMaxY, LocalMaxZ);
+    const auto MakeChunkBounds = [&](const FIntVector& Begin, const FIntVector& End)
+    {
+        const FVector LocalMin(-BoxRange + Begin.X * BoxSize,
+            -BoxRange + Begin.Y * BoxSize, Bottom + Begin.Z * BoxSize);
+        const FVector LocalMax(-BoxRange + End.X * BoxSize,
+            -BoxRange + End.Y * BoxSize, Bottom + End.Z * BoxSize);
 
         const FVector LocalHalfExtent = (LocalMax - LocalMin) * 0.5f;
 
@@ -381,8 +403,44 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             AbsAxisY * CenterHalfExtent.Y + AbsAxisZ * CenterHalfExtent.Z +
             P2UVector(VoxelWorldExtent) + FVector(0.1f);
 
+        return FChunkBounds{physx::PxBoxGeometry(U2PVector(ChunkWorldExtent)),
+            physx::PxTransform(U2PVector(ChunkCenter))};
+    };
+
+    const auto GetChunkEnd = [&](int32 X, int32 Y, int32 Z)
+    {
+        return FIntVector(
+            int32(FMath::Min<int64>(int64(X) * ChunkX, GridSizeX)),
+            int32(FMath::Min<int64>(int64(Y) * ChunkY, GridSizeY)),
+            int32(FMath::Min<int64>(int64(Z) * ChunkZ, GridSizeZ)));
+    };
+
+    const int32 TotalChunks = SGridX * SGridY * SGridZ;
+    const int32 TotalRegions = PGridX * PGridY * PGridZ;
+
+    // Separate instantiations keep profiling clocks and counters out of normal regions.
+    const auto ProcessRegion = [&](int32 Index, auto ProfileTag, FVoxelProfile& Profile)
+    {
+        constexpr bool bProfile = decltype(ProfileTag)::Value;
+        const int32 PX = Index / (PGridY * PGridZ);
+        const int32 Remainder = Index % (PGridY * PGridZ);
+        const int32 PY = Remainder / PGridZ;
+        const int32 PZ = Remainder % PGridZ;
+
+        const FIntVector FirstChunk(PX * SuperChunkFactor,
+            PY * SuperChunkFactor, PZ * SuperChunkFactor);
+        const FIntVector LastChunk(
+            FMath::Min(FirstChunk.X + SuperChunkFactor, SGridX),
+            FMath::Min(FirstChunk.Y + SuperChunkFactor, SGridY),
+            FMath::Min(FirstChunk.Z + SuperChunkFactor, SGridZ));
+        const FIntVector Begin(FirstChunk.X * ChunkX,
+            FirstChunk.Y * ChunkY, FirstChunk.Z * ChunkZ);
+        const FIntVector End = GetChunkEnd(LastChunk.X, LastChunk.Y, LastChunk.Z);
+        const FChunkBounds Parent = MakeChunkBounds(Begin, End);
+
         FVoxelCandidateCollector Collector(QueryParams, ObjectParams,
             SemanticPriority, UE_ARRAY_COUNT(SemanticPriority));
+        const uint64 GatherStart = bProfile ? FPlatformTime::Cycles64() : 0;
         {
             TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
             // PhysX requires touch storage even though the prefilter returns eNONE.
@@ -390,20 +448,30 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
             const physx::PxQueryFilterData Filter(
                 PhysXInterface::StaticDynamicQueryFlags(QueryParams) | physx::PxQueryFlag::ePREFILTER);
-            const physx::PxBoxGeometry ChunkGeometry(U2PVector(ChunkWorldExtent));
-            const physx::PxTransform ChunkPose(U2PVector(ChunkCenter));
-            Scene->overlap(ChunkGeometry, ChunkPose, UnusedHits, Filter, &Collector);
+            Scene->overlap(Parent.Geometry, Parent.Pose, UnusedHits, Filter, &Collector);
+        }
 
-            // Reject empty mesh regions once before testing individual voxels.
-            Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
-            {
-                return !physx::PxGeometryQuery::overlap(ChunkGeometry, ChunkPose,
-                    Candidate.Geometry.any(), Candidate.Pose);
-            });
-            Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
-            {
-                return A.Priority > B.Priority;
-            });
+        const uint64 CullStart = bProfile ? FPlatformTime::Cycles64() : 0;
+        if (bProfile)
+        {
+            Profile.GatherCycles += CullStart - GatherStart;
+            ++Profile.Regions;
+            Profile.Candidates += Collector.Candidates.Num();
+        }
+
+        // A rejected parent skips all of its children, including their mesh tests.
+        Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
+        {
+            return !physx::PxGeometryQuery::overlap(Parent.Geometry, Parent.Pose,
+                Candidate.Geometry.any(), Candidate.Pose);
+        });
+        Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
+        {
+            return A.Priority > B.Priority;
+        });
+        if (bProfile)
+        {
+            Profile.CullCycles += FPlatformTime::Cycles64() - CullStart;
         }
 
         if (Collector.Candidates.Num() == 0)
@@ -411,72 +479,173 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             return;
         }
 
-        for (int32 X = CX * ChunkX; X < XEnd; ++X)
+        const auto FillChunk = [&](const FIntVector& ChunkBegin, const FIntVector& ChunkEnd,
+            const TArray<const FVoxelCandidate*, TInlineAllocator<16>>& Candidates)
         {
-            for (int32 Y = CY * ChunkY; Y < YEnd; ++Y)
+            if (Candidates.Num() == 0)
             {
-                for (int32 Z = CZ * ChunkZ; Z < ZEnd; ++Z)
+                return;
+            }
+
+            const uint64 FineStart = bProfile ? FPlatformTime::Cycles64() : 0;
+            if (bProfile)
+            {
+                ++Profile.Chunks;
+                Profile.Voxels += uint64(ChunkEnd.X - ChunkBegin.X) *
+                    (ChunkEnd.Y - ChunkBegin.Y) * (ChunkEnd.Z - ChunkBegin.Z);
+            }
+
+            for (int32 X = ChunkBegin.X; X < ChunkEnd.X; ++X)
+            {
+                for (int32 Y = ChunkBegin.Y; Y < ChunkEnd.Y; ++Y)
                 {
-                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-
-                    const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
-
-                    const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
-
-                    const physx::PxTransform VoxelPose(U2PVector(WorldPos), VoxelQuat);
-                    const physx::PxBounds3 VoxelBounds = physx::PxBounds3::centerExtents(
-                        VoxelPose.p, VoxelWorldExtent);
-                    uint8 Label = 0;
-                    bool bPriorityTie = false;
-                    for (const FVoxelCandidate& Candidate : Collector.Candidates)
+                    for (int32 Z = ChunkBegin.Z; Z < ChunkEnd.Z; ++Z)
                     {
-                        if (Candidate.Priority < SemanticPriority[Label])
+                        const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
+
+                        const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+
+                        const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
+
+                        const physx::PxTransform VoxelPose(U2PVector(WorldPos), VoxelQuat);
+                        const physx::PxBounds3 VoxelBounds = physx::PxBounds3::centerExtents(
+                            VoxelPose.p, VoxelWorldExtent);
+                        uint8 Label = 0;
+                        bool bPriorityTie = false;
+                        for (const FVoxelCandidate* Entry : Candidates)
                         {
-                            break;
-                        }
-                        if (Candidate.Label == Label)
-                        {
-                            continue;
-                        }
-                        if (!Candidate.Bounds.intersects(VoxelBounds))
-                        {
-                            continue;
-                        }
-                        if (physx::PxGeometryQuery::overlap(VoxelAdapter.GetGeometry(), VoxelPose,
-                            Candidate.Geometry.any(), Candidate.Pose))
-                        {
-                            if (Label && Candidate.Label != Label)
+                            const FVoxelCandidate& Candidate = *Entry;
+                            if (Candidate.Priority < SemanticPriority[Label])
                             {
-                                // Preserve PhysX hit order for equal-priority labels.
-                                bPriorityTie = true;
                                 break;
                             }
-                            Label = Candidate.Label;
+                            if (Candidate.Label == Label)
+                            {
+                                continue;
+                            }
+                            if (!Candidate.Bounds.intersects(VoxelBounds))
+                            {
+                                continue;
+                            }
+                            if (bProfile)
+                            {
+                                ++Profile.Tests;
+                            }
+                            if (physx::PxGeometryQuery::overlap(VoxelAdapter.GetGeometry(), VoxelPose,
+                                Candidate.Geometry.any(), Candidate.Pose))
+                            {
+                                if (Label && Candidate.Label != Label)
+                                {
+                                    // Preserve PhysX hit order for equal-priority labels.
+                                    bPriorityTie = true;
+                                    break;
+                                }
+                                Label = Candidate.Label;
+                            }
+                        }
+                        if (bPriorityTie)
+                        {
+                            const uint64 TieStart = bProfile ? FPlatformTime::Cycles64() : 0;
+                            Label = ResolvePriorityTie(WorldPos);
+                            if (bProfile)
+                            {
+                                Profile.TieCycles += FPlatformTime::Cycles64() - TieStart;
+                                ++Profile.Ties;
+                            }
+                        }
+                        SemanticVoxels[FlatIndex] = Label;
+                    }
+                }
+            }
+
+            if (bProfile)
+            {
+                Profile.FineCycles += FPlatformTime::Cycles64() - FineStart;
+            }
+        };
+
+        TArray<const FVoxelCandidate*, TInlineAllocator<16>> Candidates;
+        if (SuperChunkFactor == 1)
+        {
+            // The parent is already an exact-filtered leaf; do not test it twice.
+            for (const FVoxelCandidate& Candidate : Collector.Candidates)
+            {
+                Candidates.Add(&Candidate);
+            }
+            FillChunk(Begin, End, Candidates);
+            return;
+        }
+
+        for (int32 CX = FirstChunk.X; CX < LastChunk.X; ++CX)
+        {
+            for (int32 CY = FirstChunk.Y; CY < LastChunk.Y; ++CY)
+            {
+                for (int32 CZ = FirstChunk.Z; CZ < LastChunk.Z; ++CZ)
+                {
+                    const uint64 ChildCullStart = bProfile ? FPlatformTime::Cycles64() : 0;
+                    const FIntVector ChildBegin(CX * ChunkX, CY * ChunkY, CZ * ChunkZ);
+                    const FIntVector ChildEnd = GetChunkEnd(CX + 1, CY + 1, CZ + 1);
+                    const FChunkBounds Child = MakeChunkBounds(ChildBegin, ChildEnd);
+                    const physx::PxBounds3 ChildBounds = physx::PxBounds3::centerExtents(
+                        Child.Pose.p, Child.Geometry.halfExtents);
+                    Candidates.Reset();
+                    for (const FVoxelCandidate& Candidate : Collector.Candidates)
+                    {
+                        if (Candidate.Bounds.intersects(ChildBounds) &&
+                            physx::PxGeometryQuery::overlap(Child.Geometry, Child.Pose,
+                                Candidate.Geometry.any(), Candidate.Pose))
+                        {
+                            // Parent order preserves descending semantic priority.
+                            Candidates.Add(&Candidate);
                         }
                     }
-                    if (bPriorityTie)
+                    if (bProfile)
                     {
-                        Label = ResolvePriorityTie(WorldPos);
+                        Profile.CullCycles += FPlatformTime::Cycles64() - ChildCullStart;
                     }
-                    SemanticVoxels[FlatIndex] = Label;
+                    FillChunk(ChildBegin, ChildEnd, Candidates);
                 }
             }
         }
     };
 
     // PhysX read locks share a mutex; acquire one per batch on its worker.
-    const int32 NumBatches = FMath::Min(TotalChunks,
+    const int32 NumBatches = FMath::Min(TotalRegions,
         16 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
+    TArray<FVoxelProfile> Profiles;
+    if (ShowCalculationTime)
+    {
+        Profiles.SetNum(NumBatches);
+    }
+    // A prime stride and rotating offset avoid repeatedly sampling the same grid layers.
+    constexpr int32 ProfileStride = 127;
+    const int32 ProfileOffset = FCarlaEngine::GetFrameCounter() % ProfileStride;
+    const double ParallelStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
     ParallelFor(NumBatches, [&](int32 Batch)
     {
+        TRACE_CPUPROFILER_EVENT_SCOPE(VoxelProcessBatch);
         physx::PxSceneReadLock SceneLock(*Scene);
-        const int32 Begin = int32(int64(TotalChunks) * Batch / NumBatches);
-        const int32 End = int32(int64(TotalChunks) * (Batch + 1) / NumBatches);
+        FVoxelProfile Profile;
+        const int32 Begin = int32(int64(TotalRegions) * Batch / NumBatches);
+        const int32 End = int32(int64(TotalRegions) * (Batch + 1) / NumBatches);
         for (int32 Index = Begin; Index < End; ++Index)
         {
-            ProcessChunk(Index);
+            if (ShowCalculationTime &&
+                (TotalRegions < ProfileStride || Index % ProfileStride == ProfileOffset))
+            {
+                ProcessRegion(Index, TIntegralConstant<bool, true>(), Profile);
+            }
+            else
+            {
+                ProcessRegion(Index, TIntegralConstant<bool, false>(), Profile);
+            }
+        }
+        if (ShowCalculationTime)
+        {
+            Profiles[Batch] = Profile;
         }
     }, EParallelForFlags::Unbalanced);
+    const double ParallelEnd = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
 
     // Debug visualization.
     if (DrawDebug)
@@ -504,6 +673,8 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         }
     }
 
+    const double SendStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
+
     // Send data
     auto DataStream = GetDataStream(*this);
 
@@ -514,6 +685,36 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     if (ShowCalculationTime)
     {
         carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime),
-            " ms (chunks: ", TotalChunks, ", batches: ", NumBatches, ")");
+            " ms (chunks: ", TotalChunks, ", parent queries: ", TotalRegions,
+            ", factor: ", SuperChunkFactor, ", batches: ", NumBatches, ")");
+        carla::log_warning("Voxel wall time (ms): setup=", 1000.0 * (ParallelStart - StartTime),
+            ", parallel=", 1000.0 * (ParallelEnd - ParallelStart),
+            ", debug=", 1000.0 * (SendStart - ParallelEnd),
+            ", serialize/send=", 1000.0 * (EndTime - SendStart));
+
+        FVoxelProfile Profile;
+        for (const FVoxelProfile& Batch : Profiles)
+        {
+            Profile.GatherCycles += Batch.GatherCycles;
+            Profile.CullCycles += Batch.CullCycles;
+            Profile.FineCycles += Batch.FineCycles;
+            Profile.TieCycles += Batch.TieCycles;
+            Profile.Regions += Batch.Regions;
+            Profile.Candidates += Batch.Candidates;
+            Profile.Chunks += Batch.Chunks;
+            Profile.Voxels += Batch.Voxels;
+            Profile.Tests += Batch.Tests;
+            Profile.Ties += Batch.Ties;
+        }
+        // These are sampled sums across workers, not frame wall time. Fine excludes ties.
+        carla::log_warning("Voxel sampled worker time (ms): gather=",
+            FPlatformTime::ToMilliseconds64(Profile.GatherCycles),
+            ", cull/sort=", FPlatformTime::ToMilliseconds64(Profile.CullCycles),
+            ", fine=", FPlatformTime::ToMilliseconds64(Profile.FineCycles - Profile.TieCycles),
+            ", ties=", FPlatformTime::ToMilliseconds64(Profile.TieCycles));
+        carla::log_warning("Voxel sampled counts: regions=", Profile.Regions, "/", TotalRegions,
+            ", candidates=", Profile.Candidates, ", active chunks=", Profile.Chunks,
+            ", visited voxels=", Profile.Voxels, ", exact tests=", Profile.Tests,
+            ", tie queries=", Profile.Ties);
     }
 }

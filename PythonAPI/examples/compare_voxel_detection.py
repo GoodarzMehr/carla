@@ -14,10 +14,17 @@ client advancing the world. The current map and actors are retained.
     python3 compare_voxel_detection.py --yaw 37 --pitch 10
     python3 compare_voxel_detection.py --attribute use_complex_collision=false
     python3 compare_voxel_detection.py --preset simbev --port 29354
+    python3 compare_voxel_detection.py --preset simbev --compare-super-chunks
 
 Reported latency includes world.tick(), sensor processing and delivery.
 Python payload inspection is excluded. Use the same static scene for timing.
 Use --attribute show_calculation_time=true for sensor timings in the server log.
+The log separates frame wall phases from sampled worker timings for gathering,
+culling, fine voxel tests, and priority ties. Worker timings are not frame latency.
+Use --attribute super_chunk_factor=1 for the per-chunk baseline; the default is 2.
+--compare-super-chunks checks full voxel bytes against a simultaneous factor-1
+sensor on matching frames. Its timings include both sensors, so use the default
+single-sensor benchmark for performance measurements.
 """
 
 import argparse
@@ -52,6 +59,8 @@ def main():
     parser.add_argument('--timeout', type=float, default=30.0)
     parser.add_argument('--frames', type=int, default=10)
     parser.add_argument('--warmup', type=int, default=2)
+    parser.add_argument('--compare-super-chunks', action='store_true',
+                        help='compare requested factor 2, 4, or 8 against factor 1 on matching frames')
     parser.add_argument('--preset', choices=('default', 'simbev'), default='default',
                         help='simbev: range 64 m, voxels 0.1 m, height -1..7 m, chunks 4x4x8')
     parser.add_argument('--json', action='store_true',
@@ -90,7 +99,7 @@ def main():
     for name, value in attributes.items():
         blueprint.set_attribute(name, value)
     names = set(attributes) | {'range', 'voxel_size', 'lower_limit', 'upper_limit',
-                               'chunk_x', 'chunk_y', 'chunk_z',
+                               'chunk_x', 'chunk_y', 'chunk_z', 'super_chunk_factor',
                                'use_complex_collision', 'ignore_self'}
     converters = {
         carla.ActorAttributeType.Bool: 'as_bool',
@@ -104,11 +113,16 @@ def main():
         values[name] = getattr(attribute, converters[attribute.type])()
     chunk_names = ('chunk_x', 'chunk_y', 'chunk_z')
     chunks = [values[name] for name in chunk_names]
+    super_chunk_factor = values['super_chunk_factor']
     dimensions = [values[name] for name in ('range', 'voxel_size', 'lower_limit', 'upper_limit')]
     if not all(math.isfinite(value) for value in dimensions):
         parser.error('voxel dimensions must be finite')
     if values['range'] <= 0 or values['voxel_size'] <= 0 or min(chunks) < 1:
         parser.error('range, voxel-size, and chunks must be positive')
+    if super_chunk_factor not in (1, 2, 4, 8):
+        parser.error('super_chunk_factor must be one of 1, 2, 4, 8')
+    if args.compare_super_chunks and super_chunk_factor == 1:
+        parser.error('--compare-super-chunks requires a factor greater than 1')
     if values['upper_limit'] <= values['lower_limit']:
         parser.error('upper_limit must exceed lower_limit')
     width = math.ceil(2 * values['range'] / values['voxel_size'])
@@ -134,7 +148,7 @@ def main():
     print('Sensor transform: %s' % transform)
 
     original_settings = world.get_settings()
-    sensor = None
+    sensors = []
     latencies = []
     tick_latencies = []
     occupied = 0
@@ -146,18 +160,27 @@ def main():
         world.apply_settings(settings)
         if blueprint.has_attribute('sensor_tick'):
             blueprint.set_attribute('sensor_tick', '0.0')
-        sensor = world.spawn_actor(blueprint, transform)
-        queue = Queue()
-        sensor.listen(queue.put)
-        print('Voxel sensor id=%d' % sensor.id)
+        factors = (1, super_chunk_factor) if args.compare_super_chunks else (super_chunk_factor,)
+        for factor in factors:
+            blueprint.set_attribute('super_chunk_factor', str(factor))
+            sensor = world.spawn_actor(blueprint, transform)
+            queue = Queue()
+            sensors.append((sensor, queue))
+            sensor.listen(queue.put)
+            print('Voxel sensor id=%d super_chunk_factor=%d' % (sensor.id, factor))
 
         for index in range(args.warmup + args.frames):
             started = time.perf_counter()
             frame = world.tick(args.timeout)
             tick_elapsed = time.perf_counter() - started
-            data = receive_frame(queue, frame, args.timeout)
+            data = [receive_frame(queue, frame, args.timeout) for _, queue in sensors]
             elapsed = time.perf_counter() - started
-            payload = bytes(data.raw_data)
+            payloads = [bytes(sample.raw_data) for sample in data]
+            if args.compare_super_chunks and payloads[0] != payloads[1]:
+                raise RuntimeError('Frame %d: factor 1 and factor %d voxel bytes differ '
+                                   '(%d/%d bytes)' %
+                                   (frame, super_chunk_factor, len(payloads[0]), len(payloads[1])))
+            payload = payloads[-1]
             if not payload:
                 raise RuntimeError('Frame %d: empty voxel payload' % frame)
             if index >= args.warmup:
@@ -165,11 +188,18 @@ def main():
                 tick_latencies.append(tick_elapsed)
                 voxel_count = len(payload)
                 occupied += voxel_count - payload.count(0)
+            # Release event storage and byte copies before receiving another large frame.
+            del data, payloads, payload
 
         print('%d voxels/frame, mean occupied voxels %.1f' %
               (voxel_count, occupied / args.frames))
-        print('Capture latency: median %.2f ms, min %.2f ms, max %.2f ms' %
-              (1000 * statistics.median(latencies), 1000 * min(latencies),
+        if args.compare_super_chunks:
+            print('PASS: identical bytes on %d matching frames (factors 1 and %d)' %
+                  (args.warmup + args.frames, super_chunk_factor))
+        capture_label = ('Comparison capture latency (two sensors; not isolated)'
+                         if args.compare_super_chunks else 'Capture latency')
+        print('%s: median %.2f ms, min %.2f ms, max %.2f ms' %
+              (capture_label, 1000 * statistics.median(latencies), 1000 * min(latencies),
                1000 * max(latencies)))
         print('world.tick() median: %.2f ms (world work; not isolated sensor time)' %
               (1000 * statistics.median(tick_latencies)))
@@ -189,9 +219,16 @@ def main():
             'capture_max_ms': 1000 * max(latencies),
             'tick_median_ms': 1000 * statistics.median(tick_latencies)
         }
+        if args.compare_super_chunks:
+            result['super_chunk_comparison'] = {
+                'baseline_factor': 1,
+                'target_factor': super_chunk_factor,
+                'matched_frames': args.warmup + args.frames,
+                'identical_bytes': True
+            }
     finally:
         try:
-            if sensor is not None:
+            for sensor, _ in sensors:
                 try:
                     try:
                         sensor.stop()
