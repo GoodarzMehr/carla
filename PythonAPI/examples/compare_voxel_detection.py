@@ -15,6 +15,7 @@ client advancing the world. The current map and actors are retained.
     python3 compare_voxel_detection.py --attribute use_complex_collision=false
     python3 compare_voxel_detection.py --preset simbev --port 29354
     python3 compare_voxel_detection.py --preset simbev --compare-triangle-reuse
+    python3 compare_voxel_detection.py --preset simbev --compare-gpu
 
 Reported latency includes world.tick(), sensor processing and delivery.
 Python payload inspection is excluded. Use the same static scene for timing.
@@ -27,6 +28,14 @@ benchmark the experiment. --compare-triangle-reuse enables the experiment and
 checks full voxel bytes against a simultaneous disabled sensor on matching
 frames. Its timings include both sensors, so use the default single-sensor
 benchmark for performance measurements.
+GPU processing defaults to false; use --attribute use_gpu=true to benchmark it.
+--compare-gpu checks full voxel bytes against CPU triangle reuse on matching
+frames, including warmup. Both comparison modes override the backend attributes
+and include two sensors in their capture timings.
+The GPU backend requires Vulkan SM5 and rebuilt/cooked plugin shaders. Check for
+nonzero dispatches in the server's Voxel GPU wall time log with
+--attribute show_calculation_time=true: unsupported chunks and backends use CPU
+fallback, so matching bytes alone do not prove that the GPU ran.
 """
 
 import argparse
@@ -61,8 +70,11 @@ def main():
     parser.add_argument('--timeout', type=float, default=30.0)
     parser.add_argument('--frames', type=int, default=10)
     parser.add_argument('--warmup', type=int, default=2)
-    parser.add_argument('--compare-triangle-reuse', action='store_true',
-                        help='enable triangle reuse and compare against disabled on matching frames')
+    comparison = parser.add_mutually_exclusive_group()
+    comparison.add_argument('--compare-triangle-reuse', action='store_true',
+                            help='compare CPU triangle reuse disabled/enabled on matching frames')
+    comparison.add_argument('--compare-gpu', action='store_true',
+                            help='compare GPU against CPU triangle reuse on matching frames')
     parser.add_argument('--preset', choices=('default', 'simbev'), default='default',
                         help='simbev: range 64 m, voxels 0.1 m, height -1..7 m, chunks 4x4x8')
     parser.add_argument('--json', action='store_true',
@@ -93,6 +105,10 @@ def main():
         attributes[name] = value
     if args.compare_triangle_reuse:
         attributes['use_triangle_reuse'] = 'true'
+        attributes['use_gpu'] = 'false'
+    elif args.compare_gpu:
+        attributes['use_triangle_reuse'] = 'true'
+        attributes['use_gpu'] = 'true'
 
     import carla
 
@@ -104,7 +120,7 @@ def main():
         blueprint.set_attribute(name, value)
     names = set(attributes) | {'range', 'voxel_size', 'lower_limit', 'upper_limit',
                                'chunk_x', 'chunk_y', 'chunk_z', 'use_triangle_reuse',
-                               'use_complex_collision', 'ignore_self'}
+                               'use_gpu', 'use_complex_collision', 'ignore_self'}
     converters = {
         carla.ActorAttributeType.Bool: 'as_bool',
         carla.ActorAttributeType.Int: 'as_int',
@@ -118,6 +134,9 @@ def main():
     chunk_names = ('chunk_x', 'chunk_y', 'chunk_z')
     chunks = [values[name] for name in chunk_names]
     triangle_reuse = values['use_triangle_reuse']
+    use_gpu = values['use_gpu']
+    compare = args.compare_triangle_reuse or args.compare_gpu
+    comparison_name = 'CPU/GPU' if args.compare_gpu else 'triangle reuse disabled/enabled'
     dimensions = [values[name] for name in ('range', 'voxel_size', 'lower_limit', 'upper_limit')]
     if not all(math.isfinite(value) for value in dimensions):
         parser.error('voxel dimensions must be finite')
@@ -160,14 +179,21 @@ def main():
         world.apply_settings(settings)
         if blueprint.has_attribute('sensor_tick'):
             blueprint.set_attribute('sensor_tick', '0.0')
-        reuse_settings = (False, True) if args.compare_triangle_reuse else (triangle_reuse,)
-        for enabled in reuse_settings:
-            blueprint.set_attribute('use_triangle_reuse', str(enabled).lower())
+        if args.compare_triangle_reuse:
+            backends = ((False, False), (True, False))
+        elif args.compare_gpu:
+            backends = ((True, False), (True, True))
+        else:
+            backends = ((triangle_reuse, use_gpu),)
+        for triangles, gpu in backends:
+            blueprint.set_attribute('use_triangle_reuse', str(triangles).lower())
+            blueprint.set_attribute('use_gpu', str(gpu).lower())
             sensor = world.spawn_actor(blueprint, transform)
             queue = Queue()
             sensors.append((sensor, queue))
             sensor.listen(queue.put)
-            print('Voxel sensor id=%d use_triangle_reuse=%s' % (sensor.id, str(enabled).lower()))
+            print('Voxel sensor id=%d use_triangle_reuse=%s use_gpu=%s' %
+                  (sensor.id, str(triangles).lower(), str(gpu).lower()))
 
         for index in range(args.warmup + args.frames):
             started = time.perf_counter()
@@ -176,10 +202,10 @@ def main():
             data = [receive_frame(queue, frame, args.timeout) for _, queue in sensors]
             elapsed = time.perf_counter() - started
             payloads = [bytes(sample.raw_data) for sample in data]
-            if args.compare_triangle_reuse and payloads[0] != payloads[1]:
-                raise RuntimeError('Frame %d: triangle reuse disabled/enabled voxel bytes differ '
+            if compare and payloads[0] != payloads[1]:
+                raise RuntimeError('Frame %d: %s voxel bytes differ '
                                    '(%d/%d bytes)' %
-                                   (frame, len(payloads[0]), len(payloads[1])))
+                                   (frame, comparison_name, len(payloads[0]), len(payloads[1])))
             payload = payloads[-1]
             if not payload:
                 raise RuntimeError('Frame %d: empty voxel payload' % frame)
@@ -193,11 +219,11 @@ def main():
 
         print('%d voxels/frame, mean occupied voxels %.1f' %
               (voxel_count, occupied / args.frames))
-        if args.compare_triangle_reuse:
-            print('PASS: identical bytes on %d matching frames (triangle reuse disabled/enabled)' %
-                  (args.warmup + args.frames))
+        if compare:
+            print('PASS: identical bytes on %d matching frames (%s)' %
+                  (args.warmup + args.frames, comparison_name))
         capture_label = ('Comparison capture latency (two sensors; not isolated)'
-                         if args.compare_triangle_reuse else 'Capture latency')
+                         if compare else 'Capture latency')
         print('%s: median %.2f ms, min %.2f ms, max %.2f ms' %
               (capture_label, 1000 * statistics.median(latencies), 1000 * min(latencies),
                1000 * max(latencies)))
@@ -223,6 +249,14 @@ def main():
             result['triangle_reuse_comparison'] = {
                 'baseline_enabled': False,
                 'target_enabled': True,
+                'matched_frames': args.warmup + args.frames,
+                'identical_bytes': True
+            }
+        elif args.compare_gpu:
+            result['gpu_comparison'] = {
+                'baseline_use_gpu': False,
+                'target_use_gpu': True,
+                'cpu_triangle_reuse': True,
                 'matched_frames': args.warmup + args.frames,
                 'identical_bytes': True
             }

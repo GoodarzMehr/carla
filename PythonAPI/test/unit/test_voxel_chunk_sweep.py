@@ -99,6 +99,15 @@ class TestVoxelChunkSweep(unittest.TestCase):
         self.assertIn('"use_triangle_reuse": "true"', rows[0]['attributes'])
         self.assertIn('"use_triangle_reuse": "true"', printed)
 
+    def test_sweep_preserves_requested_gpu_backend(self):
+        rows, calls, printed = self.run_sweep(
+            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8',
+             '--retest-top', '0', '--attribute', 'use_gpu=true'], result_for)
+        self.assertEqual(result_for(calls[0])['attributes']['use_gpu'], 'true')
+        self.assertNotIn('--compare-gpu', calls[0])
+        self.assertIn('"use_gpu": "true"', rows[0]['attributes'])
+        self.assertIn('"use_gpu": "true"', printed)
+
     def test_failed_trial_preserves_csv_results(self):
         def child(command):
             result = result_for(command)
