@@ -7,9 +7,9 @@
 #include "VoxelDetectionSensor.generated.h"
 
 UCLASS()
-class CARLA_API AVoxelDetectionSensor : public ASensor {
-    
-	GENERATED_BODY()
+class CARLA_API AVoxelDetectionSensor : public ASensor
+{
+    GENERATED_BODY()
 
 public:
 
@@ -24,14 +24,14 @@ public:
     void PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime) override;
 
     FVector VoxelToWorld(int32 X, int32 Y, int32 Z) const;
-    
+
     static TMap<int32, FLinearColor> ColorMap;
-    
+
     static TMap<int32, FLinearColor> CreateColorMap()
     {
         TMap<int32, FLinearColor> NewColorMap;
-        
-		NewColorMap.Add(0, FLinearColor::FromSRGBColor(FColor(0, 0, 0, 0)));
+
+        NewColorMap.Add(0, FLinearColor::FromSRGBColor(FColor(0, 0, 0, 0)));
         NewColorMap.Add(1, FLinearColor::FromSRGBColor(FColor(128, 64, 128, 255)));
         NewColorMap.Add(2, FLinearColor::FromSRGBColor(FColor(244, 35, 232, 255)));
         NewColorMap.Add(3, FLinearColor::FromSRGBColor(FColor(70, 70, 70, 255)));
@@ -63,8 +63,8 @@ public:
         NewColorMap.Add(29, FLinearColor::FromSRGBColor(FColor(110, 110, 110, 255)));
         NewColorMap.Add(30, FLinearColor::FromSRGBColor(FColor(255, 165, 0, 255)));
         NewColorMap.Add(31, FLinearColor::FromSRGBColor(FColor(200, 128, 128, 255)));
-        
-		return NewColorMap;
+
+        return NewColorMap;
     };
 
 private:
@@ -103,19 +103,19 @@ private:
         2  // 31: Barrier
     };
 
-	float BoxSize = 50.0f;
-    float Top = 1000.0f; 
+    float BoxSize = 50.0f;
+    float Top = 1000.0f;
     float Bottom = -100.0f;
     float BoxRange = 5000.0f;
-    
+
     int32 GridSizeX = 0;
     int32 GridSizeY = 0;
     int32 GridSizeZ = 0;
-    
+
     bool SelfIgnore = false;
     bool DrawDebug = false;
     bool ShowCalculationTime = false;
-	bool UseTraceComplex = true;
+    bool UseTraceComplex = true;
     bool UseCandidateReuse = false;
     bool ValidateCandidateReuse = false;
 

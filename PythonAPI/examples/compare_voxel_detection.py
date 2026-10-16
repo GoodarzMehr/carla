@@ -23,12 +23,16 @@ Use --attribute show_calculation_time=true for sensor timings in the server log.
 """
 
 import argparse
-from queue import Empty, Queue
+import json
+import math
 import statistics
 import time
 
+from queue import Empty, Queue
+
 
 def receive_frame(queue, frame, timeout):
+    '''Wait for the requested sensor frame, discarding older frames.'''
     deadline = time.perf_counter() + timeout
     while True:
         try:
@@ -53,6 +57,10 @@ def main():
     parser.add_argument('--mode', choices=('compare', 'legacy', 'reuse'), default='compare')
     parser.add_argument('--preset', choices=('default', 'simbev'), default='default',
                         help='simbev: range 64 m, voxels 0.1 m, height -1..7 m, chunks 4x4x2')
+    parser.add_argument('--reference-chunks', type=int, nargs=3, metavar=('X', 'Y', 'Z'),
+                        help='legacy reference chunks in compare mode; defaults to target chunks')
+    parser.add_argument('--json', action='store_true',
+                        help='print a JSON result on the final line for sweep_voxel_chunks.py')
     parser.add_argument('--attribute', action='append', default=[], metavar='NAME=VALUE',
                         help='override a voxel blueprint attribute; repeat as needed')
     parser.add_argument('--spawn-point', type=int, default=0)
@@ -63,8 +71,11 @@ def main():
     parser.add_argument('--pitch', type=float, default=0.0)
     parser.add_argument('--roll', type=float, default=0.0)
     args = parser.parse_args()
-    if args.frames < 1 or args.warmup < 0 or args.timeout <= 0:
+    if args.frames < 1 or args.warmup < 0 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('frames and timeout must be positive; warmup must be nonnegative')
+    if args.reference_chunks:
+        if args.mode != 'compare' or min(args.reference_chunks) < 1:
+            parser.error('reference-chunks requires compare mode and positive values')
 
     attributes = {'draw_debug': 'false', 'show_calculation_time': 'false'}
     if args.preset == 'simbev':
@@ -93,14 +104,40 @@ def main():
     names = set(attributes) | {'range', 'voxel_size', 'lower_limit', 'upper_limit',
                                'chunk_x', 'chunk_y', 'chunk_z',
                                'use_complex_collision', 'ignore_self'}
+    converters = {
+        carla.ActorAttributeType.Bool: 'as_bool',
+        carla.ActorAttributeType.Int: 'as_int',
+        carla.ActorAttributeType.Float: 'as_float',
+        carla.ActorAttributeType.String: 'as_str'
+    }
+    values = {}
+    for name in sorted(names):
+        attribute = blueprint.get_attribute(name)
+        values[name] = getattr(attribute, converters[attribute.type])()
+    chunk_names = ('chunk_x', 'chunk_y', 'chunk_z')
+    chunks = [values[name] for name in chunk_names]
+    reference_chunks = args.reference_chunks or chunks
+    dimensions = [values[name] for name in ('range', 'voxel_size', 'lower_limit', 'upper_limit')]
+    if not all(math.isfinite(value) for value in dimensions):
+        parser.error('voxel dimensions must be finite')
+    if values['range'] <= 0 or values['voxel_size'] <= 0 or min(chunks) < 1:
+        parser.error('range, voxel-size, and chunks must be positive')
+    if values['upper_limit'] <= values['lower_limit']:
+        parser.error('upper_limit must exceed lower_limit')
+    width = math.ceil(2 * values['range'] / values['voxel_size'])
+    height = math.ceil((values['upper_limit'] - values['lower_limit']) / values['voxel_size'])
+    if width * width * height > 2147483647:
+        parser.error('voxel grid exceeds the sensor\'s 32-bit index capacity')
+
     print('mode=%s preset=%s host=%s port=%d' %
           (args.mode, args.preset, args.host, args.port))
-    print('Voxel attributes: ' + ', '.join('%s=%s' % (name, blueprint.get_attribute(name))
-                                          for name in sorted(names)))
-    existing = world.get_actors().filter('sensor.other.voxel_detection')
+    print('Voxel attributes: ' + ', '.join('%s=%s' % (name, value)
+                                          for name, value in values.items()))
+    existing = [sensor.id for sensor in world.get_actors().filter('sensor.other.voxel_detection')]
     print('Existing voxel sensors included in world tick: %s' %
-          (', '.join(str(sensor.id) for sensor in existing) or 'none'))
-    spawn_points = world.get_map().get_spawn_points()
+          (', '.join(map(str, existing)) or 'none'))
+    current_map = world.get_map()
+    spawn_points = current_map.get_spawn_points()
     if not 0 <= args.spawn_point < len(spawn_points):
         parser.error('spawn-point must be between 0 and %d' % (len(spawn_points) - 1))
     transform = spawn_points[args.spawn_point]
@@ -123,6 +160,8 @@ def main():
         settings.fixed_delta_seconds = 0.05
         world.apply_settings(settings)
         for mode in modes:
+            for name, value in zip(chunk_names, reference_chunks if mode == 'legacy' else chunks):
+                blueprint.set_attribute(name, str(value))
             blueprint.set_attribute('use_candidate_reuse', str(mode == 'reuse').lower())
             blueprint.set_attribute('validate_candidate_reuse', 'false')
             if blueprint.has_attribute('sensor_tick'):
@@ -167,15 +206,40 @@ def main():
                1000 * max(latencies)))
         print('world.tick() median: %.2f ms (world work; not isolated sensor time)' %
               (1000 * statistics.median(tick_latencies)))
+        result = {
+            'mode': args.mode,
+            'preset': args.preset,
+            'map': current_map.name,
+            'transform': str(transform),
+            'attributes': values,
+            'existing_voxel_sensors': existing,
+            'chunks': chunks,
+            'reference_chunks': reference_chunks,
+            'frames': args.frames,
+            'warmup': args.warmup,
+            'voxel_count': voxel_count,
+            'occupied_voxels': occupied / args.frames,
+            'capture_median_ms': 1000 * statistics.median(latencies),
+            'capture_min_ms': 1000 * min(latencies),
+            'capture_max_ms': 1000 * max(latencies),
+            'tick_median_ms': 1000 * statistics.median(tick_latencies),
+            'validated': args.mode == 'compare'
+        }
     finally:
         try:
             for sensor, _ in sensors:
                 try:
-                    sensor.stop()
-                finally:
-                    sensor.destroy()
+                    try:
+                        sensor.stop()
+                    finally:
+                        sensor.destroy()
+                except RuntimeError as error:
+                    print('Could not clean up sensor %d: %s' % (sensor.id, error))
         finally:
             world.apply_settings(original_settings)
+
+    if args.json:
+        print(json.dumps(result))
 
 
 if __name__ == '__main__':

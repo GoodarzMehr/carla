@@ -31,7 +31,7 @@ namespace
         uint8 Priority;
 
         FVoxelCandidate(const physx::PxShape& Shape, const physx::PxRigidActor& Actor,
-                        uint8 InLabel, uint8 InPriority)
+            uint8 InLabel, uint8 InPriority)
             : Geometry(Shape.getGeometry())
             , Pose(physx::PxShapeExt::getGlobalPose(Shape, Actor))
             , Bounds(physx::PxGeometryQuery::getWorldBounds(Geometry.any(), Pose))
@@ -41,17 +41,19 @@ namespace
         }
     };
 
-    // Engine's object-query callback is private. Use its public filter-data layout
-    // and the same component lookup, including welded bodies and custom payloads.
+    // Match Engine's private object-query filter using public PhysX data.
     class FVoxelCandidateCollector final : public physx::PxQueryFilterCallback
     {
     public:
         TArray<FVoxelCandidate, TInlineAllocator<16>> Candidates;
 
         FVoxelCandidateCollector(const FCollisionQueryParams& InParams,
-                                 const FCollisionObjectQueryParams& InObjects,
-                                 const uint8* InPriorities, int32 InNumLabels)
-            : Params(InParams), Objects(InObjects), Priorities(InPriorities), NumLabels(InNumLabels)
+            const FCollisionObjectQueryParams& InObjects,
+            const uint8* InPriorities, int32 InNumLabels)
+            : Params(InParams)
+            , Objects(InObjects)
+            , Priorities(InPriorities)
+            , NumLabels(InNumLabels)
         {
         }
 
@@ -70,6 +72,7 @@ namespace
             {
                 return physx::PxQueryHitType::eNONE;
             }
+
             if (Params.GetIgnoredComponents().Num() &&
                 Params.GetIgnoredComponents().Contains(Shape->getSimulationFilterData().word2))
             {
@@ -83,7 +86,7 @@ namespace
                 Component = Body->OwnerComponent.Get();
             }
             else if (const FCustomPhysXPayload* Payload =
-                     FPhysxUserData::Get<FCustomPhysXPayload>(Shape->userData))
+                FPhysxUserData::Get<FCustomPhysXPayload>(Shape->userData))
             {
                 Component = Payload->GetOwningComponent().Get();
             }
@@ -97,13 +100,12 @@ namespace
                 }
             }
 
-            // Keep collecting broadphase candidates, but skip the chunk's narrow
-            // phase. No hits are returned, so there is no fixed hit-buffer limit.
+            // Continue gathering candidates without running chunk narrow-phase tests.
             return physx::PxQueryHitType::eNONE;
         }
 
         physx::PxQueryHitType::Enum postFilter(const physx::PxFilterData&,
-                                             const physx::PxQueryHit&) override
+            const physx::PxQueryHit&) override
         {
             return physx::PxQueryHitType::eNONE;
         }
@@ -120,7 +122,7 @@ TMap<int32, FLinearColor> AVoxelDetectionSensor::ColorMap = AVoxelDetectionSenso
 constexpr uint8 AVoxelDetectionSensor::SemanticPriority[32];
 
 AVoxelDetectionSensor::AVoxelDetectionSensor(const FObjectInitializer &ObjectInitializer)
-  : Super(ObjectInitializer)
+    : Super(ObjectInitializer)
 {
     PrimaryActorTick.bCanEverTick = true;
 }
@@ -140,7 +142,7 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     Top.Type = EActorAttributeType::Float;
     Top.RecommendedValues = { TEXT("10.0") };
     Top.bRestrictToRecommended = false;
-    
+
     FActorVariation Bottom;
     Bottom.Id = TEXT("lower_limit");
     Bottom.Type = EActorAttributeType::Float;
@@ -165,35 +167,35 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     DrawDebug.RecommendedValues = { TEXT("False") };
     DrawDebug.bRestrictToRecommended = false;
 
-	FActorVariation ShowCalculationTime;
+    FActorVariation ShowCalculationTime;
     ShowCalculationTime.Id = TEXT("show_calculation_time");
     ShowCalculationTime.Type = EActorAttributeType::Bool;
     ShowCalculationTime.RecommendedValues = { TEXT("False") };
     ShowCalculationTime.bRestrictToRecommended = false;
 
-	FActorVariation UseTraceComplex;
+    FActorVariation UseTraceComplex;
     UseTraceComplex.Id = TEXT("use_complex_collision");
     UseTraceComplex.Type = EActorAttributeType::Bool;
     UseTraceComplex.RecommendedValues = { TEXT("True") };
     UseTraceComplex.bRestrictToRecommended = false;
 
-	FActorVariation ChunkX;
+    FActorVariation ChunkX;
     ChunkX.Id = TEXT("chunk_x");
     ChunkX.Type = EActorAttributeType::Int;
     ChunkX.RecommendedValues = { TEXT("4") };
     ChunkX.bRestrictToRecommended = false;
 
-	FActorVariation ChunkY;
+    FActorVariation ChunkY;
     ChunkY.Id = TEXT("chunk_y");
     ChunkY.Type = EActorAttributeType::Int;
     ChunkY.RecommendedValues = { TEXT("4") };
     ChunkY.bRestrictToRecommended = false;
 
-	FActorVariation ChunkZ;
-	ChunkZ.Id = TEXT("chunk_z");
-	ChunkZ.Type = EActorAttributeType::Int;
-	ChunkZ.RecommendedValues = { TEXT("4") };
-	ChunkZ.bRestrictToRecommended = false;
+    FActorVariation ChunkZ;
+    ChunkZ.Id = TEXT("chunk_z");
+    ChunkZ.Type = EActorAttributeType::Int;
+    ChunkZ.RecommendedValues = { TEXT("4") };
+    ChunkZ.bRestrictToRecommended = false;
 
     FActorVariation CandidateReuse;
     CandidateReuse.Id = TEXT("use_candidate_reuse");
@@ -208,23 +210,22 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     ValidateReuse.bRestrictToRecommended = false;
 
     Definition.Variations.Append(
-		{
-			Range,
-			Top,
-			Bottom,
-			VoxelSize,
-			SelfIgnore,
-			DrawDebug,
-			ShowCalculationTime,
-			UseTraceComplex,
-			ChunkX,
-			ChunkY,
-			ChunkZ,
-
+        {
+            Range,
+            Top,
+            Bottom,
+            VoxelSize,
+            SelfIgnore,
+            DrawDebug,
+            ShowCalculationTime,
+            UseTraceComplex,
+            ChunkX,
+            ChunkY,
+            ChunkZ,
             CandidateReuse,
             ValidateReuse,
-		}
-	);
+        }
+    );
 
     return Definition;
 }
@@ -234,11 +235,11 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     Super::Set(Description);
 
     constexpr float M_TO_CM = 100.0f;
-    
+
     BoxRange = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("range", Description.Variations, 50.0f);
-    
+
     Top = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("upper_limit", Description.Variations, 10.0f);
-    
+
     Bottom = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("lower_limit", Description.Variations, -5.0f);
 
     BoxSize = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("voxel_size", Description.Variations, 0.5f);
@@ -247,15 +248,15 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 
     DrawDebug = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("draw_debug", Description.Variations, false);
 
-	ShowCalculationTime = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("show_calculation_time", Description.Variations, false);
-	
-	UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
+    ShowCalculationTime = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("show_calculation_time", Description.Variations, false);
 
-	ChunkX = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_x", Description.Variations, 4);
+    UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
 
-	ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
+    ChunkX = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_x", Description.Variations, 4);
 
-	ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 4);
+    ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
+
+    ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 4);
 
     UseCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_candidate_reuse", Description.Variations, false);
     ValidateCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("validate_candidate_reuse", Description.Variations, false);
@@ -264,16 +265,16 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
     GridSizeY = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
     GridSizeZ = FMath::CeilToInt((Top - Bottom) / BoxSize);
-    
+
     UE_LOG(
-		LogCarla,
-		Log,
-		TEXT("VoxelDetectionSensor: Grid size %d x %d x %d = %d voxels"), 
+        LogCarla,
+        Log,
+        TEXT("VoxelDetectionSensor: Grid size %d x %d x %d = %d voxels"),
         GridSizeX,
-		GridSizeY,
-		GridSizeZ,
-		GridSizeX * GridSizeY * GridSizeZ
-	);
+        GridSizeY,
+        GridSizeZ,
+        GridSizeX * GridSizeY * GridSizeZ
+    );
 }
 
 void AVoxelDetectionSensor::SetOwner(AActor *NewOwner)
@@ -292,46 +293,45 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(AVoxelDetectionSensor::PostPhysTick);
 
-	const double StartTime = FPlatformTime::Seconds();
-    
+    const double StartTime = FPlatformTime::Seconds();
+
     const int32 TotalVoxels = GridSizeX * GridSizeY * GridSizeZ;
-    
+
     // Initialize voxel grids with 0 (empty).
     TArray<uint8> SemanticVoxels;
     SemanticVoxels.SetNumZeroed(TotalVoxels);
-    
+
     // Set up collision query.
     FCollisionQueryParams QueryParams(FName(TEXT("VoxelTrace")), true, this);
-    
-	QueryParams.bTraceComplex = UseTraceComplex;
+
+    QueryParams.bTraceComplex = UseTraceComplex;
     QueryParams.bReturnPhysicalMaterial = false;
-    
+
     if (SelfIgnore && GetOwner())
     {
         QueryParams.AddIgnoredActor(GetOwner());
     }
 
-	FCollisionQueryParams ChunkQueryParams = QueryParams;
-        
-	ChunkQueryParams.bSkipNarrowPhase = true;
-    
-	const float HalfVoxel = BoxSize * 0.5f;
+    FCollisionQueryParams ChunkQueryParams = QueryParams;
+    ChunkQueryParams.bSkipNarrowPhase = true;
 
-	const FVector BoxExtent(HalfVoxel, HalfVoxel, HalfVoxel);
+    const float HalfVoxel = BoxSize * 0.5f;
 
-	FCollisionObjectQueryParams ObjectParams(FCollisionObjectQueryParams::AllObjects);
-	ObjectParams.RemoveObjectTypesToQuery(ECC_Vehicle);
-	ObjectParams.RemoveObjectTypesToQuery(ECC_Pawn);
-	ObjectParams.RemoveObjectTypesToQuery(ECC_Camera);
-	ObjectParams.RemoveObjectTypesToQuery(ECC_Visibility);
-	ObjectParams.RemoveObjectTypesToQuery(ECC_PhysicsBody);
-	ObjectParams.RemoveObjectTypesToQuery(ECC_Destructible);
-    
+    const FVector BoxExtent(HalfVoxel, HalfVoxel, HalfVoxel);
+
+    FCollisionObjectQueryParams ObjectParams(FCollisionObjectQueryParams::AllObjects);
+    ObjectParams.RemoveObjectTypesToQuery(ECC_Vehicle);
+    ObjectParams.RemoveObjectTypesToQuery(ECC_Pawn);
+    ObjectParams.RemoveObjectTypesToQuery(ECC_Camera);
+    ObjectParams.RemoveObjectTypesToQuery(ECC_Visibility);
+    ObjectParams.RemoveObjectTypesToQuery(ECC_PhysicsBody);
+    ObjectParams.RemoveObjectTypesToQuery(ECC_Destructible);
+
     physx::PxScene* const Scene = World->GetPhysicsScene()->GetPxScene();
 
-	const FTransform SensorTransform = GetTransform();
+    const FTransform SensorTransform = GetTransform();
 
-	const FQuat VoxelRotation = SensorTransform.GetRotation();
+    const FQuat VoxelRotation = SensorTransform.GetRotation();
 
     const FCollisionShape VoxelShape = FCollisionShape::MakeBox(BoxExtent);
     const FPhysicsShapeAdapter VoxelAdapter(VoxelRotation, VoxelShape);
@@ -361,74 +361,70 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         }
         return Label;
     };
-	
-	const int32 SGridX = (GridSizeX + ChunkX - 1) / ChunkX;
-	const int32 SGridY = (GridSizeY + ChunkY - 1) / ChunkY;
-	const int32 SGridZ = (GridSizeZ + ChunkZ - 1) / ChunkZ;
 
-	const FVector AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
-	const FVector AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
-	const FVector AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
-	
-	const int32 TotalChunks = SGridX * SGridY * SGridZ;
+    const int32 SGridX = (GridSizeX + ChunkX - 1) / ChunkX;
+    const int32 SGridY = (GridSizeY + ChunkY - 1) / ChunkY;
+    const int32 SGridZ = (GridSizeZ + ChunkZ - 1) / ChunkZ;
+
+    const FVector AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
+    const FVector AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
+    const FVector AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
+
+    const int32 TotalChunks = SGridX * SGridY * SGridZ;
     const auto ProcessChunk = [&](int32 Index)
-	{	
-		const int32 CX = Index / (SGridY * SGridZ);
-		
-		const int32 Remainder = Index % (SGridY * SGridZ);
-		
-		const int32 CY = Remainder / SGridZ;
-		const int32 CZ = Remainder % SGridZ;
+    {
+        const int32 CX = Index / (SGridY * SGridZ);
 
-		const int32 XEnd = FMath::Min((CX + 1) * ChunkX, GridSizeX);
-		const int32 YEnd = FMath::Min((CY + 1) * ChunkY, GridSizeY);
-		const int32 ZEnd = FMath::Min((CZ + 1) * ChunkZ, GridSizeZ);
+        const int32 Remainder = Index % (SGridY * SGridZ);
 
-		const float LocalMinX = -BoxRange + CX * ChunkX * BoxSize;
-		const float LocalMinY = -BoxRange + CY * ChunkY * BoxSize;
-		const float LocalMinZ = Bottom + CZ * ChunkZ * BoxSize;
+        const int32 CY = Remainder / SGridZ;
+        const int32 CZ = Remainder % SGridZ;
 
-		const float LocalMaxX = -BoxRange + XEnd * BoxSize;
-		const float LocalMaxY = -BoxRange + YEnd * BoxSize;
-		const float LocalMaxZ = Bottom + ZEnd * BoxSize;
+        const int32 XEnd = FMath::Min((CX + 1) * ChunkX, GridSizeX);
+        const int32 YEnd = FMath::Min((CY + 1) * ChunkY, GridSizeY);
+        const int32 ZEnd = FMath::Min((CZ + 1) * ChunkZ, GridSizeZ);
 
-		const FVector LocalMin(LocalMinX, LocalMinY, LocalMinZ);
-		const FVector LocalMax(LocalMaxX, LocalMaxY, LocalMaxZ);
+        const float LocalMinX = -BoxRange + CX * ChunkX * BoxSize;
+        const float LocalMinY = -BoxRange + CY * ChunkY * BoxSize;
+        const float LocalMinZ = Bottom + CZ * ChunkZ * BoxSize;
 
-		const FVector LocalHalfExtent = (LocalMax - LocalMin) * 0.5f;
+        const float LocalMaxX = -BoxRange + XEnd * BoxSize;
+        const float LocalMaxY = -BoxRange + YEnd * BoxSize;
+        const float LocalMaxZ = Bottom + ZEnd * BoxSize;
 
-		const FVector ChunkCenter = SensorTransform.TransformPosition((LocalMin + LocalMax) * 0.5f);
+        const FVector LocalMin(LocalMinX, LocalMinY, LocalMinZ);
+        const FVector LocalMax(LocalMaxX, LocalMaxY, LocalMaxZ);
 
-        // Bound the transformed voxel centers, then add the actual query
-        // half-extents. This also encloses fine queries at non-unit sensor scale.
+        const FVector LocalHalfExtent = (LocalMax - LocalMin) * 0.5f;
+
+        const FVector ChunkCenter = SensorTransform.TransformPosition((LocalMin + LocalMax) * 0.5f);
+
+        // Enclose voxel centers and query extents, including sensor scale.
         const FVector CenterHalfExtent = LocalHalfExtent - BoxExtent;
         const FVector ChunkWorldExtent = AbsAxisX * CenterHalfExtent.X +
             AbsAxisY * CenterHalfExtent.Y + AbsAxisZ * CenterHalfExtent.Z +
             P2UVector(VoxelWorldExtent) + FVector(0.1f);
 
         FVoxelCandidateCollector Collector(QueryParams, ObjectParams,
-                                          SemanticPriority, UE_ARRAY_COUNT(SemanticPriority));
+            SemanticPriority, UE_ARRAY_COUNT(SemanticPriority));
         bool bChunkEmpty;
         if (UseCandidateReuse)
         {
             TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
-            // PhysX requires touch storage for a multi-overlap even though our
-            // prefilter returns eNONE and never writes an overlap hit.
+            // PhysX requires touch storage even though the prefilter returns eNONE.
             physx::PxOverlapHit UnusedHit;
             physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
             const physx::PxQueryFilterData Filter(
                 PhysXInterface::StaticDynamicQueryFlags(QueryParams) | physx::PxQueryFlag::ePREFILTER);
             const physx::PxBoxGeometry ChunkGeometry(U2PVector(ChunkWorldExtent));
             const physx::PxTransform ChunkPose(U2PVector(ChunkCenter));
-            // The prefilter stores candidates and returns eNONE. The overlap
-            // return value is deliberately unused; no narrow-phase hits exist.
             Scene->overlap(ChunkGeometry, ChunkPose, UnusedHits, Filter, &Collector);
-            // Mesh bounds can span large empty regions. Reject such candidates
-            // once here instead of repeating failed mesh tests for every voxel.
+
+            // Reject empty mesh regions once before testing individual voxels.
             Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
             {
                 return !physx::PxGeometryQuery::overlap(ChunkGeometry, ChunkPose,
-                                                       Candidate.Geometry.any(), Candidate.Pose);
+                    Candidate.Geometry.any(), Candidate.Pose);
             });
             Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
             {
@@ -443,22 +439,24 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                 FCollisionShape::MakeBox(ChunkWorldExtent), ChunkQueryParams);
         }
 
-		if (bChunkEmpty && !bValidate)
-			return;
+        if (bChunkEmpty && !bValidate)
+        {
+            return;
+        }
 
         int32 ChunkMismatches = 0;
 
-		for (int32 X = CX * ChunkX; X < XEnd; ++X)
-		{
-			for (int32 Y = CY * ChunkY; Y < YEnd; ++Y)
-			{
-				for (int32 Z = CZ * ChunkZ; Z < ZEnd; ++Z)
-				{
-					const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-		
-					const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+        for (int32 X = CX * ChunkX; X < XEnd; ++X)
+        {
+            for (int32 Y = CY * ChunkY; Y < YEnd; ++Y)
+            {
+                for (int32 Z = CZ * ChunkZ; Z < ZEnd; ++Z)
+                {
+                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
 
-					const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
+                    const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+
+                    const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
 
                     if (!UseCandidateReuse)
                     {
@@ -474,18 +472,23 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                     for (const FVoxelCandidate& Candidate : Collector.Candidates)
                     {
                         if (Candidate.Priority < SemanticPriority[Label])
+                        {
                             break;
+                        }
                         if (Candidate.Label == Label)
+                        {
                             continue;
+                        }
                         if (!Candidate.Bounds.intersects(VoxelBounds))
+                        {
                             continue;
+                        }
                         if (physx::PxGeometryQuery::overlap(VoxelAdapter.GetGeometry(), VoxelPose,
-                                                          Candidate.Geometry.any(), Candidate.Pose))
+                            Candidate.Geometry.any(), Candidate.Pose))
                         {
                             if (Label && Candidate.Label != Label)
                             {
-                                // Different labels at equal maximum priority:
-                                // retain the original per-voxel PhysX hit order.
+                                // Preserve PhysX hit order for equal-priority labels.
                                 bPriorityTie = true;
                                 break;
                             }
@@ -493,7 +496,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                         }
                     }
                     if (bPriorityTie)
+                    {
                         Label = QueryVoxelLabel(WorldPos);
+                    }
 
                     if (bValidate)
                     {
@@ -505,15 +510,16 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                         }
                     }
                     SemanticVoxels[FlatIndex] = Label;
-				}
-			}
-		}
+                }
+            }
+        }
         if (ChunkMismatches)
+        {
             ValidationMismatches.Add(ChunkMismatches);
+        }
     };
 
-    // lockRead() takes a shared mutex even when no writer is active. Lock once
-    // per batch on its executing thread, rather than once per tiny chunk.
+    // PhysX read locks share a mutex; acquire one per batch on its worker.
     const int32 NumBatches = FMath::Min(TotalChunks,
         16 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
     ParallelFor(NumBatches, [&](int32 Batch)
@@ -522,52 +528,56 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         const int32 Begin = int32(int64(TotalChunks) * Batch / NumBatches);
         const int32 End = int32(int64(TotalChunks) * (Batch + 1) / NumBatches);
         for (int32 Index = Begin; Index < End; ++Index)
+        {
             ProcessChunk(Index);
+        }
     }, EParallelForFlags::Unbalanced);
 
     if (bValidate)
     {
         carla::log_warning("Candidate reuse validation: ", ValidationMismatches.GetValue(),
-                           " mismatched voxels out of ", TotalVoxels,
-                           " (reference labels used on mismatch)");
+            " mismatched voxels out of ", TotalVoxels,
+            " (reference labels used on mismatch)");
     }
-    
+
     // Debug visualization.
     if (DrawDebug)
     {
-    	const FQuat ActorQuat = GetActorQuat();
-		
-		for (int32 FlatIndex = 0; FlatIndex < GridSizeX * GridSizeY * GridSizeZ; ++FlatIndex)
-		{
-			const uint8 Label = SemanticVoxels[FlatIndex];
-			
-			if (Label > 0)
-			{
-				// Convert flat index back to X, Y, Z.
-				const int32 X = FlatIndex / (GridSizeY * GridSizeZ);
-				const int32 Remainder = FlatIndex % (GridSizeY * GridSizeZ);
-				const int32 Y = Remainder / GridSizeZ;
-				const int32 Z = Remainder % GridSizeZ;
-				
-				FVector Pos = VoxelToWorld(X, Y, Z);
-				
-				FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
-				
-				DrawDebugBox(World, Pos, BoxExtent, ActorQuat, Color.ToFColor(true), false, DeltaTime * 1.1f, 0, 2.0f);
-			}
-		}
+        const FQuat ActorQuat = GetActorQuat();
+
+        for (int32 FlatIndex = 0; FlatIndex < GridSizeX * GridSizeY * GridSizeZ; ++FlatIndex)
+        {
+            const uint8 Label = SemanticVoxels[FlatIndex];
+
+            if (Label > 0)
+            {
+                // Convert flat index back to X, Y, Z.
+                const int32 X = FlatIndex / (GridSizeY * GridSizeZ);
+                const int32 Remainder = FlatIndex % (GridSizeY * GridSizeZ);
+                const int32 Y = Remainder / GridSizeZ;
+                const int32 Z = Remainder % GridSizeZ;
+
+                FVector Pos = VoxelToWorld(X, Y, Z);
+
+                FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
+
+                DrawDebugBox(World, Pos, BoxExtent, ActorQuat, Color.ToFColor(true), false, DeltaTime * 1.1f, 0, 2.0f);
+            }
+        }
     }
-    
+
     // Send data
     auto DataStream = GetDataStream(*this);
 
     DataStream.SerializeAndSend(*this, GetEpisode(), SemanticVoxels);
 
-	const double EndTime = FPlatformTime::Seconds();
-	
-	if (ShowCalculationTime)
-		carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime),
-                           " ms (mode: ", UseCandidateReuse ? "reuse" : "legacy",
-                           ", chunks: ", TotalChunks, ", batches: ", NumBatches,
-                           ", validation: ", bValidate ? "on" : "off", ")");
+    const double EndTime = FPlatformTime::Seconds();
+
+    if (ShowCalculationTime)
+    {
+        carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime),
+            " ms (mode: ", UseCandidateReuse ? "reuse" : "legacy",
+            ", chunks: ", TotalChunks, ", batches: ", NumBatches,
+            ", validation: ", bValidate ? "on" : "off", ")");
+    }
 }
