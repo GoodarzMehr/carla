@@ -25,18 +25,26 @@
 
 namespace
 {
+    // Value that marks voxels nobody wrote when validating the output.
+    constexpr uint8 UnwrittenVoxel = 0xFF;
+
+    // Chunk size of the reference implementation used for validation.
+    const FIntVector ReferenceChunkSize(4, 4, 8);
+
     struct FVoxelProfile
     {
         uint64 GatherCycles = 0;
         uint64 CullCycles = 0;
         uint64 TriangleCycles = 0;
         uint64 FineCycles = 0;
+        uint64 PhysXCycles = 0;
         uint64 TieCycles = 0;
         uint64 Regions = 0;
         uint64 Candidates = 0;
         uint64 Chunks = 0;
         uint64 Voxels = 0;
         uint64 Tests = 0;
+        uint64 PhysXQueries = 0;
         uint64 Ties = 0;
         uint64 CachedMeshes = 0;
         uint64 CachedTriangles = 0;
@@ -54,8 +62,7 @@ namespace
         int32 TriangleStart = INDEX_NONE;
         int32 TriangleCount = 0;
 
-        FVoxelCandidate(const physx::PxShape& Shape, const physx::PxRigidActor& Actor,
-            uint8 InLabel, uint8 InPriority)
+        FVoxelCandidate(const physx::PxShape& Shape, const physx::PxRigidActor& Actor, uint8 InLabel, uint8 InPriority)
             : Geometry(Shape.getGeometry())
             , Pose(physx::PxShapeExt::getGlobalPose(Shape, Actor))
             , Bounds(physx::PxGeometryQuery::getWorldBounds(Geometry.any(), Pose))
@@ -71,9 +78,7 @@ namespace
     public:
         TArray<FVoxelCandidate, TInlineAllocator<16>> Candidates;
 
-        FVoxelCandidateCollector(const FCollisionQueryParams& InParams,
-            const FCollisionObjectQueryParams& InObjects,
-            const uint8* InPriorities, int32 InNumLabels)
+        FVoxelCandidateCollector(const FCollisionQueryParams& InParams, const FCollisionObjectQueryParams& InObjects, const uint8* InPriorities, int32 InNumLabels)
             : Params(InParams)
             , Objects(InObjects)
             , Priorities(InPriorities)
@@ -81,36 +86,35 @@ namespace
         {
         }
 
-        physx::PxQueryHitType::Enum preFilter(const physx::PxFilterData&,
-            const physx::PxShape* Shape, const physx::PxRigidActor* Actor,
-            physx::PxHitFlags&) override
+        physx::PxQueryHitType::Enum preFilter(const physx::PxFilterData&, const physx::PxShape* Shape, const physx::PxRigidActor* Actor, physx::PxHitFlags&) override
         {
             const physx::PxFilterData Filter = Shape->getQueryFilterData();
+
             const uint32 Complexity = Params.bTraceComplex ? EPDF_ComplexCollision : EPDF_SimpleCollision;
+
             FMaskFilter ShapeMask;
+
             const ECollisionChannel Channel = GetCollisionChannelAndExtraFilter(Filter.word3, ShapeMask);
-            if (!(Filter.word3 & Complexity) ||
-                !(Objects.GetQueryBitfield() & (1u << Channel)) ||
-                (Objects.IgnoreMask & ShapeMask) || Params.bIgnoreTouches ||
-                Params.GetIgnoredActors().Contains(Filter.word0))
+
+            if (!(Filter.word3 & Complexity) || !(Objects.GetQueryBitfield() & (1u << Channel)) || (Objects.IgnoreMask & ShapeMask) || Params.bIgnoreTouches || Params.GetIgnoredActors().Contains(Filter.word0))
             {
                 return physx::PxQueryHitType::eNONE;
             }
 
-            if (Params.GetIgnoredComponents().Num() &&
-                Params.GetIgnoredComponents().Contains(Shape->getSimulationFilterData().word2))
+            if (Params.GetIgnoredComponents().Num() && Params.GetIgnoredComponents().Contains(Shape->getSimulationFilterData().word2))
             {
                 return physx::PxQueryHitType::eNONE;
             }
 
             UPrimitiveComponent* Component = nullptr;
+
             if (const FBodyInstance* Body = FPhysxUserData::Get<FBodyInstance>(Actor->userData))
             {
                 Body = FPhysicsInterface::ShapeToOriginalBodyInstance(Body, Shape);
+
                 Component = Body->OwnerComponent.Get();
             }
-            else if (const FCustomPhysXPayload* Payload =
-                FPhysxUserData::Get<FCustomPhysXPayload>(Shape->userData))
+            else if (const FCustomPhysXPayload* Payload = FPhysxUserData::Get<FCustomPhysXPayload>(Shape->userData))
             {
                 Component = Payload->GetOwningComponent().Get();
             }
@@ -118,6 +122,7 @@ namespace
             if (Component)
             {
                 const int32 Label = Component->CustomDepthStencilValue;
+
                 if (Label > 0 && Label < NumLabels && Priorities[Label] > 0)
                 {
                     Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label]);
@@ -128,8 +133,7 @@ namespace
             return physx::PxQueryHitType::eNONE;
         }
 
-        physx::PxQueryHitType::Enum postFilter(const physx::PxFilterData&,
-            const physx::PxQueryHit&) override
+        physx::PxQueryHitType::Enum postFilter(const physx::PxFilterData&, const physx::PxQueryHit&) override
         {
             return physx::PxQueryHitType::eNONE;
         }
@@ -140,6 +144,725 @@ namespace
         const uint8* Priorities;
         int32 NumLabels;
     };
+
+    struct FChunkBounds
+    {
+        physx::PxBoxGeometry Geometry;
+        physx::PxTransform Pose;
+    };
+
+    // Query setup and grid geometry shared by every chunk of one frame.
+    struct FVoxelFrame
+    {
+        UWorld* World;
+        physx::PxScene* Scene;
+        FCollisionQueryParams QueryParams;
+        FCollisionObjectQueryParams ObjectParams;
+        FTransform SensorTransform;
+        FQuat VoxelRotation;
+        FVector BoxExtent;
+        FCollisionShape VoxelShape;
+        FPhysicsShapeAdapter VoxelAdapter;
+        bool bBoxVoxels = false;
+        physx::PxVec3 VoxelHalfExtent;
+        physx::PxQuat VoxelQuat;
+        physx::PxVec3 VoxelWorldExtent;
+        FVector AbsAxisX;
+        FVector AbsAxisY;
+        FVector AbsAxisZ;
+        float BoxSize;
+        float BoxRange;
+        float Bottom;
+        int32 GridSizeX;
+        int32 GridSizeY;
+        int32 GridSizeZ;
+        const uint8* Priorities;
+        int32 NumLabels;
+
+        FVoxelFrame(
+            UWorld* InWorld,
+            const FTransform& InSensorTransform,
+            const FCollisionQueryParams& InQueryParams,
+            float InBoxSize,
+            float InBoxRange,
+            float InBottom,
+            int32 InGridSizeX,
+            int32 InGridSizeY,
+            int32 InGridSizeZ,
+            const uint8* InPriorities,
+            int32 InNumLabels)
+            : World(InWorld)
+            , Scene(InWorld->GetPhysicsScene()->GetPxScene())
+            , QueryParams(InQueryParams)
+            , ObjectParams(FCollisionObjectQueryParams::AllObjects)
+            , SensorTransform(InSensorTransform)
+            , VoxelRotation(InSensorTransform.GetRotation())
+            , BoxExtent(InBoxSize * 0.5f, InBoxSize * 0.5f, InBoxSize * 0.5f)
+            , VoxelShape(FCollisionShape::MakeBox(BoxExtent))
+            , VoxelAdapter(VoxelRotation, VoxelShape)
+            , BoxSize(InBoxSize)
+            , BoxRange(InBoxRange)
+            , Bottom(InBottom)
+            , GridSizeX(InGridSizeX)
+            , GridSizeY(InGridSizeY)
+            , GridSizeZ(InGridSizeZ)
+            , Priorities(InPriorities)
+            , NumLabels(InNumLabels)
+        {
+            ObjectParams.RemoveObjectTypesToQuery(ECC_Vehicle);
+            ObjectParams.RemoveObjectTypesToQuery(ECC_Pawn);
+            ObjectParams.RemoveObjectTypesToQuery(ECC_Camera);
+            ObjectParams.RemoveObjectTypesToQuery(ECC_Visibility);
+            ObjectParams.RemoveObjectTypesToQuery(ECC_PhysicsBody);
+            ObjectParams.RemoveObjectTypesToQuery(ECC_Destructible);
+
+            bBoxVoxels = VoxelAdapter.GetGeometry().getType() == physx::PxGeometryType::eBOX;
+
+            VoxelHalfExtent = bBoxVoxels ? static_cast<const physx::PxBoxGeometry&>(VoxelAdapter.GetGeometry()).halfExtents : physx::PxVec3(0.0f);
+
+            VoxelQuat = U2PQuat(VoxelAdapter.GetGeomOrientation());
+
+            VoxelWorldExtent = physx::PxGeometryQuery::getWorldBounds(VoxelAdapter.GetGeometry(), physx::PxTransform(physx::PxVec3(0.0f), VoxelQuat)).getExtents();
+
+            AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
+            AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
+            AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
+        }
+
+        // Center of voxel (X, Y, Z) in world space.
+        FVector GetWorldPosition(int32 X, int32 Y, int32 Z) const
+        {
+            const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+
+            return SensorTransform.TransformPosition(LocalPos);
+        }
+
+        // Axis-aligned world box that encloses every voxel query between Begin and End.
+        FChunkBounds MakeChunkBounds(const FIntVector& Begin, const FIntVector& End) const
+        {
+            const FVector LocalMin(-BoxRange + Begin.X * BoxSize, -BoxRange + Begin.Y * BoxSize, Bottom + Begin.Z * BoxSize);
+            const FVector LocalMax(-BoxRange + End.X * BoxSize, -BoxRange + End.Y * BoxSize, Bottom + End.Z * BoxSize);
+
+            const FVector LocalHalfExtent = (LocalMax - LocalMin) * 0.5f;
+
+            const FVector ChunkCenter = SensorTransform.TransformPosition((LocalMin + LocalMax) * 0.5f);
+
+            // Enclose voxel centers and query extents, including sensor scale.
+            const FVector CenterHalfExtent = LocalHalfExtent - BoxExtent;
+
+            const FVector ChunkWorldExtent = AbsAxisX * CenterHalfExtent.X + AbsAxisY * CenterHalfExtent.Y + AbsAxisZ * CenterHalfExtent.Z + P2UVector(VoxelWorldExtent) + FVector(0.1f);
+
+            return FChunkBounds{physx::PxBoxGeometry(U2PVector(ChunkWorldExtent)), physx::PxTransform(U2PVector(ChunkCenter))};
+        }
+
+        // Exclusive end voxel of chunk (X - 1, Y - 1, Z - 1), clamped to the grid.
+        FIntVector GetChunkEnd(const FIntVector& ChunkSize, int32 X, int32 Y, int32 Z) const
+        {
+            return FIntVector(
+                int32(FMath::Min<int64>(int64(X) * ChunkSize.X, GridSizeX)),
+                int32(FMath::Min<int64>(int64(Y) * ChunkSize.Y, GridSizeY)),
+                int32(FMath::Min<int64>(int64(Z) * ChunkSize.Z, GridSizeZ))
+            );
+        }
+
+        // Label of one voxel from the original per-voxel query; PhysX hit order breaks equal-priority ties.
+        uint8 QueryVoxelLabel(const FVector& WorldPos) const
+        {
+            TArray<FOverlapResult> Overlaps;
+
+            uint8 Label = 0;
+
+            World->ParallelOverlapMultiByObjectType(
+                Overlaps,
+                WorldPos,
+                VoxelRotation,
+                ObjectParams,
+                VoxelShape,
+                QueryParams
+            );
+
+            for (const FOverlapResult& Overlap : Overlaps)
+            {
+                if (const UPrimitiveComponent* Component = Overlap.Component.Get())
+                {
+                    const int32 CandidateLabel = Component->CustomDepthStencilValue;
+
+                    if (CandidateLabel >= 0 && CandidateLabel < NumLabels && Priorities[CandidateLabel] > Priorities[Label])
+                    {
+                        Label = uint8(CandidateLabel);
+                    }
+                }
+            }
+
+            return Label;
+        }
+    };
+
+    // Label every voxel of one chunk. Separate instantiations keep profiling clocks out of normal chunks.
+    template <bool bProfile>
+    void ProcessChunk(const FVoxelFrame& Frame, const FIntVector& ChunkSize, const FIntVector& Chunk, uint8* Labels, FVoxelProfile& Profile)
+    {
+        const FIntVector Begin(Chunk.X * ChunkSize.X, Chunk.Y * ChunkSize.Y, Chunk.Z * ChunkSize.Z);
+
+        const FIntVector End = Frame.GetChunkEnd(ChunkSize, Chunk.X + 1, Chunk.Y + 1, Chunk.Z + 1);
+
+        const FChunkBounds ChunkBounds = Frame.MakeChunkBounds(Begin, End);
+
+        FVoxelCandidateCollector Collector(Frame.QueryParams, Frame.ObjectParams, Frame.Priorities, Frame.NumLabels);
+
+        const uint64 GatherStart = bProfile ? FPlatformTime::Cycles64() : 0;
+
+        {
+            TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
+
+            // PhysX requires touch storage even though the prefilter returns eNONE.
+            physx::PxOverlapHit UnusedHit;
+            physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
+
+            const physx::PxQueryFilterData Filter(PhysXInterface::StaticDynamicQueryFlags(Frame.QueryParams) | physx::PxQueryFlag::ePREFILTER);
+
+            Frame.Scene->overlap(ChunkBounds.Geometry, ChunkBounds.Pose, UnusedHits, Filter, &Collector);
+        }
+
+        const uint64 CullStart = bProfile ? FPlatformTime::Cycles64() : 0;
+
+        if (bProfile)
+        {
+            Profile.GatherCycles += CullStart - GatherStart;
+
+            ++Profile.Regions;
+
+            Profile.Candidates += Collector.Candidates.Num();
+        }
+
+        // Reject empty mesh regions once before testing individual voxels.
+        Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
+        {
+            return !physx::PxGeometryQuery::overlap(ChunkBounds.Geometry, ChunkBounds.Pose, Candidate.Geometry.any(), Candidate.Pose);
+        });
+
+        Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
+        {
+            return A.Priority > B.Priority;
+        });
+
+        if (bProfile)
+        {
+            Profile.CullCycles += FPlatformTime::Cycles64() - CullStart;
+        }
+
+        if (Collector.Candidates.Num() == 0)
+        {
+            // Every voxel is written exactly once, so the output buffer is never cleared beforehand.
+            for (int32 X = Begin.X; X < End.X; ++X)
+            {
+                for (int32 Y = Begin.Y; Y < End.Y; ++Y)
+                {
+                    const int32 FlatIndex = X * Frame.GridSizeY * Frame.GridSizeZ + Y * Frame.GridSizeZ + Begin.Z;
+
+                    FMemory::Memzero(Labels + FlatIndex, End.Z - Begin.Z);
+                }
+            }
+
+            return;
+        }
+
+        TArray<VoxelTriangleOverlap::FTriangle, TInlineAllocator<8>> Triangles;
+
+        const physx::PxTransform TriangleFrame(ChunkBounds.Pose.p, Frame.VoxelQuat);
+
+        if (Frame.bBoxVoxels)
+        {
+            const uint64 TriangleStart = bProfile ? FPlatformTime::Cycles64() : 0;
+
+            for (FVoxelCandidate& Candidate : Collector.Candidates)
+            {
+                if (Candidate.Geometry.getType() != physx::PxGeometryType::eTRIANGLEMESH)
+                {
+                    continue;
+                }
+
+                // Dense chunks retain the mesh BVH instead of scanning a long triangle list.
+                constexpr int32 MaxTriangles = 64;
+
+                physx::PxU32 Indices[MaxTriangles];
+
+                bool bOverflow = false;
+
+                const auto& Mesh = Candidate.Geometry.triangleMesh();
+
+                const int32 Count = physx::PxMeshQuery::findOverlapTriangleMesh(ChunkBounds.Geometry, ChunkBounds.Pose, Mesh, Candidate.Pose, Indices, MaxTriangles, 0, bOverflow);
+
+                if (bOverflow || Count == 0)
+                {
+                    continue;
+                }
+
+                Candidate.TriangleStart = Triangles.Num();
+                Candidate.TriangleCount = Count;
+
+                for (int32 Triangle = 0; Triangle < Count; ++Triangle)
+                {
+                    Triangles.Add(VoxelTriangleOverlap::MakeTriangle(Mesh, Candidate.Pose, TriangleFrame, Indices[Triangle], Frame.VoxelHalfExtent));
+                }
+
+                if (bProfile)
+                {
+                    ++Profile.CachedMeshes;
+
+                    Profile.CachedTriangles += Count;
+                }
+            }
+
+            if (bProfile)
+            {
+                Profile.TriangleCycles += FPlatformTime::Cycles64() - TriangleStart;
+            }
+        }
+
+        const uint64 FineStart = bProfile ? FPlatformTime::Cycles64() : 0;
+
+        if (bProfile)
+        {
+            ++Profile.Chunks;
+
+            Profile.Voxels += uint64(End.X - Begin.X) * (End.Y - Begin.Y) * (End.Z - Begin.Z);
+        }
+
+        for (int32 X = Begin.X; X < End.X; ++X)
+        {
+            for (int32 Y = Begin.Y; Y < End.Y; ++Y)
+            {
+                for (int32 Z = Begin.Z; Z < End.Z; ++Z)
+                {
+                    const int32 FlatIndex = X * Frame.GridSizeY * Frame.GridSizeZ + Y * Frame.GridSizeZ + Z;
+
+                    const FVector WorldPos = Frame.GetWorldPosition(X, Y, Z);
+
+                    const physx::PxTransform VoxelPose(U2PVector(WorldPos), Frame.VoxelQuat);
+
+                    const physx::PxBounds3 VoxelBounds = physx::PxBounds3::centerExtents(VoxelPose.p, Frame.VoxelWorldExtent);
+
+                    const physx::PxVec3 TriangleCenter = Frame.bBoxVoxels ? TriangleFrame.transformInv(VoxelPose.p) : physx::PxVec3(0.0f);
+
+                    uint8 Label = 0;
+
+                    bool bPriorityTie = false;
+
+                    for (const FVoxelCandidate& Candidate : Collector.Candidates)
+                    {
+                        if (Candidate.Priority < Frame.Priorities[Label])
+                        {
+                            break;
+                        }
+
+                        if (Candidate.Label == Label)
+                        {
+                            continue;
+                        }
+
+                        if (!Candidate.Bounds.intersects(VoxelBounds))
+                        {
+                            continue;
+                        }
+
+                        if (bProfile)
+                        {
+                            ++Profile.Tests;
+                        }
+
+                        bool bOverlap = false;
+
+                        bool bNeedsMeshQuery = Candidate.TriangleStart == INDEX_NONE;
+
+                        if (!bNeedsMeshQuery)
+                        {
+                            if (bProfile)
+                            {
+                                ++Profile.TriangleQueries;
+                            }
+
+                            for (int32 Triangle = Candidate.TriangleStart; Triangle < Candidate.TriangleStart + Candidate.TriangleCount; ++Triangle)
+                            {
+                                const VoxelTriangleOverlap::EResult Result = VoxelTriangleOverlap::Test(Triangles[Triangle], TriangleCenter);
+
+                                if (Result == VoxelTriangleOverlap::EResult::Overlap)
+                                {
+                                    bOverlap = true;
+
+                                    break;
+                                }
+
+                                if (Result == VoxelTriangleOverlap::EResult::Uncertain)
+                                {
+                                    bNeedsMeshQuery = true;
+                                }
+                            }
+
+                            if (bProfile && bNeedsMeshQuery && !bOverlap)
+                            {
+                                ++Profile.BoundaryFallbacks;
+                            }
+                        }
+
+                        if (bNeedsMeshQuery && !bOverlap)
+                        {
+                            const uint64 PhysXStart = bProfile ? FPlatformTime::Cycles64() : 0;
+
+                            bOverlap = physx::PxGeometryQuery::overlap(Frame.VoxelAdapter.GetGeometry(), VoxelPose, Candidate.Geometry.any(), Candidate.Pose);
+
+                            if (bProfile)
+                            {
+                                Profile.PhysXCycles += FPlatformTime::Cycles64() - PhysXStart;
+
+                                ++Profile.PhysXQueries;
+                            }
+                        }
+
+                        if (bOverlap)
+                        {
+                            if (Label && Candidate.Label != Label)
+                            {
+                                // Preserve PhysX hit order for equal-priority labels.
+                                bPriorityTie = true;
+
+                                break;
+                            }
+
+                            Label = Candidate.Label;
+                        }
+                    }
+
+                    if (bPriorityTie)
+                    {
+                        const uint64 TieStart = bProfile ? FPlatformTime::Cycles64() : 0;
+
+                        Label = Frame.QueryVoxelLabel(WorldPos);
+
+                        if (bProfile)
+                        {
+                            Profile.TieCycles += FPlatformTime::Cycles64() - TieStart;
+
+                            ++Profile.Ties;
+                        }
+                    }
+
+                    Labels[FlatIndex] = Label;
+                }
+            }
+        }
+
+        if (bProfile)
+        {
+            Profile.FineCycles += FPlatformTime::Cycles64() - FineStart;
+        }
+    }
+
+    // Label every voxel chunk by chunk and return the number of chunks.
+    int32 RunChunks(const FVoxelFrame& Frame, const FIntVector& ChunkSize, uint8* Labels, bool bShowCalculationTime, TArray<FVoxelProfile>& OutProfiles)
+    {
+        const int32 SGridX = Frame.GridSizeX / ChunkSize.X + (Frame.GridSizeX % ChunkSize.X != 0);
+        const int32 SGridY = Frame.GridSizeY / ChunkSize.Y + (Frame.GridSizeY % ChunkSize.Y != 0);
+        const int32 SGridZ = Frame.GridSizeZ / ChunkSize.Z + (Frame.GridSizeZ % ChunkSize.Z != 0);
+
+        const int32 TotalChunks = SGridX * SGridY * SGridZ;
+
+        // PhysX read locks share a mutex; acquire one per batch on its worker.
+        const int32 NumBatches = FMath::Min(TotalChunks, 16 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
+
+        OutProfiles.Reset();
+
+        if (bShowCalculationTime)
+        {
+            OutProfiles.SetNum(NumBatches);
+        }
+
+        // A prime stride and rotating offset avoid repeatedly sampling the same grid layers.
+        constexpr int32 ProfileStride = 127;
+
+        const int32 ProfileOffset = FCarlaEngine::GetFrameCounter() % ProfileStride;
+
+        ParallelFor(NumBatches, [&](int32 Batch)
+        {
+            TRACE_CPUPROFILER_EVENT_SCOPE(VoxelProcessBatch);
+
+            physx::PxSceneReadLock SceneLock(*Frame.Scene);
+
+            FVoxelProfile Profile;
+
+            const int32 Begin = int32(int64(TotalChunks) * Batch / NumBatches);
+            const int32 End = int32(int64(TotalChunks) * (Batch + 1) / NumBatches);
+
+            for (int32 Index = Begin; Index < End; ++Index)
+            {
+                const int32 CX = Index / (SGridY * SGridZ);
+                const int32 Remainder = Index % (SGridY * SGridZ);
+                const int32 CY = Remainder / SGridZ;
+                const int32 CZ = Remainder % SGridZ;
+
+                const FIntVector Chunk(CX, CY, CZ);
+
+                if (bShowCalculationTime && (TotalChunks < ProfileStride || Index % ProfileStride == ProfileOffset))
+                {
+                    ProcessChunk<true>(Frame, ChunkSize, Chunk, Labels, Profile);
+                }
+                else
+                {
+                    ProcessChunk<false>(Frame, ChunkSize, Chunk, Labels, Profile);
+                }
+            }
+
+            if (bShowCalculationTime)
+            {
+                OutProfiles[Batch] = Profile;
+            }
+        }, EParallelForFlags::Unbalanced);
+
+        return TotalChunks;
+    }
+
+    // Fill the whole voxel buffer with one value, in parallel slices.
+    void FillVoxels(uint8* Labels, int32 TotalVoxels, uint8 Value)
+    {
+        constexpr int32 SliceSize = 1 << 20;
+
+        const int32 NumSlices = FMath::DivideAndRoundUp(TotalVoxels, SliceSize);
+
+        ParallelFor(NumSlices, [&](int32 Slice)
+        {
+            const int32 Begin = Slice * SliceSize;
+
+            FMemory::Memset(Labels + Begin, Value, FMath::Min(SliceSize, TotalVoxels - Begin));
+        });
+    }
+
+    // Compare the output with the chunked reference on the same frame and log every difference class.
+    void ValidateVoxels(const FVoxelFrame& Frame, const uint8* Labels)
+    {
+        const int32 TotalVoxels = Frame.GridSizeX * Frame.GridSizeY * Frame.GridSizeZ;
+
+        TArray<uint8> Reference;
+
+        Reference.SetNumUninitialized(TotalVoxels);
+
+        FillVoxels(Reference.GetData(), TotalVoxels, UnwrittenVoxel);
+
+        TArray<FVoxelProfile> UnusedProfiles;
+
+        RunChunks(Frame, ReferenceChunkSize, Reference.GetData(), false, UnusedProfiles);
+
+        // Labels 0 to 31 get their own bucket; every other value shares the last one.
+        constexpr int32 NumBuckets = 33;
+        constexpr int32 MaxExamples = 8;
+        constexpr int32 SliceSize = 1 << 20;
+
+        struct FSliceResult
+        {
+            uint64 Mismatches = 0;
+            uint64 Unwritten = 0;
+            uint64 Invalid = 0;
+            uint64 ReferenceUnwritten = 0;
+            uint64 Confusion[NumBuckets][NumBuckets] = {};
+            int32 Examples[MaxExamples] = {};
+            int32 NumExamples = 0;
+        };
+
+        const int32 NumSlices = FMath::DivideAndRoundUp(TotalVoxels, SliceSize);
+
+        TArray<FSliceResult> Slices;
+
+        Slices.SetNum(NumSlices);
+
+        ParallelFor(NumSlices, [&](int32 SliceIndex)
+        {
+            FSliceResult& Slice = Slices[SliceIndex];
+
+            const int32 Begin = SliceIndex * SliceSize;
+            const int32 End = FMath::Min(Begin + SliceSize, TotalVoxels);
+
+            for (int32 FlatIndex = Begin; FlatIndex < End; ++FlatIndex)
+            {
+                const uint8 Output = Labels[FlatIndex];
+                const uint8 Expected = Reference[FlatIndex];
+
+                Slice.Unwritten += Output == UnwrittenVoxel;
+                Slice.Invalid += Output >= Frame.NumLabels && Output != UnwrittenVoxel;
+                Slice.ReferenceUnwritten += Expected == UnwrittenVoxel;
+
+                if (Output != Expected)
+                {
+                    ++Slice.Mismatches;
+
+                    ++Slice.Confusion[FMath::Min<int32>(Expected, NumBuckets - 1)][FMath::Min<int32>(Output, NumBuckets - 1)];
+
+                    if (Slice.NumExamples < MaxExamples)
+                    {
+                        Slice.Examples[Slice.NumExamples++] = FlatIndex;
+                    }
+                }
+            }
+        });
+
+        FSliceResult Total;
+
+        TArray<int32> Examples;
+
+        for (const FSliceResult& Slice : Slices)
+        {
+            Total.Mismatches += Slice.Mismatches;
+            Total.Unwritten += Slice.Unwritten;
+            Total.Invalid += Slice.Invalid;
+            Total.ReferenceUnwritten += Slice.ReferenceUnwritten;
+
+            for (int32 Expected = 0; Expected < NumBuckets; ++Expected)
+            {
+                for (int32 Output = 0; Output < NumBuckets; ++Output)
+                {
+                    Total.Confusion[Expected][Output] += Slice.Confusion[Expected][Output];
+                }
+            }
+
+            for (int32 Example = 0; Example < Slice.NumExamples && Examples.Num() < MaxExamples; ++Example)
+            {
+                Examples.Add(Slice.Examples[Example]);
+            }
+        }
+
+        carla::log_warning("Voxel validation: ", Total.Mismatches, " mismatched voxels of ", TotalVoxels,
+            " against chunks ", ReferenceChunkSize.X, "x", ReferenceChunkSize.Y, "x", ReferenceChunkSize.Z,
+            "; unwritten=", Total.Unwritten, ", invalid=", Total.Invalid, ", reference unwritten=", Total.ReferenceUnwritten);
+
+        if (Total.Mismatches == 0)
+        {
+            return;
+        }
+
+        // Report the most frequent label confusions first.
+        TArray<FIntVector> Pairs;
+
+        for (int32 Expected = 0; Expected < NumBuckets; ++Expected)
+        {
+            for (int32 Output = 0; Output < NumBuckets; ++Output)
+            {
+                if (Total.Confusion[Expected][Output] > 0)
+                {
+                    Pairs.Add(FIntVector(Expected, Output, 0));
+                }
+            }
+        }
+
+        Pairs.Sort([&](const FIntVector& A, const FIntVector& B)
+        {
+            return Total.Confusion[A.X][A.Y] > Total.Confusion[B.X][B.Y];
+        });
+
+        for (int32 Index = 0; Index < FMath::Min(Pairs.Num(), 10); ++Index)
+        {
+            carla::log_warning("  reference label ", Pairs[Index].X, " -> output label ", Pairs[Index].Y, ": ", Total.Confusion[Pairs[Index].X][Pairs[Index].Y]);
+        }
+
+        // The original per-voxel query tells which side matches the PhysX ground truth.
+        physx::PxSceneReadLock SceneLock(*Frame.Scene);
+
+        for (const int32 FlatIndex : Examples)
+        {
+            const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
+            const int32 Remainder = FlatIndex % (Frame.GridSizeY * Frame.GridSizeZ);
+            const int32 Y = Remainder / Frame.GridSizeZ;
+            const int32 Z = Remainder % Frame.GridSizeZ;
+
+            const int32 Oracle = Frame.QueryVoxelLabel(Frame.GetWorldPosition(X, Y, Z));
+
+            carla::log_warning("  voxel (", X, ", ", Y, ", ", Z, "): output=", int32(Labels[FlatIndex]), ", reference=", int32(Reference[FlatIndex]), ", per-voxel query=", Oracle);
+        }
+    }
+
+    // Compare every Stride-th voxel with the original per-voxel query. The offset rotates so Stride frames cover the grid.
+    void CheckAgainstOracle(const FVoxelFrame& Frame, const uint8* Labels, int32 Stride)
+    {
+        const int32 TotalVoxels = Frame.GridSizeX * Frame.GridSizeY * Frame.GridSizeZ;
+
+        const int32 Offset = FCarlaEngine::GetFrameCounter() % Stride;
+
+        const int32 NumSamples = TotalVoxels > Offset ? FMath::DivideAndRoundUp(TotalVoxels - Offset, Stride) : 0;
+
+        constexpr int32 BatchSize = 4096;
+        constexpr int32 MaxExamples = 8;
+
+        struct FBatchResult
+        {
+            uint64 Mismatches = 0;
+            int32 Examples[MaxExamples] = {};
+            uint8 OracleLabels[MaxExamples] = {};
+            int32 NumExamples = 0;
+        };
+
+        const int32 NumBatches = FMath::DivideAndRoundUp(NumSamples, BatchSize);
+
+        TArray<FBatchResult> Batches;
+
+        Batches.SetNum(NumBatches);
+
+        ParallelFor(NumBatches, [&](int32 BatchIndex)
+        {
+            physx::PxSceneReadLock SceneLock(*Frame.Scene);
+
+            FBatchResult& Batch = Batches[BatchIndex];
+
+            const int32 End = FMath::Min((BatchIndex + 1) * BatchSize, NumSamples);
+
+            for (int32 Sample = BatchIndex * BatchSize; Sample < End; ++Sample)
+            {
+                const int32 FlatIndex = Offset + Sample * Stride;
+
+                const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
+                const int32 Remainder = FlatIndex % (Frame.GridSizeY * Frame.GridSizeZ);
+                const int32 Y = Remainder / Frame.GridSizeZ;
+                const int32 Z = Remainder % Frame.GridSizeZ;
+
+                const uint8 Oracle = Frame.QueryVoxelLabel(Frame.GetWorldPosition(X, Y, Z));
+
+                if (Oracle != Labels[FlatIndex])
+                {
+                    ++Batch.Mismatches;
+
+                    if (Batch.NumExamples < MaxExamples)
+                    {
+                        Batch.Examples[Batch.NumExamples] = FlatIndex;
+                        Batch.OracleLabels[Batch.NumExamples] = Oracle;
+
+                        ++Batch.NumExamples;
+                    }
+                }
+            }
+        }, EParallelForFlags::Unbalanced);
+
+        uint64 Mismatches = 0;
+
+        for (const FBatchResult& Batch : Batches)
+        {
+            Mismatches += Batch.Mismatches;
+        }
+
+        carla::log_warning("Voxel oracle check: ", Mismatches, " mismatched voxels of ", NumSamples, " sampled (stride ", Stride, ", offset ", Offset, ")");
+
+        int32 Logged = 0;
+
+        for (const FBatchResult& Batch : Batches)
+        {
+            for (int32 Example = 0; Example < Batch.NumExamples && Logged < MaxExamples; ++Example, ++Logged)
+            {
+                const int32 FlatIndex = Batch.Examples[Example];
+
+                const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
+                const int32 Remainder = FlatIndex % (Frame.GridSizeY * Frame.GridSizeZ);
+                const int32 Y = Remainder / Frame.GridSizeZ;
+                const int32 Z = Remainder % Frame.GridSizeZ;
+
+                carla::log_warning("  voxel (", X, ", ", Y, ", ", Z, "): output=", int32(Labels[FlatIndex]), ", per-voxel query=", int32(Batch.OracleLabels[Example]));
+            }
+        }
+    }
 }
 
 TMap<int32, FLinearColor> AVoxelDetectionSensor::ColorMap = AVoxelDetectionSensor::CreateColorMap();
@@ -221,6 +944,18 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     ChunkZ.RecommendedValues = { TEXT("8") };
     ChunkZ.bRestrictToRecommended = false;
 
+    FActorVariation ValidateOutput;
+    ValidateOutput.Id = TEXT("validate_output");
+    ValidateOutput.Type = EActorAttributeType::Bool;
+    ValidateOutput.RecommendedValues = { TEXT("False") };
+    ValidateOutput.bRestrictToRecommended = false;
+
+    FActorVariation OracleStride;
+    OracleStride.Id = TEXT("oracle_stride");
+    OracleStride.Type = EActorAttributeType::Int;
+    OracleStride.RecommendedValues = { TEXT("0") };
+    OracleStride.bRestrictToRecommended = false;
+
     Definition.Variations.Append(
         {
             Range,
@@ -234,6 +969,8 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
             ChunkX,
             ChunkY,
             ChunkZ,
+            ValidateOutput,
+            OracleStride,
         }
     );
 
@@ -262,11 +999,17 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 
     UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
 
-    ChunkX = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_x", Description.Variations, 4);
+    // Chunks need at least one voxel per axis.
+    ChunkX = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_x", Description.Variations, 4));
 
-    ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
+    ChunkY = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4));
 
-    ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 8);
+    ChunkZ = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 8));
+
+    ValidateOutput = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("validate_output", Description.Variations, false);
+
+    // Zero disables the comparison with the original per-voxel query.
+    OracleStride = FMath::Max(0, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("oracle_stride", Description.Variations, 0));
 
     // Pre-calculate grid dimensions.
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
@@ -304,9 +1047,14 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const int32 TotalVoxels = GridSizeX * GridSizeY * GridSizeZ;
 
-    // Initialize voxel grids with 0 (empty).
-    TArray<uint8> SemanticVoxels;
-    SemanticVoxels.SetNumZeroed(TotalVoxels);
+    // Labels go straight into a pooled stream buffer. The pool keeps one or two allocations of this size per sensor.
+    auto DataStream = GetDataStream(*this);
+
+    carla::Buffer Voxels = DataStream.PopBufferFromPool();
+
+    Voxels.reset(static_cast<carla::Buffer::size_type>(TotalVoxels));
+
+    uint8* const Labels = Voxels.data();
 
     // Set up collision query.
     FCollisionQueryParams QueryParams(FName(TEXT("VoxelTrace")), true, this);
@@ -319,351 +1067,54 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         QueryParams.AddIgnoredActor(GetOwner());
     }
 
-    const float HalfVoxel = BoxSize * 0.5f;
+    const FVoxelFrame Frame(
+        World,
+        GetTransform(),
+        QueryParams,
+        BoxSize,
+        BoxRange,
+        Bottom,
+        GridSizeX,
+        GridSizeY,
+        GridSizeZ,
+        SemanticPriority,
+        UE_ARRAY_COUNT(SemanticPriority)
+    );
 
-    const FVector BoxExtent(HalfVoxel, HalfVoxel, HalfVoxel);
-
-    FCollisionObjectQueryParams ObjectParams(FCollisionObjectQueryParams::AllObjects);
-    ObjectParams.RemoveObjectTypesToQuery(ECC_Vehicle);
-    ObjectParams.RemoveObjectTypesToQuery(ECC_Pawn);
-    ObjectParams.RemoveObjectTypesToQuery(ECC_Camera);
-    ObjectParams.RemoveObjectTypesToQuery(ECC_Visibility);
-    ObjectParams.RemoveObjectTypesToQuery(ECC_PhysicsBody);
-    ObjectParams.RemoveObjectTypesToQuery(ECC_Destructible);
-
-    physx::PxScene* const Scene = World->GetPhysicsScene()->GetPxScene();
-
-    const FTransform SensorTransform = GetTransform();
-
-    const FQuat VoxelRotation = SensorTransform.GetRotation();
-
-    const FCollisionShape VoxelShape = FCollisionShape::MakeBox(BoxExtent);
-    const FPhysicsShapeAdapter VoxelAdapter(VoxelRotation, VoxelShape);
-    const bool bBoxVoxels =
-        VoxelAdapter.GetGeometry().getType() == physx::PxGeometryType::eBOX;
-    const physx::PxVec3 VoxelHalfExtent = bBoxVoxels ?
-        static_cast<const physx::PxBoxGeometry&>(VoxelAdapter.GetGeometry()).halfExtents : physx::PxVec3(0.0f);
-    const physx::PxQuat VoxelQuat = U2PQuat(VoxelAdapter.GetGeomOrientation());
-    const physx::PxVec3 VoxelWorldExtent = physx::PxGeometryQuery::getWorldBounds(
-        VoxelAdapter.GetGeometry(), physx::PxTransform(physx::PxVec3(0.0f), VoxelQuat)).getExtents();
-    const auto ResolvePriorityTie = [&](const FVector& WorldPos)
+    if (ValidateOutput)
     {
-        TArray<FOverlapResult> Overlaps;
-        uint8 Label = 0;
-        World->ParallelOverlapMultiByObjectType(
-            Overlaps, WorldPos, VoxelRotation, ObjectParams, VoxelShape, QueryParams);
-        for (const FOverlapResult& Overlap : Overlaps)
-        {
-            if (const UPrimitiveComponent* Component = Overlap.Component.Get())
-            {
-                const int32 CandidateLabel = Component->CustomDepthStencilValue;
-                if (CandidateLabel >= 0 && CandidateLabel < UE_ARRAY_COUNT(SemanticPriority) &&
-                    SemanticPriority[CandidateLabel] > SemanticPriority[Label])
-                {
-                    Label = uint8(CandidateLabel);
-                }
-            }
-        }
-        return Label;
-    };
-
-    const int32 SGridX = GridSizeX / ChunkX + (GridSizeX % ChunkX != 0);
-    const int32 SGridY = GridSizeY / ChunkY + (GridSizeY % ChunkY != 0);
-    const int32 SGridZ = GridSizeZ / ChunkZ + (GridSizeZ % ChunkZ != 0);
-
-    const FVector AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
-    const FVector AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
-    const FVector AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
-
-    struct FChunkBounds
-    {
-        physx::PxBoxGeometry Geometry;
-        physx::PxTransform Pose;
-    };
-
-    const auto MakeChunkBounds = [&](const FIntVector& Begin, const FIntVector& End)
-    {
-        const FVector LocalMin(-BoxRange + Begin.X * BoxSize,
-            -BoxRange + Begin.Y * BoxSize, Bottom + Begin.Z * BoxSize);
-        const FVector LocalMax(-BoxRange + End.X * BoxSize,
-            -BoxRange + End.Y * BoxSize, Bottom + End.Z * BoxSize);
-
-        const FVector LocalHalfExtent = (LocalMax - LocalMin) * 0.5f;
-
-        const FVector ChunkCenter = SensorTransform.TransformPosition((LocalMin + LocalMax) * 0.5f);
-
-        // Enclose voxel centers and query extents, including sensor scale.
-        const FVector CenterHalfExtent = LocalHalfExtent - BoxExtent;
-        const FVector ChunkWorldExtent = AbsAxisX * CenterHalfExtent.X +
-            AbsAxisY * CenterHalfExtent.Y + AbsAxisZ * CenterHalfExtent.Z +
-            P2UVector(VoxelWorldExtent) + FVector(0.1f);
-
-        return FChunkBounds{physx::PxBoxGeometry(U2PVector(ChunkWorldExtent)),
-            physx::PxTransform(U2PVector(ChunkCenter))};
-    };
-
-    const auto GetChunkEnd = [&](int32 X, int32 Y, int32 Z)
-    {
-        return FIntVector(
-            int32(FMath::Min<int64>(int64(X) * ChunkX, GridSizeX)),
-            int32(FMath::Min<int64>(int64(Y) * ChunkY, GridSizeY)),
-            int32(FMath::Min<int64>(int64(Z) * ChunkZ, GridSizeZ)));
-    };
-
-    const int32 TotalChunks = SGridX * SGridY * SGridZ;
-    // Separate instantiations keep profiling clocks and counters out of normal regions.
-    const auto ProcessChunk = [&](int32 Index, auto ProfileTag, FVoxelProfile& Profile)
-    {
-        constexpr bool bProfile = decltype(ProfileTag)::Value;
-        const int32 CX = Index / (SGridY * SGridZ);
-        const int32 Remainder = Index % (SGridY * SGridZ);
-        const int32 CY = Remainder / SGridZ;
-        const int32 CZ = Remainder % SGridZ;
-        const FIntVector Begin(CX * ChunkX, CY * ChunkY, CZ * ChunkZ);
-        const FIntVector End = GetChunkEnd(CX + 1, CY + 1, CZ + 1);
-        const FChunkBounds Chunk = MakeChunkBounds(Begin, End);
-
-        FVoxelCandidateCollector Collector(QueryParams, ObjectParams,
-            SemanticPriority, UE_ARRAY_COUNT(SemanticPriority));
-        const uint64 GatherStart = bProfile ? FPlatformTime::Cycles64() : 0;
-        {
-            TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
-            // PhysX requires touch storage even though the prefilter returns eNONE.
-            physx::PxOverlapHit UnusedHit;
-            physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
-            const physx::PxQueryFilterData Filter(
-                PhysXInterface::StaticDynamicQueryFlags(QueryParams) | physx::PxQueryFlag::ePREFILTER);
-            Scene->overlap(Chunk.Geometry, Chunk.Pose, UnusedHits, Filter, &Collector);
-        }
-
-        const uint64 CullStart = bProfile ? FPlatformTime::Cycles64() : 0;
-        if (bProfile)
-        {
-            Profile.GatherCycles += CullStart - GatherStart;
-            ++Profile.Regions;
-            Profile.Candidates += Collector.Candidates.Num();
-        }
-
-        // Reject empty mesh regions once before testing individual voxels.
-        Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
-        {
-            return !physx::PxGeometryQuery::overlap(Chunk.Geometry, Chunk.Pose,
-                Candidate.Geometry.any(), Candidate.Pose);
-        });
-        Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
-        {
-            return A.Priority > B.Priority;
-        });
-        if (bProfile)
-        {
-            Profile.CullCycles += FPlatformTime::Cycles64() - CullStart;
-        }
-
-        if (Collector.Candidates.Num() == 0)
-        {
-            return;
-        }
-
-        TArray<VoxelTriangleOverlap::FTriangle, TInlineAllocator<8>> Triangles;
-        const physx::PxTransform TriangleFrame(Chunk.Pose.p, VoxelQuat);
-        if (bBoxVoxels)
-        {
-            const uint64 TriangleStart = bProfile ? FPlatformTime::Cycles64() : 0;
-            for (FVoxelCandidate& Candidate : Collector.Candidates)
-            {
-                if (Candidate.Geometry.getType() != physx::PxGeometryType::eTRIANGLEMESH)
-                {
-                    continue;
-                }
-
-                // Dense chunks retain the mesh BVH instead of scanning a long triangle list.
-                constexpr int32 MaxTriangles = 64;
-                physx::PxU32 Indices[MaxTriangles];
-                bool bOverflow = false;
-                const auto& Mesh = Candidate.Geometry.triangleMesh();
-                const int32 Count = physx::PxMeshQuery::findOverlapTriangleMesh(
-                    Chunk.Geometry, Chunk.Pose, Mesh, Candidate.Pose,
-                    Indices, MaxTriangles, 0, bOverflow);
-                if (bOverflow || Count == 0)
-                {
-                    continue;
-                }
-
-                Candidate.TriangleStart = Triangles.Num();
-                Candidate.TriangleCount = Count;
-                for (int32 Triangle = 0; Triangle < Count; ++Triangle)
-                {
-                    Triangles.Add(VoxelTriangleOverlap::MakeTriangle(
-                        Mesh, Candidate.Pose, TriangleFrame, Indices[Triangle], VoxelHalfExtent));
-                }
-                if (bProfile)
-                {
-                    ++Profile.CachedMeshes;
-                    Profile.CachedTriangles += Count;
-                }
-            }
-            if (bProfile)
-            {
-                Profile.TriangleCycles += FPlatformTime::Cycles64() - TriangleStart;
-            }
-        }
-
-        const uint64 FineStart = bProfile ? FPlatformTime::Cycles64() : 0;
-        if (bProfile)
-        {
-            ++Profile.Chunks;
-            Profile.Voxels += uint64(End.X - Begin.X) *
-                (End.Y - Begin.Y) * (End.Z - Begin.Z);
-        }
-
-        for (int32 X = Begin.X; X < End.X; ++X)
-        {
-            for (int32 Y = Begin.Y; Y < End.Y; ++Y)
-            {
-                for (int32 Z = Begin.Z; Z < End.Z; ++Z)
-                {
-                    const int32 FlatIndex = X * GridSizeY * GridSizeZ + Y * GridSizeZ + Z;
-
-                    const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
-
-                    const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
-
-                    const physx::PxTransform VoxelPose(U2PVector(WorldPos), VoxelQuat);
-                    const physx::PxBounds3 VoxelBounds = physx::PxBounds3::centerExtents(
-                        VoxelPose.p, VoxelWorldExtent);
-                    const physx::PxVec3 TriangleCenter = bBoxVoxels ?
-                        TriangleFrame.transformInv(VoxelPose.p) : physx::PxVec3(0.0f);
-                    uint8 Label = 0;
-                    bool bPriorityTie = false;
-                    for (const FVoxelCandidate& Candidate : Collector.Candidates)
-                    {
-                        if (Candidate.Priority < SemanticPriority[Label])
-                        {
-                            break;
-                        }
-                        if (Candidate.Label == Label)
-                        {
-                            continue;
-                        }
-                        if (!Candidate.Bounds.intersects(VoxelBounds))
-                        {
-                            continue;
-                        }
-                        if (bProfile)
-                        {
-                            ++Profile.Tests;
-                        }
-                        bool bOverlap = false;
-                        bool bNeedsMeshQuery = Candidate.TriangleStart == INDEX_NONE;
-                        if (!bNeedsMeshQuery)
-                        {
-                            if (bProfile)
-                            {
-                                ++Profile.TriangleQueries;
-                            }
-                            for (int32 Triangle = Candidate.TriangleStart;
-                                Triangle < Candidate.TriangleStart + Candidate.TriangleCount; ++Triangle)
-                            {
-                                const auto Result = VoxelTriangleOverlap::Test(
-                                    Triangles[Triangle], TriangleCenter);
-                                if (Result == VoxelTriangleOverlap::EResult::Overlap)
-                                {
-                                    bOverlap = true;
-                                    break;
-                                }
-                                if (Result == VoxelTriangleOverlap::EResult::Uncertain)
-                                {
-                                    bNeedsMeshQuery = true;
-                                }
-                            }
-                            if (bProfile && bNeedsMeshQuery && !bOverlap)
-                            {
-                                ++Profile.BoundaryFallbacks;
-                            }
-                        }
-                        if (bNeedsMeshQuery && !bOverlap)
-                        {
-                            bOverlap = physx::PxGeometryQuery::overlap(VoxelAdapter.GetGeometry(), VoxelPose,
-                                Candidate.Geometry.any(), Candidate.Pose);
-                        }
-                        if (bOverlap)
-                        {
-                            if (Label && Candidate.Label != Label)
-                            {
-                                // Preserve PhysX hit order for equal-priority labels.
-                                bPriorityTie = true;
-                                break;
-                            }
-                            Label = Candidate.Label;
-                        }
-                    }
-                    if (bPriorityTie)
-                    {
-                        const uint64 TieStart = bProfile ? FPlatformTime::Cycles64() : 0;
-                        Label = ResolvePriorityTie(WorldPos);
-                        if (bProfile)
-                        {
-                            Profile.TieCycles += FPlatformTime::Cycles64() - TieStart;
-                            ++Profile.Ties;
-                        }
-                    }
-                    SemanticVoxels[FlatIndex] = Label;
-                }
-            }
-        }
-
-        if (bProfile)
-        {
-            Profile.FineCycles += FPlatformTime::Cycles64() - FineStart;
-        }
-    };
-
-    // PhysX read locks share a mutex; acquire one per batch on its worker.
-    const int32 NumBatches = FMath::Min(TotalChunks,
-        16 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
-    TArray<FVoxelProfile> Profiles;
-    if (ShowCalculationTime)
-    {
-        Profiles.SetNum(NumBatches);
+        // Poison the buffer so voxels that are never written show up in validation.
+        FillVoxels(Labels, TotalVoxels, UnwrittenVoxel);
     }
-    // A prime stride and rotating offset avoid repeatedly sampling the same grid layers.
-    constexpr int32 ProfileStride = 127;
-    const int32 ProfileOffset = FCarlaEngine::GetFrameCounter() % ProfileStride;
-    const double ParallelStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
-    ParallelFor(NumBatches, [&](int32 Batch)
+
+    const double ParallelStart = FPlatformTime::Seconds();
+
+    TArray<FVoxelProfile> Profiles;
+
+    const int32 TotalChunks = RunChunks(Frame, FIntVector(ChunkX, ChunkY, ChunkZ), Labels, ShowCalculationTime, Profiles);
+
+    const double ParallelEnd = FPlatformTime::Seconds();
+
+    if (ValidateOutput)
     {
-        TRACE_CPUPROFILER_EVENT_SCOPE(VoxelProcessBatch);
-        physx::PxSceneReadLock SceneLock(*Scene);
-        FVoxelProfile Profile;
-        const int32 Begin = int32(int64(TotalChunks) * Batch / NumBatches);
-        const int32 End = int32(int64(TotalChunks) * (Batch + 1) / NumBatches);
-        for (int32 Index = Begin; Index < End; ++Index)
-        {
-            if (ShowCalculationTime &&
-                (TotalChunks < ProfileStride || Index % ProfileStride == ProfileOffset))
-            {
-                ProcessChunk(Index, TIntegralConstant<bool, true>(), Profile);
-            }
-            else
-            {
-                ProcessChunk(Index, TIntegralConstant<bool, false>(), Profile);
-            }
-        }
-        if (ShowCalculationTime)
-        {
-            Profiles[Batch] = Profile;
-        }
-    }, EParallelForFlags::Unbalanced);
-    const double ParallelEnd = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
+        ValidateVoxels(Frame, Labels);
+    }
+
+    if (OracleStride > 0)
+    {
+        CheckAgainstOracle(Frame, Labels, OracleStride);
+    }
+
+    const double ValidateEnd = FPlatformTime::Seconds();
 
     // Debug visualization.
     if (DrawDebug)
     {
         const FQuat ActorQuat = GetActorQuat();
 
-        for (int32 FlatIndex = 0; FlatIndex < GridSizeX * GridSizeY * GridSizeZ; ++FlatIndex)
+        for (int32 FlatIndex = 0; FlatIndex < TotalVoxels; ++FlatIndex)
         {
-            const uint8 Label = SemanticVoxels[FlatIndex];
+            const uint8 Label = Labels[FlatIndex];
 
             if (Label > 0)
             {
@@ -677,61 +1128,70 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
                 FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
 
-                DrawDebugBox(World, Pos, BoxExtent, ActorQuat, Color.ToFColor(true), false, DeltaTime * 1.1f, 0, 2.0f);
+                DrawDebugBox(World, Pos, Frame.BoxExtent, ActorQuat, Color.ToFColor(true), false, DeltaTime * 1.1f, 0, 2.0f);
             }
         }
     }
 
-    const double SendStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
+    const double SendStart = FPlatformTime::Seconds();
 
-    // Send data
-    auto DataStream = GetDataStream(*this);
-
-    DataStream.SerializeAndSend(*this, GetEpisode(), SemanticVoxels);
+    // Send data. This is what SerializeAndSend does after serializing, without copying the voxels.
+    DataStream.Send(*this, carla::BufferView::CreateFrom(std::move(Voxels)));
 
     const double EndTime = FPlatformTime::Seconds();
 
     if (ShowCalculationTime)
     {
-        carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime),
-            " ms (chunks: ", TotalChunks, ", batches: ", NumBatches, ")");
+        carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms (chunks: ", TotalChunks, ", batches: ", Profiles.Num(), ")");
+
         carla::log_warning("Voxel wall time (ms): setup=", 1000.0 * (ParallelStart - StartTime),
             ", parallel=", 1000.0 * (ParallelEnd - ParallelStart),
-            ", debug=", 1000.0 * (SendStart - ParallelEnd),
-            ", serialize/send=", 1000.0 * (EndTime - SendStart));
+            ", validate=", 1000.0 * (ValidateEnd - ParallelEnd),
+            ", debug=", 1000.0 * (SendStart - ValidateEnd),
+            ", send=", 1000.0 * (EndTime - SendStart));
 
         FVoxelProfile Profile;
+
         for (const FVoxelProfile& Batch : Profiles)
         {
             Profile.GatherCycles += Batch.GatherCycles;
             Profile.CullCycles += Batch.CullCycles;
             Profile.TriangleCycles += Batch.TriangleCycles;
             Profile.FineCycles += Batch.FineCycles;
+            Profile.PhysXCycles += Batch.PhysXCycles;
             Profile.TieCycles += Batch.TieCycles;
             Profile.Regions += Batch.Regions;
             Profile.Candidates += Batch.Candidates;
             Profile.Chunks += Batch.Chunks;
             Profile.Voxels += Batch.Voxels;
             Profile.Tests += Batch.Tests;
+            Profile.PhysXQueries += Batch.PhysXQueries;
             Profile.Ties += Batch.Ties;
             Profile.CachedMeshes += Batch.CachedMeshes;
             Profile.CachedTriangles += Batch.CachedTriangles;
             Profile.TriangleQueries += Batch.TriangleQueries;
             Profile.BoundaryFallbacks += Batch.BoundaryFallbacks;
         }
-        // These are sampled sums across workers, not frame wall time. Fine excludes ties.
-        carla::log_warning("Voxel sampled worker time (ms): gather=",
-            FPlatformTime::ToMilliseconds64(Profile.GatherCycles),
+
+        // These are sampled sums across workers, not frame wall time. Fine time is split into triangle tests and per-voxel PhysX queries; both exclude ties.
+        carla::log_warning("Voxel sampled worker time (ms): gather=", FPlatformTime::ToMilliseconds64(Profile.GatherCycles),
             ", cull/sort=", FPlatformTime::ToMilliseconds64(Profile.CullCycles),
             ", triangle cache=", FPlatformTime::ToMilliseconds64(Profile.TriangleCycles),
-            ", fine=", FPlatformTime::ToMilliseconds64(Profile.FineCycles - Profile.TieCycles),
+            ", fine triangles=", FPlatformTime::ToMilliseconds64(Profile.FineCycles - Profile.TieCycles - Profile.PhysXCycles),
+            ", fine PhysX=", FPlatformTime::ToMilliseconds64(Profile.PhysXCycles),
             ", ties=", FPlatformTime::ToMilliseconds64(Profile.TieCycles));
+
         carla::log_warning("Voxel sampled counts: regions=", Profile.Regions, "/", TotalChunks,
-            ", candidates=", Profile.Candidates, ", active chunks=", Profile.Chunks,
-            ", visited voxels=", Profile.Voxels, ", candidate tests=", Profile.Tests,
+            ", candidates=", Profile.Candidates,
+            ", active chunks=", Profile.Chunks,
+            ", visited voxels=", Profile.Voxels,
+            ", candidate tests=", Profile.Tests,
+            ", PhysX voxel queries=", Profile.PhysXQueries,
             ", tie queries=", Profile.Ties);
+
         carla::log_warning("Voxel sampled triangle counts: cached meshes=", Profile.CachedMeshes,
-            ", cached triangles=", Profile.CachedTriangles, ", reused queries=", Profile.TriangleQueries,
+            ", cached triangles=", Profile.CachedTriangles,
+            ", reused queries=", Profile.TriangleQueries,
             ", boundary fallbacks=", Profile.BoundaryFallbacks);
     }
 }

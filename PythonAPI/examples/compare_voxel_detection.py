@@ -14,6 +14,9 @@ client advancing the world. The current map and actors are retained.
     python3 compare_voxel_detection.py --yaw 37 --pitch 10
     python3 compare_voxel_detection.py --attribute use_complex_collision=false
     python3 compare_voxel_detection.py --preset simbev --port 29354
+    python3 compare_voxel_detection.py --preset simbev --ground-offset -0.537
+    python3 compare_voxel_detection.py --preset simbev --save-payloads baseline
+    python3 compare_voxel_detection.py --preset simbev --diff-saved baseline
 
 Reported latency includes world.tick(), sensor processing and delivery.
 Python payload inspection is excluded. Use the same static scene for timing.
@@ -21,6 +24,16 @@ Use --attribute show_calculation_time=true for sensor timings in the server log.
 The log separates frame wall phases from sampled worker timings for gathering,
 culling, triangle preparation, fine voxel tests, and priority ties. Worker timings
 are not frame latency.
+
+The ground is projected below the spawn point and reported relative to the sensor;
+a warning is printed when it falls outside the voxel grid, because timings would
+then exclude the ground surface. --ground-offset places the sensor so the ground
+sits at that height in the sensor frame.
+
+--save-payloads writes every frame, warmup included, and --diff-saved compares a
+later run frame by frame. Use the same map, spawn point and attributes for both.
+Use --attribute validate_output=true or oracle_stride=N for checks inside the
+server; their results are in the server log.
 """
 
 import argparse
@@ -29,6 +42,7 @@ import math
 import statistics
 import time
 
+from pathlib import Path
 from queue import Empty, Queue
 
 
@@ -47,6 +61,39 @@ def receive_frame(queue, frame, timeout):
                                'another client may be ticking' % (frame, data.frame))
 
 
+def diff_payloads(first, second, max_examples=5):
+    '''Count differing voxels; equal 1 MiB slices are skipped at memcmp speed.
+
+    Returns the number of differing bytes and up to max_examples
+    (flat index, first label, second label) tuples.
+    '''
+    if len(first) != len(second):
+        raise RuntimeError('Payload sizes differ: %d vs %d bytes' % (len(first), len(second)))
+    slice_size = 1 << 20
+    first_view = memoryview(first)
+    second_view = memoryview(second)
+    mismatches = 0
+    examples = []
+    for begin in range(0, len(first), slice_size):
+        first_slice = first_view[begin:begin + slice_size]
+        second_slice = second_view[begin:begin + slice_size]
+        if first_slice == second_slice:
+            continue
+        for offset, (a, b) in enumerate(zip(first_slice, second_slice)):
+            if a != b:
+                mismatches += 1
+                if len(examples) < max_examples:
+                    examples.append((begin + offset, a, b))
+    return mismatches, examples
+
+
+def project_ground(world, location, carla):
+    '''Height of the first surface below a point, or None if nothing is hit.'''
+    start = carla.Location(location.x, location.y, location.z + 1.0)
+    ground = world.ground_projection(start)
+    return None if ground is None else ground.location.z
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -62,8 +109,16 @@ def main():
     parser.add_argument('--attribute', action='append', default=[], metavar='NAME=VALUE',
                         help='override a voxel blueprint attribute; repeat as needed')
     parser.add_argument('--spawn-point', type=int, default=0)
-    parser.add_argument('--height', type=float, default=2.0,
-                        help='height above the selected map spawn point, in meters')
+    placement = parser.add_mutually_exclusive_group()
+    placement.add_argument('--height', type=float, default=2.0,
+                           help='height above the selected map spawn point, in meters')
+    placement.add_argument('--ground-offset', type=float, metavar='M',
+                           help='place the sensor so the ground sits at M meters in the sensor '
+                                'frame, e.g. -0.537; the ground is projected below the spawn point')
+    parser.add_argument('--save-payloads', type=Path, metavar='DIR',
+                        help='write every frame payload, warmup included, for --diff-saved')
+    parser.add_argument('--diff-saved', type=Path, metavar='DIR',
+                        help='compare every frame payload with one written by --save-payloads')
     parser.add_argument('--yaw', type=float, default=0.0,
                         help='rotation added to the selected map spawn point, in degrees')
     parser.add_argument('--pitch', type=float, default=0.0)
@@ -118,6 +173,10 @@ def main():
     height = math.ceil((values['upper_limit'] - values['lower_limit']) / values['voxel_size'])
     if width * width * height > 2147483647:
         parser.error('voxel grid exceeds the sensor\'s 32-bit index capacity')
+    if args.diff_saved and not args.diff_saved.is_dir():
+        parser.error('diff-saved directory %s does not exist' % args.diff_saved)
+    if args.save_payloads:
+        args.save_payloads.mkdir(parents=True, exist_ok=True)
 
     print('preset=%s host=%s port=%d' % (args.preset, args.host, args.port))
     print('Voxel attributes: ' + ', '.join('%s=%s' % (name, value)
@@ -130,11 +189,37 @@ def main():
     if not 0 <= args.spawn_point < len(spawn_points):
         parser.error('spawn-point must be between 0 and %d' % (len(spawn_points) - 1))
     transform = spawn_points[args.spawn_point]
-    transform.location.z += args.height
+    ground = project_ground(world, transform.location, carla)
+    if args.ground_offset is not None:
+        if ground is None:
+            parser.error('no ground found below spawn point %d' % args.spawn_point)
+        transform.location.z = ground - args.ground_offset
+    else:
+        transform.location.z += args.height
     transform.rotation.yaw += args.yaw
     transform.rotation.pitch += args.pitch
     transform.rotation.roll += args.roll
     print('Sensor transform: %s' % transform)
+    ground_offset = None if ground is None else ground - transform.location.z
+    if ground_offset is None:
+        print('Warning: no ground found below the sensor')
+    else:
+        print('Ground: %.3f m relative to the sensor' % ground_offset)
+        if not values['lower_limit'] <= ground_offset <= values['upper_limit']:
+            print('Warning: the ground is outside the voxel grid [%g, %g] m, so timings exclude '
+                  'the ground surface; use --ground-offset' %
+                  (values['lower_limit'], values['upper_limit']))
+    metadata = {'map': current_map.name, 'transform': str(transform), 'attributes': values}
+    if args.save_payloads:
+        (args.save_payloads / 'meta.json').write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    if args.diff_saved:
+        saved_metadata_path = args.diff_saved / 'meta.json'
+        if saved_metadata_path.is_file():
+            saved_metadata = json.loads(saved_metadata_path.read_text())
+            for name in sorted(set(saved_metadata) | set(metadata)):
+                if saved_metadata.get(name) != metadata.get(name):
+                    print('Warning: %s differs from the saved run: %s vs %s' %
+                          (name, saved_metadata.get(name), metadata.get(name)))
 
     original_settings = world.get_settings()
     sensor = None
@@ -142,6 +227,7 @@ def main():
     tick_latencies = []
     occupied = 0
     voxel_count = 0
+    diff_mismatches = 0
     try:
         settings = world.get_settings()
         settings.synchronous_mode = True
@@ -163,6 +249,21 @@ def main():
             payload = bytes(data.raw_data)
             if not payload:
                 raise RuntimeError('Frame %d: empty voxel payload' % frame)
+            frame_file = 'frame_%03d.bin' % index
+            if args.save_payloads:
+                (args.save_payloads / frame_file).write_bytes(payload)
+            if args.diff_saved:
+                saved_path = args.diff_saved / frame_file
+                if not saved_path.is_file():
+                    raise RuntimeError('No saved payload %s' % saved_path)
+                mismatches, examples = diff_payloads(saved_path.read_bytes(), payload)
+                diff_mismatches += mismatches
+                if mismatches:
+                    print('Frame %d: %d voxels differ from %s' % (index, mismatches, saved_path))
+                    for flat, saved_label, label in examples:
+                        x, rest = divmod(flat, width * height)
+                        y, z = divmod(rest, height)
+                        print('  voxel (%d, %d, %d): saved %d, now %d' % (x, y, z, saved_label, label))
             if index >= args.warmup:
                 latencies.append(elapsed)
                 tick_latencies.append(tick_elapsed)
@@ -178,6 +279,11 @@ def main():
                1000 * max(latencies)))
         print('world.tick() median: %.2f ms (world work; not isolated sensor time)' %
               (1000 * statistics.median(tick_latencies)))
+        if args.diff_saved:
+            print('Payload diff against %s: %d mismatched voxels over %d frames' %
+                  (args.diff_saved, diff_mismatches, args.warmup + args.frames))
+            if diff_mismatches:
+                raise RuntimeError('Payloads differ from %s' % args.diff_saved)
         result = {
             'preset': args.preset,
             'map': current_map.name,
@@ -192,7 +298,9 @@ def main():
             'capture_median_ms': 1000 * statistics.median(latencies),
             'capture_min_ms': 1000 * min(latencies),
             'capture_max_ms': 1000 * max(latencies),
-            'tick_median_ms': 1000 * statistics.median(tick_latencies)
+            'tick_median_ms': 1000 * statistics.median(tick_latencies),
+            'ground_offset': ground_offset,
+            'diff_mismatches': diff_mismatches if args.diff_saved else None
         }
     finally:
         try:
