@@ -3,7 +3,6 @@
 #include "Carla/Game/CarlaEngine.h"
 #include "Carla/Sensor/VoxelDetectionSensor.h"
 #include "Carla/Sensor/VoxelTriangleOverlap.h"
-#include "Carla/Sensor/VoxelDetectionGPU.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 
 #include "DrawDebugHelpers.h"
@@ -31,7 +30,6 @@ namespace
         uint64 GatherCycles = 0;
         uint64 CullCycles = 0;
         uint64 TriangleCycles = 0;
-        uint64 GPUPackCycles = 0;
         uint64 FineCycles = 0;
         uint64 TieCycles = 0;
         uint64 Regions = 0;
@@ -44,34 +42,6 @@ namespace
         uint64 CachedTriangles = 0;
         uint64 TriangleQueries = 0;
         uint64 BoundaryFallbacks = 0;
-
-        void Add(const FVoxelProfile& Other)
-        {
-            GatherCycles += Other.GatherCycles;
-            CullCycles += Other.CullCycles;
-            TriangleCycles += Other.TriangleCycles;
-            GPUPackCycles += Other.GPUPackCycles;
-            FineCycles += Other.FineCycles;
-            TieCycles += Other.TieCycles;
-            Regions += Other.Regions;
-            Candidates += Other.Candidates;
-            Chunks += Other.Chunks;
-            Voxels += Other.Voxels;
-            Tests += Other.Tests;
-            Ties += Other.Ties;
-            CachedMeshes += Other.CachedMeshes;
-            CachedTriangles += Other.CachedTriangles;
-            TriangleQueries += Other.TriangleQueries;
-            BoundaryFallbacks += Other.BoundaryFallbacks;
-        }
-    };
-
-    struct FVoxelGPUWork
-    {
-        VoxelDetectionGPU::FBatch Data;
-        TArray<FIntVector> Begins;
-        uint64 InputLimit = 0;
-        uint32 OutputLimit = 0;
     };
 
     struct FVoxelCandidate
@@ -251,18 +221,6 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     ChunkZ.RecommendedValues = { TEXT("8") };
     ChunkZ.bRestrictToRecommended = false;
 
-    FActorVariation TriangleReuse;
-    TriangleReuse.Id = TEXT("use_triangle_reuse");
-    TriangleReuse.Type = EActorAttributeType::Bool;
-    TriangleReuse.RecommendedValues = { TEXT("False") };
-    TriangleReuse.bRestrictToRecommended = false;
-
-    FActorVariation GPU;
-    GPU.Id = TEXT("use_gpu");
-    GPU.Type = EActorAttributeType::Bool;
-    GPU.RecommendedValues = { TEXT("False") };
-    GPU.bRestrictToRecommended = false;
-
     Definition.Variations.Append(
         {
             Range,
@@ -276,8 +234,6 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
             ChunkX,
             ChunkY,
             ChunkZ,
-            TriangleReuse,
-            GPU,
         }
     );
 
@@ -311,10 +267,6 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
 
     ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 8);
-
-    UseTriangleReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_triangle_reuse", Description.Variations, false);
-
-    UseGPU = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_gpu", Description.Variations, false);
 
     // Pre-calculate grid dimensions.
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
@@ -387,15 +339,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const FCollisionShape VoxelShape = FCollisionShape::MakeBox(BoxExtent);
     const FPhysicsShapeAdapter VoxelAdapter(VoxelRotation, VoxelShape);
-    bool bUseGPU = UseGPU && VoxelDetectionGPU::IsSupported();
-    if (UseGPU && !bUseGPU)
-    {
-        UE_LOG(LogCarla, Warning, TEXT("VoxelDetectionSensor: GPU backend requires Vulkan SM5; using CPU"));
-        UseGPU = false;
-    }
-    const bool bReuseTriangles = (UseTriangleReuse || bUseGPU) &&
+    const bool bBoxVoxels =
         VoxelAdapter.GetGeometry().getType() == physx::PxGeometryType::eBOX;
-    const physx::PxVec3 VoxelHalfExtent = bReuseTriangles ?
+    const physx::PxVec3 VoxelHalfExtent = bBoxVoxels ?
         static_cast<const physx::PxBoxGeometry&>(VoxelAdapter.GetGeometry()).halfExtents : physx::PxVec3(0.0f);
     const physx::PxQuat VoxelQuat = U2PQuat(VoxelAdapter.GetGeomOrientation());
     const physx::PxVec3 VoxelWorldExtent = physx::PxGeometryQuery::getWorldBounds(
@@ -464,108 +410,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             int32(FMath::Min<int64>(int64(Z) * ChunkZ, GridSizeZ)));
     };
 
-    const auto QueueGPUChunk = [&](const FIntVector& Begin, const FIntVector& End,
-        const physx::PxTransform& TriangleFrame, const FVoxelCandidateCollector& Collector,
-        const TArray<VoxelTriangleOverlap::FTriangle, TInlineAllocator<8>>& Triangles,
-        FVoxelGPUWork& Work)
-    {
-        // Partial snapshots stay on the CPU; no candidate may be omitted from a GPU job.
-        if (Triangles.Num() == 0 || GridSizeX >= (1 << 24) || GridSizeY >= (1 << 24) || GridSizeZ >= (1 << 24))
-        {
-            return false;
-        }
-        for (const FVoxelCandidate& Candidate : Collector.Candidates)
-        {
-            if (Candidate.TriangleStart == INDEX_NONE)
-            {
-                return false;
-            }
-        }
-        uint64 NumAxes = 0;
-        for (const VoxelTriangleOverlap::FTriangle& Triangle : Triangles)
-        {
-            if (Triangle.Degenerate || Triangle.NumAxes == 0)
-            {
-                return false;
-            }
-            NumAxes += Triangle.NumAxes;
-        }
-
-        const FIntVector Size = End - Begin;
-        const uint64 NumVoxels = uint64(Size.X) * Size.Y * Size.Z;
-        const uint64 NumWords = (NumVoxels + 3) / 4;
-        const uint64 AddedBytes = sizeof(VoxelDetectionGPU::FChunk) +
-            uint64(Collector.Candidates.Num()) * sizeof(VoxelDetectionGPU::FCandidate) +
-            uint64(Triangles.Num()) * sizeof(VoxelDetectionGPU::FTriangle) +
-            NumAxes * sizeof(VoxelDetectionGPU::FAxis);
-        if (Work.Data.InputBytes() + AddedBytes > Work.InputLimit ||
-            uint64(Work.Data.NumOutputWords) + NumWords > Work.OutputLimit)
-        {
-            return false;
-        }
-
-        const FVector FirstLocal(-BoxRange + (Begin.X + 0.5f) * BoxSize,
-            -BoxRange + (Begin.Y + 0.5f) * BoxSize, Bottom + (Begin.Z + 0.5f) * BoxSize);
-        const physx::PxVec3 Origin = TriangleFrame.transformInv(
-            U2PVector(SensorTransform.TransformPosition(FirstLocal)));
-        const physx::PxVec3 StepX = TriangleFrame.q.rotateInv(
-            U2PVector(SensorTransform.TransformVector(FVector(BoxSize, 0.0f, 0.0f))));
-        const physx::PxVec3 StepY = TriangleFrame.q.rotateInv(
-            U2PVector(SensorTransform.TransformVector(FVector(0.0f, BoxSize, 0.0f))));
-        const physx::PxVec3 StepZ = TriangleFrame.q.rotateInv(
-            U2PVector(SensorTransform.TransformVector(FVector(0.0f, 0.0f, BoxSize))));
-        const FVector Scale = SensorTransform.GetScale3D().GetAbs();
-        const float LocalMagnitude = Scale.X * (FMath::Abs(BoxRange) + (GridSizeX + 0.5f) * BoxSize) +
-            Scale.Y * (FMath::Abs(BoxRange) + (GridSizeY + 0.5f) * BoxSize) +
-            Scale.Z * (FMath::Abs(Bottom) + (GridSizeZ + 0.5f) * BoxSize);
-        const float Magnitude = 1.0f + SensorTransform.GetTranslation().GetAbsMax() +
-            VoxelTriangleOverlap::MaxAbs(TriangleFrame.p) + LocalMagnitude;
-        const float AffineMagnitude = VoxelTriangleOverlap::MaxAbs(Origin) +
-            (Size.X - 1) * VoxelTriangleOverlap::MaxAbs(StepX) +
-            (Size.Y - 1) * VoxelTriangleOverlap::MaxAbs(StepY) +
-            (Size.Z - 1) * VoxelTriangleOverlap::MaxAbs(StepZ);
-        // Cover UE/PhysX transform rounding and the shader's affine center evaluation.
-        const float CenterError = FLT_EPSILON * (128.0f * Magnitude + 16.0f * AffineMagnitude);
-        if (!Origin.isFinite() || !StepX.isFinite() || !StepY.isFinite() || !StepZ.isFinite() ||
-            !FMath::IsFinite(CenterError))
-        {
-            return false;
-        }
-
-        VoxelDetectionGPU::FChunk Job;
-        Job.OriginAndError = FVector4(Origin.x, Origin.y, Origin.z, CenterError);
-        Job.StepX = FVector4(StepX.x, StepX.y, StepX.z, 0.0f);
-        Job.StepY = FVector4(StepY.x, StepY.y, StepY.z, 0.0f);
-        Job.StepZ = FVector4(StepZ.x, StepZ.y, StepZ.z, 0.0f);
-        Job.SizeAndOutput = {uint32(Size.X), uint32(Size.Y), uint32(Size.Z), Work.Data.NumOutputWords};
-        Job.Candidates = {uint32(Work.Data.Candidates.Num()), uint32(Collector.Candidates.Num()), 0, 0};
-        const uint32 TriangleBase = Work.Data.Triangles.Num();
-        for (const FVoxelCandidate& Candidate : Collector.Candidates)
-        {
-            Work.Data.Candidates.Add({TriangleBase + uint32(Candidate.TriangleStart),
-                uint32(Candidate.TriangleCount), Candidate.Label, Candidate.Priority});
-        }
-        for (const VoxelTriangleOverlap::FTriangle& Triangle : Triangles)
-        {
-            Work.Data.Triangles.Add({uint32(Work.Data.Axes.Num()), Triangle.NumAxes, 0, 0});
-            for (uint32 Axis = 0; Axis < Triangle.NumAxes; ++Axis)
-            {
-                const auto& Source = Triangle.Axes[Axis];
-                VoxelDetectionGPU::FAxis Packed;
-                Packed.DirectionAndMin = FVector4(Source.Direction.x, Source.Direction.y, Source.Direction.z, Source.Minimum);
-                Packed.MaxAndError = FVector4(Source.Maximum, Source.Error, 0.0f, 0.0f);
-                Work.Data.Axes.Add(Packed);
-            }
-        }
-        Work.Data.Chunks.Add(Job);
-        Work.Begins.Add(Begin);
-        Work.Data.NumOutputWords += uint32(NumWords);
-        return true;
-    };
-
     const int32 TotalChunks = SGridX * SGridY * SGridZ;
     // Separate instantiations keep profiling clocks and counters out of normal regions.
-    const auto ProcessChunk = [&](int32 Index, auto ProfileTag, FVoxelProfile& Profile, FVoxelGPUWork& GPUWork)
+    const auto ProcessChunk = [&](int32 Index, auto ProfileTag, FVoxelProfile& Profile)
     {
         constexpr bool bProfile = decltype(ProfileTag)::Value;
         const int32 CX = Index / (SGridY * SGridZ);
@@ -619,7 +466,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
         TArray<VoxelTriangleOverlap::FTriangle, TInlineAllocator<8>> Triangles;
         const physx::PxTransform TriangleFrame(Chunk.Pose.p, VoxelQuat);
-        if (bReuseTriangles)
+        if (bBoxVoxels)
         {
             const uint64 TriangleStart = bProfile ? FPlatformTime::Cycles64() : 0;
             for (FVoxelCandidate& Candidate : Collector.Candidates)
@@ -661,26 +508,13 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             }
         }
 
+        const uint64 FineStart = bProfile ? FPlatformTime::Cycles64() : 0;
         if (bProfile)
         {
             ++Profile.Chunks;
             Profile.Voxels += uint64(End.X - Begin.X) *
                 (End.Y - Begin.Y) * (End.Z - Begin.Z);
         }
-        if (bUseGPU)
-        {
-            const uint64 QueueStart = bProfile ? FPlatformTime::Cycles64() : 0;
-            const bool bQueued = QueueGPUChunk(Begin, End, TriangleFrame, Collector, Triangles, GPUWork);
-            if (bProfile)
-            {
-                Profile.GPUPackCycles += FPlatformTime::Cycles64() - QueueStart;
-            }
-            if (bQueued)
-            {
-                return;
-            }
-        }
-        const uint64 FineStart = bProfile ? FPlatformTime::Cycles64() : 0;
 
         for (int32 X = Begin.X; X < End.X; ++X)
         {
@@ -697,7 +531,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                     const physx::PxTransform VoxelPose(U2PVector(WorldPos), VoxelQuat);
                     const physx::PxBounds3 VoxelBounds = physx::PxBounds3::centerExtents(
                         VoxelPose.p, VoxelWorldExtent);
-                    const physx::PxVec3 TriangleCenter = bReuseTriangles ?
+                    const physx::PxVec3 TriangleCenter = bBoxVoxels ?
                         TriangleFrame.transformInv(VoxelPose.p) : physx::PxVec3(0.0f);
                     uint8 Label = 0;
                     bool bPriorityTie = false;
@@ -792,184 +626,34 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     {
         Profiles.SetNum(NumBatches);
     }
-    FVoxelProfile Profile;
-    double GPUMergeSeconds = 0.0;
-    double GPUWaitSeconds = 0.0;
-    double GPUResolveSeconds = 0.0;
-    uint64 GPUChunks = 0;
-    uint64 GPUVoxels = 0;
-    uint64 GPUFallbackVoxels = 0;
-    uint32 GPUDispatches = 0;
     // A prime stride and rotating offset avoid repeatedly sampling the same grid layers.
     constexpr int32 ProfileStride = 127;
     const int32 ProfileOffset = FCarlaEngine::GetFrameCounter() % ProfileStride;
     const double ParallelStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
-    // Tiles bound host snapshots, uploads, and readback. Budget overflow uses the CPU path.
-    const int32 TileSize = bUseGPU ? 65536 : TotalChunks;
-    for (int32 TileBegin = 0; TileBegin < TotalChunks;)
+    ParallelFor(NumBatches, [&](int32 Batch)
     {
-        const int32 TileCount = FMath::Min(TileSize, TotalChunks - TileBegin);
-        const int32 TileBatches = FMath::Min(NumBatches, TileCount);
-        TArray<FVoxelGPUWork> GPUWork;
-        if (bUseGPU)
+        TRACE_CPUPROFILER_EVENT_SCOPE(VoxelProcessBatch);
+        physx::PxSceneReadLock SceneLock(*Scene);
+        FVoxelProfile Profile;
+        const int32 Begin = int32(int64(TotalChunks) * Batch / NumBatches);
+        const int32 End = int32(int64(TotalChunks) * (Batch + 1) / NumBatches);
+        for (int32 Index = Begin; Index < End; ++Index)
         {
-            GPUWork.SetNum(TileBatches);
-            for (FVoxelGPUWork& Work : GPUWork)
+            if (ShowCalculationTime &&
+                (TotalChunks < ProfileStride || Index % ProfileStride == ProfileOffset))
             {
-                Work.InputLimit = VoxelDetectionGPU::MaxInputBytes / TileBatches;
-                Work.OutputLimit = VoxelDetectionGPU::MaxOutputWords / TileBatches;
+                ProcessChunk(Index, TIntegralConstant<bool, true>(), Profile);
             }
-        }
-        ParallelFor(TileBatches, [&](int32 Batch)
-        {
-            TRACE_CPUPROFILER_EVENT_SCOPE(VoxelProcessBatch);
-            physx::PxSceneReadLock SceneLock(*Scene);
-            FVoxelProfile BatchProfile;
-            FVoxelGPUWork CPUWork;
-            FVoxelGPUWork& Work = bUseGPU ? GPUWork[Batch] : CPUWork;
-            const int32 Begin = TileBegin + int32(int64(TileCount) * Batch / TileBatches);
-            const int32 End = TileBegin + int32(int64(TileCount) * (Batch + 1) / TileBatches);
-            for (int32 Index = Begin; Index < End; ++Index)
+            else
             {
-                if (ShowCalculationTime &&
-                    (TotalChunks < ProfileStride || Index % ProfileStride == ProfileOffset))
-                {
-                    ProcessChunk(Index, TIntegralConstant<bool, true>(), BatchProfile, Work);
-                }
-                else
-                {
-                    ProcessChunk(Index, TIntegralConstant<bool, false>(), BatchProfile, Work);
-                }
+                ProcessChunk(Index, TIntegralConstant<bool, false>(), Profile);
             }
-            if (ShowCalculationTime)
-            {
-                Profiles[Batch] = BatchProfile;
-            }
-        }, EParallelForFlags::Unbalanced);
-        if (ShowCalculationTime)
-        {
-            for (int32 Batch = 0; Batch < TileBatches; ++Batch)
-            {
-                Profile.Add(Profiles[Batch]);
-            }
-        }
-        TileBegin += TileCount;
-
-        const double PackStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
-        VoxelDetectionGPU::FBatch Packet;
-        TArray<FIntVector> Begins;
-        for (FVoxelGPUWork& Work : GPUWork)
-        {
-            const uint32 AxisBase = Packet.Axes.Num();
-            const uint32 TriangleBase = Packet.Triangles.Num();
-            const uint32 CandidateBase = Packet.Candidates.Num();
-            for (auto& Chunk : Work.Data.Chunks)
-            {
-                Chunk.Candidates.X += CandidateBase;
-                Chunk.SizeAndOutput.W += Packet.NumOutputWords;
-            }
-            for (auto& Candidate : Work.Data.Candidates)
-            {
-                Candidate.TriangleOffset += TriangleBase;
-            }
-            for (auto& Triangle : Work.Data.Triangles)
-            {
-                Triangle.AxisOffset += AxisBase;
-            }
-            Packet.Chunks.Append(Work.Data.Chunks);
-            Packet.Candidates.Append(Work.Data.Candidates);
-            Packet.Triangles.Append(Work.Data.Triangles);
-            Packet.Axes.Append(Work.Data.Axes);
-            Packet.NumOutputWords += Work.Data.NumOutputWords;
-            Begins.Append(Work.Begins);
-            Work.Data = VoxelDetectionGPU::FBatch();
-            Work.Begins.Empty();
         }
         if (ShowCalculationTime)
         {
-            GPUMergeSeconds += FPlatformTime::Seconds() - PackStart;
+            Profiles[Batch] = Profile;
         }
-        if (Packet.Chunks.Num() == 0)
-        {
-            continue;
-        }
-
-        // No PhysX read lock is held while the render thread runs the compute shader.
-        TArray<uint32> Output;
-        FString Error;
-        const double WaitStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
-        const bool bCompleted = VoxelDetectionGPU::Run(Packet, Output, Error) &&
-            uint32(Output.Num()) == Packet.NumOutputWords;
-        if (ShowCalculationTime)
-        {
-            GPUWaitSeconds += FPlatformTime::Seconds() - WaitStart;
-        }
-        if (!bCompleted)
-        {
-            UE_LOG(LogCarla, Warning, TEXT("VoxelDetectionSensor: GPU dispatch failed (%s); resolving on CPU and disabling GPU"), *Error);
-            bUseGPU = false;
-            UseGPU = false;
-        }
-        else
-        {
-            ++GPUDispatches;
-        }
-
-        const double ResolveStart = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
-        const int32 ResolveBatches = FMath::Min(NumBatches, Packet.Chunks.Num());
-        TArray<uint64> FallbackCounts;
-        FallbackCounts.SetNumZeroed(ResolveBatches);
-        ParallelFor(ResolveBatches, [&](int32 Batch)
-        {
-            physx::PxSceneReadLock SceneLock(*Scene);
-            const int32 First = int32(int64(Packet.Chunks.Num()) * Batch / ResolveBatches);
-            const int32 Last = int32(int64(Packet.Chunks.Num()) * (Batch + 1) / ResolveBatches);
-            for (int32 Index = First; Index < Last; ++Index)
-            {
-                const auto& Chunk = Packet.Chunks[Index];
-                const FIntVector& Begin = Begins[Index];
-                uint32 LocalIndex = 0;
-                for (uint32 X = 0; X < Chunk.SizeAndOutput.X; ++X)
-                {
-                    for (uint32 Y = 0; Y < Chunk.SizeAndOutput.Y; ++Y)
-                    {
-                        for (uint32 Z = 0; Z < Chunk.SizeAndOutput.Z; ++Z, ++LocalIndex)
-                        {
-                            uint8 Label = bCompleted ? uint8(Output[Chunk.SizeAndOutput.W + LocalIndex / 4] >>
-                                (8 * (LocalIndex % 4))) : VoxelDetectionGPU::FallbackLabel;
-                            const int32 VX = Begin.X + X;
-                            const int32 VY = Begin.Y + Y;
-                            const int32 VZ = Begin.Z + Z;
-                            if (Label >= UE_ARRAY_COUNT(SemanticPriority))
-                            {
-                                const FVector LocalPos(-BoxRange + (VX + 0.5f) * BoxSize,
-                                    -BoxRange + (VY + 0.5f) * BoxSize, Bottom + (VZ + 0.5f) * BoxSize);
-                                Label = ResolvePriorityTie(SensorTransform.TransformPosition(LocalPos));
-                                ++FallbackCounts[Batch];
-                            }
-                            SemanticVoxels[VX * GridSizeY * GridSizeZ + VY * GridSizeZ + VZ] = Label;
-                        }
-                    }
-                }
-            }
-        }, EParallelForFlags::Unbalanced);
-        if (ShowCalculationTime)
-        {
-            GPUResolveSeconds += FPlatformTime::Seconds() - ResolveStart;
-        }
-        if (ShowCalculationTime)
-        {
-            GPUChunks += Packet.Chunks.Num();
-            for (const auto& Chunk : Packet.Chunks)
-            {
-                GPUVoxels += uint64(Chunk.SizeAndOutput.X) * Chunk.SizeAndOutput.Y * Chunk.SizeAndOutput.Z;
-            }
-            for (uint64 Count : FallbackCounts)
-            {
-                GPUFallbackVoxels += Count;
-            }
-        }
-    }
+    }, EParallelForFlags::Unbalanced);
     const double ParallelEnd = ShowCalculationTime ? FPlatformTime::Seconds() : 0.0;
 
     // Debug visualization.
@@ -1010,19 +694,36 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     if (ShowCalculationTime)
     {
         carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime),
-            " ms (chunks: ", TotalChunks, ", triangle reuse: ", bReuseTriangles ? "on" : "off",
-            ", GPU: ", bUseGPU ? "on" : "off", ", batches per tile: ", NumBatches, ")");
+            " ms (chunks: ", TotalChunks, ", batches: ", NumBatches, ")");
         carla::log_warning("Voxel wall time (ms): setup=", 1000.0 * (ParallelStart - StartTime),
-            ", processing=", 1000.0 * (ParallelEnd - ParallelStart),
+            ", parallel=", 1000.0 * (ParallelEnd - ParallelStart),
             ", debug=", 1000.0 * (SendStart - ParallelEnd),
             ", serialize/send=", 1000.0 * (EndTime - SendStart));
 
+        FVoxelProfile Profile;
+        for (const FVoxelProfile& Batch : Profiles)
+        {
+            Profile.GatherCycles += Batch.GatherCycles;
+            Profile.CullCycles += Batch.CullCycles;
+            Profile.TriangleCycles += Batch.TriangleCycles;
+            Profile.FineCycles += Batch.FineCycles;
+            Profile.TieCycles += Batch.TieCycles;
+            Profile.Regions += Batch.Regions;
+            Profile.Candidates += Batch.Candidates;
+            Profile.Chunks += Batch.Chunks;
+            Profile.Voxels += Batch.Voxels;
+            Profile.Tests += Batch.Tests;
+            Profile.Ties += Batch.Ties;
+            Profile.CachedMeshes += Batch.CachedMeshes;
+            Profile.CachedTriangles += Batch.CachedTriangles;
+            Profile.TriangleQueries += Batch.TriangleQueries;
+            Profile.BoundaryFallbacks += Batch.BoundaryFallbacks;
+        }
         // These are sampled sums across workers, not frame wall time. Fine excludes ties.
         carla::log_warning("Voxel sampled worker time (ms): gather=",
             FPlatformTime::ToMilliseconds64(Profile.GatherCycles),
             ", cull/sort=", FPlatformTime::ToMilliseconds64(Profile.CullCycles),
             ", triangle cache=", FPlatformTime::ToMilliseconds64(Profile.TriangleCycles),
-            ", GPU pack=", FPlatformTime::ToMilliseconds64(Profile.GPUPackCycles),
             ", fine=", FPlatformTime::ToMilliseconds64(Profile.FineCycles - Profile.TieCycles),
             ", ties=", FPlatformTime::ToMilliseconds64(Profile.TieCycles));
         carla::log_warning("Voxel sampled counts: regions=", Profile.Regions, "/", TotalChunks,
@@ -1032,9 +733,5 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         carla::log_warning("Voxel sampled triangle counts: cached meshes=", Profile.CachedMeshes,
             ", cached triangles=", Profile.CachedTriangles, ", reused queries=", Profile.TriangleQueries,
             ", boundary fallbacks=", Profile.BoundaryFallbacks);
-        carla::log_warning("Voxel GPU wall time (ms): merge=", 1000.0 * GPUMergeSeconds,
-            ", dispatch/readback=", 1000.0 * GPUWaitSeconds, ", resolve/scatter=", 1000.0 * GPUResolveSeconds,
-            ", dispatches=", GPUDispatches, ", chunks=", GPUChunks, ", voxels=", GPUVoxels,
-            ", fallback voxels=", GPUFallbackVoxels);
     }
 }

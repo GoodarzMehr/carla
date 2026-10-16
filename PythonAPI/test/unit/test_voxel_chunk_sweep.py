@@ -68,7 +68,6 @@ class TestVoxelChunkSweep(unittest.TestCase):
         self.assertEqual(len(triples), len(expected))
         self.assertEqual(set(triples), expected)
         self.assertEqual({(row['stage'], row['status']) for row in rows}, {('sweep', 'complete')})
-        self.assertTrue(all('--mode' not in command for command in calls))
         self.assertIn('Best tested chunks: 4x4x8', printed)
 
     def test_retest_changes_winner(self):
@@ -90,23 +89,13 @@ class TestVoxelChunkSweep(unittest.TestCase):
         self.assertEqual(result_for(calls[-1])['chunks'], [4, 4, 8])
         self.assertIn('4x4x8; median capture 15.00 ms (retest)', printed)
 
-    def test_sweep_preserves_requested_triangle_reuse(self):
+    def test_sweep_preserves_requested_collision_setting(self):
         rows, calls, printed = self.run_sweep(
             ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8',
-             '--retest-top', '0', '--attribute', 'use_triangle_reuse=true'], result_for)
-        self.assertEqual(result_for(calls[0])['attributes']['use_triangle_reuse'], 'true')
-        self.assertNotIn('--compare-triangle-reuse', calls[0])
-        self.assertIn('"use_triangle_reuse": "true"', rows[0]['attributes'])
-        self.assertIn('"use_triangle_reuse": "true"', printed)
-
-    def test_sweep_preserves_requested_gpu_backend(self):
-        rows, calls, printed = self.run_sweep(
-            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8',
-             '--retest-top', '0', '--attribute', 'use_gpu=true'], result_for)
-        self.assertEqual(result_for(calls[0])['attributes']['use_gpu'], 'true')
-        self.assertNotIn('--compare-gpu', calls[0])
-        self.assertIn('"use_gpu": "true"', rows[0]['attributes'])
-        self.assertIn('"use_gpu": "true"', printed)
+             '--retest-top', '0', '--attribute', 'use_complex_collision=false'], result_for)
+        self.assertEqual(result_for(calls[0])['attributes']['use_complex_collision'], 'false')
+        self.assertIn('"use_complex_collision": "false"', rows[0]['attributes'])
+        self.assertIn('Best tested chunks: 4x4x8', printed)
 
     def test_failed_trial_preserves_csv_results(self):
         def child(command):

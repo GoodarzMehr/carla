@@ -16,7 +16,6 @@ Use a static scene with no other client advancing the world.
     python3 sweep_voxel_chunks.py --dry-run
     python3 sweep_voxel_chunks.py --port 18731 --output chunks.csv
     python3 sweep_voxel_chunks.py --chunk-x 4 8 16 --chunk-y 4 8 16 --chunk-z 2 4 8
-    python3 sweep_voxel_chunks.py --attribute use_gpu=true --output gpu_chunks.csv
 
 Results are flushed to CSV after each child run. Ctrl+C stops the sweep and
 allows the active child to destroy its sensors and restore world settings.
@@ -187,9 +186,6 @@ def main():
     print('Best tested chunks: %dx%dx%d; median capture %.2f ms (%s)' %
           (*winner['chunks'], winner['capture_median_ms'], 'retest' if retests else 'sweep'))
     attributes = dict(zip(('chunk_x', 'chunk_y', 'chunk_z'), map(str, winner['chunks'])))
-    for name in ('use_triangle_reuse', 'use_gpu'):
-        if name in winner['attributes']:
-            attributes[name] = str(winner['attributes'][name]).lower()
     print('SimBEV attributes: ' + json.dumps(attributes))
     print('Results: %s' % args.output)
     return 0

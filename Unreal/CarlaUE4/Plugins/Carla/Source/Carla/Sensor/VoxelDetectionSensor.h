@@ -116,8 +116,6 @@ private:
     bool DrawDebug = false;
     bool ShowCalculationTime = false;
     bool UseTraceComplex = true;
-    bool UseTriangleReuse = false;
-    bool UseGPU = false;
 
     int32 ChunkX = 4;
     int32 ChunkY = 4;
