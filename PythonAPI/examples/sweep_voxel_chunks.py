@@ -8,10 +8,9 @@
 
 """Find the fastest tested power-of-two voxel chunk dimensions.
 
-Each trial runs compare_voxel_detection.py with one reuse sensor. Timings cover
+Each trial runs compare_voxel_detection.py with one voxel sensor. Timings cover
 world.tick() and sensor delivery, with Python payload inspection excluded.
-The best three triples are measured again, then the winner is byte-validated
-against a legacy 4x4x2 sensor on the same frame, outside the timed rankings.
+The best three triples are measured again with more frames.
 Use a static scene with no other client advancing the world.
 
     python3 sweep_voxel_chunks.py --dry-run
@@ -56,12 +55,12 @@ def run_child(command):
             process.communicate()
             raise
     if process.returncode:
-        raise RuntimeError('Comparison exited with code %d:\n%s' %
+        raise RuntimeError('Benchmark exited with code %d:\n%s' %
                            (process.returncode, output[-3000:]))
     try:
         return json.loads(output.strip().splitlines()[-1])
     except (IndexError, ValueError):
-        raise RuntimeError('Comparison did not return its final JSON result:\n' + output[-3000:])
+        raise RuntimeError('Benchmark did not return its final JSON result:\n' + output[-3000:])
 
 
 def main():
@@ -86,7 +85,6 @@ def main():
     parser.add_argument('--retest-top', type=int, default=3,
                         help='retest this many sweep finalists; 0 disables retesting')
     parser.add_argument('--retest-frames', type=int, default=10)
-    parser.add_argument('--skip-validation', action='store_true')
     parser.add_argument('--output', type=Path, default=Path('voxel_chunk_sweep.csv'))
     parser.add_argument('--dry-run', action='store_true', help='print the plan without connecting')
     args = parser.parse_args()
@@ -95,9 +93,8 @@ def main():
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('timeout must be finite and positive')
 
-    controlled = {'chunk_x', 'chunk_y', 'chunk_z', 'use_candidate_reuse',
-                  'validate_candidate_reuse', 'sensor_tick', 'draw_debug',
-                  'show_calculation_time'}
+    controlled = {'chunk_x', 'chunk_y', 'chunk_z', 'sensor_tick',
+                  'draw_debug', 'show_calculation_time'}
     for item in args.attribute:
         name, separator, value = item.partition('=')
         if not separator or not name or not value:
@@ -108,15 +105,13 @@ def main():
     axes = [list(dict.fromkeys(axis)) for axis in (args.chunk_x, args.chunk_y, args.chunk_z)]
     triples = list(itertools.product(*axes))
     random.Random(args.seed).shuffle(triples)
-    baseline = (4, 4, 2)
+    baseline = (4, 4, 8)
     if baseline in triples:
         triples.remove(baseline)
         triples.insert(0, baseline)
     retest_count = min(args.retest_top, len(triples))
-    print('%d triples; %d frames + %d warmup each; %d retests of %d frames; '
-          '%d final validation' %
-          (len(triples), args.frames, args.warmup, retest_count, args.retest_frames,
-           int(not args.skip_validation)), flush=True)
+    print('%d triples; %d frames + %d warmup each; %d retests of %d frames' %
+          (len(triples), args.frames, args.warmup, retest_count, args.retest_frames), flush=True)
 
     helper = Path(__file__).with_name('compare_voxel_detection.py')
     forwarded = ['--host', args.host, '--port', str(args.port), '--timeout', str(args.timeout),
@@ -126,13 +121,11 @@ def main():
     for attribute in args.attribute + ['draw_debug=false', 'show_calculation_time=false']:
         forwarded.extend(['--attribute', attribute])
 
-    def command_for(chunks, frames, warmup, mode='reuse'):
+    def command_for(chunks, frames, warmup):
         command = [sys.executable, str(helper)] + forwarded + [
-            '--mode', mode, '--frames', str(frames), '--warmup', str(warmup)]
+            '--frames', str(frames), '--warmup', str(warmup)]
         for name, value in zip(('chunk_x', 'chunk_y', 'chunk_z'), chunks):
             command.extend(['--attribute', '%s=%d' % (name, value)])
-        if mode == 'compare':
-            command.extend(['--reference-chunks', '4', '4', '2'])
         return command
 
     if args.dry_run:
@@ -142,39 +135,36 @@ def main():
         print('CSV: %s (no file written)' % args.output)
         return 0
 
-    fields = ['stage', 'status', 'chunk_x', 'chunk_y', 'chunk_z', 'mode', 'preset', 'map',
-              'transform', 'attributes', 'existing_voxel_sensors', 'reference_chunks',
+    fields = ['stage', 'status', 'chunk_x', 'chunk_y', 'chunk_z', 'preset', 'map',
+              'transform', 'attributes', 'existing_voxel_sensors',
               'frames', 'warmup', 'voxel_count',
               'occupied_voxels', 'capture_median_ms', 'capture_min_ms', 'capture_max_ms',
-              'tick_median_ms', 'validated', 'error']
+              'tick_median_ms', 'error']
     with args.output.open('w', newline='') as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fields, extrasaction='ignore')
         writer.writeheader()
         csv_file.flush()
         completed = 0
-        total_runs = len(triples) + retest_count + int(not args.skip_validation)
+        total_runs = len(triples) + retest_count
 
-        def trial(stage, chunks, frames, warmup, mode='reuse'):
+        def trial(stage, chunks, frames, warmup):
             nonlocal completed
             print('[%d/%d] %s %dx%dx%d, %d frames' %
                   (completed + 1, total_runs, stage, *chunks, frames), flush=True)
             row = dict(zip(('chunk_x', 'chunk_y', 'chunk_z'), chunks))
-            row.update(stage=stage, mode=mode, preset=args.preset, frames=frames, warmup=warmup)
+            row.update(stage=stage, preset=args.preset, frames=frames, warmup=warmup)
             try:
-                result = run_child(command_for(chunks, frames, warmup, mode))
+                result = run_child(command_for(chunks, frames, warmup))
                 if result['chunks'] != list(chunks):
-                    raise RuntimeError('Comparison used unexpected chunks: %s' % result['chunks'])
+                    raise RuntimeError('Benchmark used unexpected chunks: %s' % result['chunks'])
                 if not math.isfinite(result['capture_median_ms']):
-                    raise RuntimeError('Comparison returned a nonfinite capture time')
-                if mode == 'compare' and not result['validated']:
-                    raise RuntimeError('Final byte validation did not complete')
+                    raise RuntimeError('Benchmark returned a nonfinite capture time')
                 if result.get('existing_voxel_sensors'):
                     print('Other voxel sensors contributing to capture time: %s' %
                           result['existing_voxel_sensors'], flush=True)
                 row.update(result, status='complete')
                 row['attributes'] = json.dumps(result['attributes'], sort_keys=True)
                 row['existing_voxel_sensors'] = json.dumps(result.get('existing_voxel_sensors', []))
-                row['reference_chunks'] = json.dumps(result['reference_chunks'])
             except (Exception, KeyboardInterrupt) as error:
                 row.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'error',
                            error=str(error) or 'Interrupted')
@@ -192,16 +182,12 @@ def main():
         retests = [trial('retest', result['chunks'], args.retest_frames, args.warmup)
                    for result in finalists]
         winner = min(retests or results, key=lambda row: row['capture_median_ms'])
-        if not args.skip_validation:
-            trial('validate', winner['chunks'], 1, 0, mode='compare')
 
     print('Best tested chunks: %dx%dx%d; median capture %.2f ms (%s)' %
           (*winner['chunks'], winner['capture_median_ms'], 'retest' if retests else 'sweep'))
     attributes = dict(zip(('chunk_x', 'chunk_y', 'chunk_z'), map(str, winner['chunks'])))
-    attributes['use_candidate_reuse'] = 'True'
     print('SimBEV attributes: ' + json.dumps(attributes))
-    print('Byte validation: %s; results: %s' %
-          ('skipped' if args.skip_validation else 'passed', args.output))
+    print('Results: %s' % args.output)
     return 0
 
 

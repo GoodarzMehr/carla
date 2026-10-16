@@ -10,7 +10,6 @@
 #include "PhysicsInterfaceUtilsCore.h"
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysXInterfaceWrapper.h"
-#include "HAL/ThreadSafeCounter.h"
 
 #include "Engine/World.h"
 #include "Runtime/Core/Public/Async/ParallelFor.h"
@@ -194,20 +193,8 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     FActorVariation ChunkZ;
     ChunkZ.Id = TEXT("chunk_z");
     ChunkZ.Type = EActorAttributeType::Int;
-    ChunkZ.RecommendedValues = { TEXT("4") };
+    ChunkZ.RecommendedValues = { TEXT("8") };
     ChunkZ.bRestrictToRecommended = false;
-
-    FActorVariation CandidateReuse;
-    CandidateReuse.Id = TEXT("use_candidate_reuse");
-    CandidateReuse.Type = EActorAttributeType::Bool;
-    CandidateReuse.RecommendedValues = { TEXT("False") };
-    CandidateReuse.bRestrictToRecommended = false;
-
-    FActorVariation ValidateReuse;
-    ValidateReuse.Id = TEXT("validate_candidate_reuse");
-    ValidateReuse.Type = EActorAttributeType::Bool;
-    ValidateReuse.RecommendedValues = { TEXT("False") };
-    ValidateReuse.bRestrictToRecommended = false;
 
     Definition.Variations.Append(
         {
@@ -222,8 +209,6 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
             ChunkX,
             ChunkY,
             ChunkZ,
-            CandidateReuse,
-            ValidateReuse,
         }
     );
 
@@ -256,10 +241,7 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 
     ChunkY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4);
 
-    ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 4);
-
-    UseCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_candidate_reuse", Description.Variations, false);
-    ValidateCandidateReuse = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("validate_candidate_reuse", Description.Variations, false);
+    ChunkZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 8);
 
     // Pre-calculate grid dimensions.
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
@@ -312,9 +294,6 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         QueryParams.AddIgnoredActor(GetOwner());
     }
 
-    FCollisionQueryParams ChunkQueryParams = QueryParams;
-    ChunkQueryParams.bSkipNarrowPhase = true;
-
     const float HalfVoxel = BoxSize * 0.5f;
 
     const FVector BoxExtent(HalfVoxel, HalfVoxel, HalfVoxel);
@@ -338,10 +317,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     const physx::PxQuat VoxelQuat = U2PQuat(VoxelAdapter.GetGeomOrientation());
     const physx::PxVec3 VoxelWorldExtent = physx::PxGeometryQuery::getWorldBounds(
         VoxelAdapter.GetGeometry(), physx::PxTransform(physx::PxVec3(0.0f), VoxelQuat)).getExtents();
-    const bool bValidate = UseCandidateReuse && ValidateCandidateReuse;
-    FThreadSafeCounter ValidationMismatches;
-
-    const auto QueryVoxelLabel = [&](const FVector& WorldPos)
+    const auto ResolvePriorityTie = [&](const FVector& WorldPos)
     {
         TArray<FOverlapResult> Overlaps;
         uint8 Label = 0;
@@ -407,8 +383,6 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
         FVoxelCandidateCollector Collector(QueryParams, ObjectParams,
             SemanticPriority, UE_ARRAY_COUNT(SemanticPriority));
-        bool bChunkEmpty;
-        if (UseCandidateReuse)
         {
             TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
             // PhysX requires touch storage even though the prefilter returns eNONE.
@@ -430,21 +404,12 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             {
                 return A.Priority > B.Priority;
             });
-            bChunkEmpty = Collector.Candidates.Num() == 0;
-        }
-        else
-        {
-            bChunkEmpty = !World->ParallelOverlapAnyTestByObjectType(
-                ChunkCenter, FQuat::Identity, ObjectParams,
-                FCollisionShape::MakeBox(ChunkWorldExtent), ChunkQueryParams);
         }
 
-        if (bChunkEmpty && !bValidate)
+        if (Collector.Candidates.Num() == 0)
         {
             return;
         }
-
-        int32 ChunkMismatches = 0;
 
         for (int32 X = CX * ChunkX; X < XEnd; ++X)
         {
@@ -457,12 +422,6 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                     const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
 
                     const FVector WorldPos = SensorTransform.TransformPosition(LocalPos);
-
-                    if (!UseCandidateReuse)
-                    {
-                        SemanticVoxels[FlatIndex] = QueryVoxelLabel(WorldPos);
-                        continue;
-                    }
 
                     const physx::PxTransform VoxelPose(U2PVector(WorldPos), VoxelQuat);
                     const physx::PxBounds3 VoxelBounds = physx::PxBounds3::centerExtents(
@@ -497,25 +456,11 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                     }
                     if (bPriorityTie)
                     {
-                        Label = QueryVoxelLabel(WorldPos);
-                    }
-
-                    if (bValidate)
-                    {
-                        const uint8 ReferenceLabel = QueryVoxelLabel(WorldPos);
-                        if (Label != ReferenceLabel)
-                        {
-                            ++ChunkMismatches;
-                            Label = ReferenceLabel;
-                        }
+                        Label = ResolvePriorityTie(WorldPos);
                     }
                     SemanticVoxels[FlatIndex] = Label;
                 }
             }
-        }
-        if (ChunkMismatches)
-        {
-            ValidationMismatches.Add(ChunkMismatches);
         }
     };
 
@@ -532,13 +477,6 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             ProcessChunk(Index);
         }
     }, EParallelForFlags::Unbalanced);
-
-    if (bValidate)
-    {
-        carla::log_warning("Candidate reuse validation: ", ValidationMismatches.GetValue(),
-            " mismatched voxels out of ", TotalVoxels,
-            " (reference labels used on mismatch)");
-    }
 
     // Debug visualization.
     if (DrawDebug)
@@ -576,8 +514,6 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     if (ShowCalculationTime)
     {
         carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime),
-            " ms (mode: ", UseCandidateReuse ? "reuse" : "legacy",
-            ", chunks: ", TotalChunks, ", batches: ", NumBatches,
-            ", validation: ", bValidate ? "on" : "off", ")");
+            " ms (chunks: ", TotalChunks, ", batches: ", NumBatches, ")");
     }
 }

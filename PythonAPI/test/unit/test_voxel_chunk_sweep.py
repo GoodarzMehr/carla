@@ -28,10 +28,8 @@ def result_for(command, median=10.0):
     attributes = dict(command[index + 1].split('=', 1)
                       for index, value in enumerate(command) if value == '--attribute')
     chunks = [int(attributes['chunk_' + axis]) for axis in 'xyz']
-    mode = command[command.index('--mode') + 1]
-    return {'chunks': chunks, 'mode': mode, 'attributes': attributes,
-            'capture_median_ms': median, 'reference_chunks': [4, 4, 2],
-            'transform': {'x': 0.0, 'yaw': 37.0}, 'validated': mode == 'compare'}
+    return {'chunks': chunks, 'attributes': attributes,
+            'capture_median_ms': median, 'transform': {'x': 0.0, 'yaw': 37.0}}
 
 
 class TestVoxelChunkSweep(unittest.TestCase):
@@ -62,63 +60,61 @@ class TestVoxelChunkSweep(unittest.TestCase):
     def test_sweep_covers_unique_axis_product_with_baseline_first(self):
         rows, calls, printed = self.run_sweep(
             ['--chunk-x', '2', '4', '4', '--chunk-y', '2', '4',
-             '--chunk-z', '1', '2', '2', '--retest-top', '0', '--skip-validation'],
+             '--chunk-z', '1', '8', '8', '--retest-top', '0'],
             result_for)
         triples = [tuple(result_for(command)['chunks']) for command in calls]
-        expected = {(x, y, z) for x in (2, 4) for y in (2, 4) for z in (1, 2)}
-        self.assertEqual(triples[0], (4, 4, 2))
+        expected = {(x, y, z) for x in (2, 4) for y in (2, 4) for z in (1, 8)}
+        self.assertEqual(triples[0], (4, 4, 8))
         self.assertEqual(len(triples), len(expected))
         self.assertEqual(set(triples), expected)
         self.assertEqual({(row['stage'], row['status']) for row in rows}, {('sweep', 'complete')})
-        self.assertTrue(all(result_for(command)['mode'] == 'reuse' for command in calls))
-        self.assertIn('Best tested chunks: 4x4x2', printed)
+        self.assertTrue(all('--mode' not in command for command in calls))
+        self.assertIn('Best tested chunks: 4x4x8', printed)
 
-    def test_retest_changes_winner_and_validation_is_outside_ranking(self):
+    def test_retest_changes_winner(self):
         def child(command):
             result = result_for(command)
             x = result['chunks'][0]
             frames = int(command[command.index('--frames') + 1])
             result['capture_median_ms'] = (
-                1.0 if result['mode'] == 'compare' else
                 {2: 40.0, 4: 15.0}[x] if frames == 7 else
                 {2: 10.0, 4: 20.0, 8: 30.0}[x])
             return result
 
         rows, calls, printed = self.run_sweep(
-            ['--chunk-x', '2', '4', '8', '--chunk-y', '4', '--chunk-z', '2',
+            ['--chunk-x', '2', '4', '8', '--chunk-y', '4', '--chunk-z', '8',
              '--retest-top', '2', '--retest-frames', '7'], child)
         self.assertEqual([row['stage'] for row in rows],
-                         ['sweep'] * 3 + ['retest'] * 2 + ['validate'])
+                         ['sweep'] * 3 + ['retest'] * 2)
         self.assertEqual([result_for(command)['chunks'][0] for command in calls[3:5]], [2, 4])
-        self.assertEqual(result_for(calls[-1])['chunks'], [4, 4, 2])
-        reference = calls[-1].index('--reference-chunks')
-        self.assertEqual(calls[-1][reference + 1:reference + 4], ['4', '4', '2'])
-        self.assertIn('4x4x2; median capture 15.00 ms (retest)', printed)
+        self.assertEqual(result_for(calls[-1])['chunks'], [4, 4, 8])
+        self.assertIn('4x4x8; median capture 15.00 ms (retest)', printed)
 
-    def test_failed_validation_preserves_csv_trials(self):
+    def test_failed_trial_preserves_csv_results(self):
         def child(command):
             result = result_for(command)
-            result['validated'] = False
+            if result['chunks'][0] == 2:
+                raise RuntimeError('Sensor frame timed out')
             return result
 
         rows, calls, _ = self.run_sweep(
-            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '2', '--retest-top', '0'],
-            child, error='Final byte validation did not complete')
+            ['--chunk-x', '4', '2', '--chunk-y', '4', '--chunk-z', '8', '--retest-top', '0'],
+            child, error='Sensor frame timed out')
         self.assertEqual(len(calls), 2)
         self.assertEqual([(row['stage'], row['status']) for row in rows],
-                         [('sweep', 'complete'), ('validate', 'error')])
-        self.assertIn('validation did not complete', rows[-1]['error'])
+                         [('sweep', 'complete'), ('sweep', 'error')])
+        self.assertIn('Sensor frame timed out', rows[-1]['error'])
 
     def test_child_reads_final_json_and_waits_for_interrupt_cleanup(self):
         process = mock.MagicMock()
         process.__enter__.return_value = process
         process.returncode = 0
-        process.communicate.return_value = ('Trial complete\n{"chunks": [4, 4, 2]}\n', None)
+        process.communicate.return_value = ('Trial complete\n{"chunks": [4, 4, 8]}\n', None)
         with mock.patch.object(sweep.subprocess, 'Popen', return_value=process):
-            self.assertEqual(sweep.run_child(['comparison']), {'chunks': [4, 4, 2]})
+            self.assertEqual(sweep.run_child(['benchmark']), {'chunks': [4, 4, 8]})
             process.communicate.side_effect = [KeyboardInterrupt, ('Cleanup complete', None)]
             with self.assertRaises(KeyboardInterrupt):
-                sweep.run_child(['comparison'])
+                sweep.run_child(['benchmark'])
         process.send_signal.assert_called_once_with(signal.SIGINT)
         self.assertEqual(process.communicate.call_count, 3)
 
