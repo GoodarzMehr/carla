@@ -23,10 +23,10 @@ SPEC.loader.exec_module(benchmark)
 
 class TestVoxelDetectionBenchmark(unittest.TestCase):
     def run_benchmark(self, arguments=(), mismatch=False, argument_error=False):
-        # Removed implementation-selection flags deliberately do not exist.
+        # The blueprint exposes only current sensor attributes.
         attributes = {'range': 50.0, 'voxel_size': 0.5, 'lower_limit': -5.0,
                       'upper_limit': 10.0, 'chunk_x': 4, 'chunk_y': 4, 'chunk_z': 8,
-                      'super_chunk_factor': 2, 'draw_debug': False,
+                      'use_triangle_reuse': False, 'draw_debug': False,
                       'show_calculation_time': False, 'use_complex_collision': True,
                       'ignore_self': False}
         blueprint = mock.Mock()
@@ -57,7 +57,8 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
         sensors = []
 
         def spawn_actor(_blueprint, _transform):
-            sensor = mock.Mock(id=len(sensors) + 1, factor=attributes['super_chunk_factor'])
+            sensor = mock.Mock(id=len(sensors) + 1,
+                               triangle_reuse=attributes['use_triangle_reuse'])
             sensors.append(sensor)
             return sensor
 
@@ -65,7 +66,7 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
             frame = world.tick.call_count
             for sensor in sensors:
                 payload = b'\x00\x01\x00'
-                if mismatch and sensor.factor != 1:
+                if mismatch and sensor.triangle_reuse:
                     payload = b'\x00\x00\x01'
                 sensor.listen.call_args.args[0](SimpleNamespace(frame=frame, raw_data=payload))
             return frame
@@ -100,35 +101,37 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
         result = None if mismatch or argument_error else json.loads(output.splitlines()[-1])
         return sensors, result, output
 
-    def test_default_benchmarks_one_sensor_without_removed_flags(self):
+    def test_default_benchmarks_one_sensor_with_triangle_reuse_disabled(self):
         sensors, result, output = self.run_benchmark()
-        self.assertEqual([sensor.factor for sensor in sensors], [2])
-        self.assertEqual(result['attributes']['super_chunk_factor'], 2)
-        self.assertIsInstance(result['attributes']['super_chunk_factor'], int)
-        self.assertNotIn('super_chunk_comparison', result)
+        self.assertEqual([sensor.triangle_reuse for sensor in sensors], [False])
+        self.assertIs(result['attributes']['use_triangle_reuse'], False)
+        self.assertNotIn('triangle_reuse_comparison', result)
         self.assertIn('Capture latency:', output)
+
+    def test_single_sensor_can_benchmark_triangle_reuse_enabled(self):
+        sensors, result, _ = self.run_benchmark(['--attribute', 'use_triangle_reuse=true'])
+        self.assertEqual([sensor.triangle_reuse for sensor in sensors], [True])
+        self.assertIs(result['attributes']['use_triangle_reuse'], True)
+        self.assertNotIn('triangle_reuse_comparison', result)
 
     def test_comparison_checks_matching_frames_and_cleans_both_sensors(self):
         sensors, result, output = self.run_benchmark(
-            ['--compare-super-chunks', '--attribute', 'super_chunk_factor=4'])
-        self.assertEqual([sensor.factor for sensor in sensors], [1, 4])
-        self.assertEqual(result['attributes']['super_chunk_factor'], 4)
-        self.assertEqual(result['super_chunk_comparison'], {
-            'baseline_factor': 1, 'target_factor': 4, 'matched_frames': 3,
+            ['--compare-triangle-reuse', '--attribute', 'use_triangle_reuse=false'])
+        self.assertEqual([sensor.triangle_reuse for sensor in sensors], [False, True])
+        self.assertIs(result['attributes']['use_triangle_reuse'], True)
+        self.assertEqual(result['triangle_reuse_comparison'], {
+            'baseline_enabled': False, 'target_enabled': True, 'matched_frames': 3,
             'identical_bytes': True})
         self.assertIn('two sensors; not isolated', output)
 
     def test_comparison_rejects_equal_counts_with_different_bytes_and_cleans_both(self):
-        sensors, _, _ = self.run_benchmark(['--compare-super-chunks'], mismatch=True)
-        self.assertEqual([sensor.factor for sensor in sensors], [1, 2])
+        sensors, _, _ = self.run_benchmark(['--compare-triangle-reuse'], mismatch=True)
+        self.assertEqual([sensor.triangle_reuse for sensor in sensors], [False, True])
 
-    def test_invalid_factors_are_rejected_before_changing_world_settings(self):
-        for factor in ('0', '3', '16'):
-            with self.subTest(factor=factor):
-                self.run_benchmark(['--attribute', 'super_chunk_factor=' + factor],
-                                   argument_error=True)
-        self.run_benchmark(['--compare-super-chunks', '--attribute', 'super_chunk_factor=1'],
-                           argument_error=True)
+    def test_invalid_grid_is_rejected_before_changing_world_settings(self):
+        for attribute in ('voxel_size=0', 'chunk_z=0'):
+            with self.subTest(attribute=attribute):
+                self.run_benchmark(['--attribute', attribute], argument_error=True)
 
 
 if __name__ == '__main__':

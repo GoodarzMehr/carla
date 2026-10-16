@@ -116,9 +116,9 @@ private:
     bool DrawDebug = false;
     bool ShowCalculationTime = false;
     bool UseTraceComplex = true;
+    bool UseTriangleReuse = false;
 
     int32 ChunkX = 4;
     int32 ChunkY = 4;
     int32 ChunkZ = 8;
-    int32 SuperChunkFactor = 2;
 };

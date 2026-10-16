@@ -186,8 +186,8 @@ def main():
     print('Best tested chunks: %dx%dx%d; median capture %.2f ms (%s)' %
           (*winner['chunks'], winner['capture_median_ms'], 'retest' if retests else 'sweep'))
     attributes = dict(zip(('chunk_x', 'chunk_y', 'chunk_z'), map(str, winner['chunks'])))
-    if 'super_chunk_factor' in winner['attributes']:
-        attributes['super_chunk_factor'] = str(winner['attributes']['super_chunk_factor'])
+    if 'use_triangle_reuse' in winner['attributes']:
+        attributes['use_triangle_reuse'] = str(winner['attributes']['use_triangle_reuse']).lower()
     print('SimBEV attributes: ' + json.dumps(attributes))
     print('Results: %s' % args.output)
     return 0

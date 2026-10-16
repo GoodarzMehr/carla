@@ -90,14 +90,14 @@ class TestVoxelChunkSweep(unittest.TestCase):
         self.assertEqual(result_for(calls[-1])['chunks'], [4, 4, 8])
         self.assertIn('4x4x8; median capture 15.00 ms (retest)', printed)
 
-    def test_sweep_preserves_requested_super_chunk_factor(self):
+    def test_sweep_preserves_requested_triangle_reuse(self):
         rows, calls, printed = self.run_sweep(
             ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8',
-             '--retest-top', '0', '--attribute', 'super_chunk_factor=4'], result_for)
-        self.assertEqual(result_for(calls[0])['attributes']['super_chunk_factor'], '4')
-        self.assertNotIn('--compare-super-chunks', calls[0])
-        self.assertIn('"super_chunk_factor": "4"', rows[0]['attributes'])
-        self.assertIn('"super_chunk_factor": "4"', printed)
+             '--retest-top', '0', '--attribute', 'use_triangle_reuse=true'], result_for)
+        self.assertEqual(result_for(calls[0])['attributes']['use_triangle_reuse'], 'true')
+        self.assertNotIn('--compare-triangle-reuse', calls[0])
+        self.assertIn('"use_triangle_reuse": "true"', rows[0]['attributes'])
+        self.assertIn('"use_triangle_reuse": "true"', printed)
 
     def test_failed_trial_preserves_csv_results(self):
         def child(command):
