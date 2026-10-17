@@ -106,18 +106,30 @@ namespace VoxelTriangleOverlap
         return Result;
     }
 
-    inline FTriangle MakeTriangle(const physx::PxTriangleMeshGeometry& Geometry,
+    // Fetch a mesh triangle in the cache frame. MeshToCache must equal
+    // CachePose.transformInv(MeshPose). Returns the position error of the vertices.
+    inline float FetchTriangle(const physx::PxTriangleMeshGeometry& Geometry,
         const physx::PxTransform& MeshPose, const physx::PxTransform& CachePose,
-        physx::PxU32 Index, const physx::PxVec3& HalfExtent)
+        const physx::PxTransform& MeshToCache, physx::PxU32 Index,
+        const physx::PxVec3& HalfExtent, physx::PxTriangle& Triangle)
     {
-        physx::PxTriangle Triangle;
-        physx::PxMeshQuery::getTriangle(Geometry, CachePose.transformInv(MeshPose), Index, Triangle);
+        physx::PxMeshQuery::getTriangle(Geometry, MeshToCache, Index, Triangle);
         const float Magnitude = 1.0f + MaxAbs(MeshPose.p) + MaxAbs(CachePose.p) +
             physx::PxMax(MaxAbs(Triangle.verts[0]),
                 physx::PxMax(MaxAbs(Triangle.verts[1]), MaxAbs(Triangle.verts[2]))) + MaxAbs(HalfExtent);
         // Cached and PhysX mesh-space transforms round differently. Resolve
         // contacts within this error band with the original whole-mesh query.
-        return MakeTriangle(Triangle, HalfExtent, 64.0f * FLT_EPSILON * Magnitude);
+        return 64.0f * FLT_EPSILON * Magnitude;
+    }
+
+    inline FTriangle MakeTriangle(const physx::PxTriangleMeshGeometry& Geometry,
+        const physx::PxTransform& MeshPose, const physx::PxTransform& CachePose,
+        physx::PxU32 Index, const physx::PxVec3& HalfExtent)
+    {
+        physx::PxTriangle Triangle;
+        const float PositionError = FetchTriangle(Geometry, MeshPose, CachePose,
+            CachePose.transformInv(MeshPose), Index, HalfExtent, Triangle);
+        return MakeTriangle(Triangle, HalfExtent, PositionError);
     }
 
     inline EResult Test(const FTriangle& Triangle, const physx::PxVec3& Center)

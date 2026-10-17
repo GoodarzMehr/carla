@@ -3,6 +3,7 @@
 #include "Carla/Game/CarlaEngine.h"
 #include "Carla/Sensor/VoxelDetectionSensor.h"
 #include "Carla/Sensor/VoxelTriangleOverlap.h"
+#include "Carla/Sensor/VoxelSurfaceRaster.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 
 #include "DrawDebugHelpers.h"
@@ -17,6 +18,7 @@
 #include "Runtime/Core/Public/Async/ParallelFor.h"
 #include "Templates/IntegralConstant.h"
 
+#include <PxRigidDynamic.h>
 #include <PxScene.h>
 #include <PxSceneLock.h>
 #include <geometry/PxGeometryQuery.h>
@@ -78,6 +80,9 @@ namespace
     public:
         TArray<FVoxelCandidate, TInlineAllocator<16>> Candidates;
 
+        // Set when a candidate's scene-query bounds may follow a pending kinematic target instead of its current pose.
+        bool bKinematicTarget = false;
+
         FVoxelCandidateCollector(const FCollisionQueryParams& InParams, const FCollisionObjectQueryParams& InObjects, const uint8* InPriorities, int32 InNumLabels)
             : Params(InParams)
             , Objects(InObjects)
@@ -126,6 +131,15 @@ namespace
                 if (Label > 0 && Label < NumLabels && Priorities[Label] > 0)
                 {
                     Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label]);
+
+                    const physx::PxRigidDynamic* Dynamic = Actor->is<physx::PxRigidDynamic>();
+
+                    physx::PxTransform Target;
+
+                    if (Dynamic && Dynamic->getKinematicTarget(Target) && !(Target == Actor->getGlobalPose()))
+                    {
+                        bKinematicTarget = true;
+                    }
                 }
             }
 
@@ -170,6 +184,8 @@ namespace
         FVector AbsAxisX;
         FVector AbsAxisY;
         FVector AbsAxisZ;
+        FVector SensorScale;
+        double CenterError = 0.0;
         float BoxSize;
         float BoxRange;
         float Bottom;
@@ -227,6 +243,34 @@ namespace
             AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
             AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
             AbsAxisZ = SensorTransform.TransformVector(FVector(0.0f, 0.0f, 1.0f)).GetAbs();
+
+            SensorScale = SensorTransform.GetScale3D();
+
+            // Bound on the rounding of one voxel center, from the world position through the tile frame.
+            const float LocalMagnitude = BoxRange + FMath::Max(FMath::Abs(Bottom), FMath::Abs(Bottom + GridSizeZ * BoxSize)) + BoxSize;
+
+            CenterError = 32.0 * FLT_EPSILON * (SensorTransform.GetLocation().GetAbsMax() + 2.0 * SensorScale.GetAbsMax() * LocalMagnitude + 1.0);
+        }
+
+        // The surface raster needs box voxels and a sensor scale it can invert.
+        bool SupportsRaster() const
+        {
+            return bBoxVoxels && VoxelQuat.isFinite() && SensorScale.GetAbsMin() > 1e-3f && FMath::IsFinite(CenterError);
+        }
+
+        // Approximate centers of the voxels [Begin, Begin + Size) in the tile frame.
+        VoxelSurfaceRaster::FLattice MakeLattice(const FIntVector& Begin, const FIntVector& Size, const physx::PxTransform& TileFrame, int32 FootprintPadding) const
+        {
+            const int32 LatticeSize[3] = {Size.X, Size.Y, Size.Z};
+
+            const double Step[3] = {double(SensorScale.X) * BoxSize, double(SensorScale.Y) * BoxSize, double(SensorScale.Z) * BoxSize};
+
+            const double Padding = FootprintPadding * double(SensorScale.GetAbsMax()) * BoxSize;
+
+            return VoxelSurfaceRaster::MakeLattice(LatticeSize, Step, CenterError, Padding, [&](int32 X, int32 Y, int32 Z)
+            {
+                return TileFrame.transformInv(U2PVector(GetWorldPosition(Begin.X + X, Begin.Y + Y, Begin.Z + Z)));
+            });
         }
 
         // Center of voxel (X, Y, Z) in world space.
@@ -621,6 +665,493 @@ namespace
         return TotalChunks;
     }
 
+    struct FVoxelTileProfile
+    {
+        uint64 ZeroCycles = 0;
+        uint64 GatherCycles = 0;
+        uint64 CullCycles = 0;
+        uint64 FetchCycles = 0;
+        uint64 RasterCycles = 0;
+        uint64 DeferredCycles = 0;
+        uint64 PrimitiveCycles = 0;
+        uint64 TieCycles = 0;
+        uint64 FallbackCycles = 0;
+        uint64 TotalCycles = 0;
+        uint64 SlowestCycles = 0;
+        uint64 Tiles = 0;
+        uint64 FallbackTiles = 0;
+        uint64 Candidates = 0;
+        uint64 MeshCandidates = 0;
+        uint64 PrimitiveCandidates = 0;
+        uint64 Regrowths = 0;
+        uint64 Ties = 0;
+        VoxelSurfaceRaster::FRasterStats Raster;
+
+        void Add(const FVoxelTileProfile& Other)
+        {
+            ZeroCycles += Other.ZeroCycles;
+            GatherCycles += Other.GatherCycles;
+            CullCycles += Other.CullCycles;
+            FetchCycles += Other.FetchCycles;
+            RasterCycles += Other.RasterCycles;
+            DeferredCycles += Other.DeferredCycles;
+            PrimitiveCycles += Other.PrimitiveCycles;
+            TieCycles += Other.TieCycles;
+            FallbackCycles += Other.FallbackCycles;
+            TotalCycles += Other.TotalCycles;
+            SlowestCycles = FMath::Max(SlowestCycles, Other.SlowestCycles);
+            Tiles += Other.Tiles;
+            FallbackTiles += Other.FallbackTiles;
+            Candidates += Other.Candidates;
+            MeshCandidates += Other.MeshCandidates;
+            PrimitiveCandidates += Other.PrimitiveCandidates;
+            Regrowths += Other.Regrowths;
+            Ties += Other.Ties;
+
+            Raster.Add(Other.Raster);
+        }
+    };
+
+    // Tiles are whole multiples of the reference chunk, so legacy chunks and primitive bricks align with the tile grid.
+    FIntVector GetTileSize(const FIntVector& ChunkSize)
+    {
+        return FIntVector(
+            FMath::DivideAndRoundUp(ChunkSize.X, ReferenceChunkSize.X) * ReferenceChunkSize.X,
+            FMath::DivideAndRoundUp(ChunkSize.Y, ReferenceChunkSize.Y) * ReferenceChunkSize.Y,
+            FMath::DivideAndRoundUp(ChunkSize.Z, ReferenceChunkSize.Z) * ReferenceChunkSize.Z
+        );
+    }
+
+    // Connects the surface raster to the output labels and to the PhysX queries of the current candidate.
+    struct FTileEnv
+    {
+        const FVoxelFrame& Frame;
+        const VoxelSurfaceRaster::FLabelRules& Rules;
+        const VoxelSurfaceRaster::FLattice& Lattice;
+        const physx::PxTransform& TileFrame;
+        const FIntVector Begin;
+        uint8* Labels;
+        VoxelSurfaceRaster::FVoxelSet& Deferred;
+        TArray<int32>& Ties;
+        const FVoxelCandidate* Candidate;
+
+        int32 GetFlatIndex(int32 X, int32 Y, int32 Z) const
+        {
+            return (Begin.X + X) * Frame.GridSizeY * Frame.GridSizeZ + (Begin.Y + Y) * Frame.GridSizeZ + Begin.Z + Z;
+        }
+
+        // Same world position as the chunked path.
+        physx::PxVec3 GetWorldPosition(int32 X, int32 Y, int32 Z) const
+        {
+            return U2PVector(Frame.GetWorldPosition(Begin.X + X, Begin.Y + Y, Begin.Z + Z));
+        }
+
+        bool IsOpen(int32 X, int32 Y, int32 Z) const
+        {
+            return !Rules.IsClosed(Labels[GetFlatIndex(X, Y, Z)], Candidate->Label, Candidate->Priority);
+        }
+
+        bool GetCenter(int32 X, int32 Y, int32 Z, physx::PxVec3& Center) const
+        {
+            const physx::PxVec3 Position = GetWorldPosition(X, Y, Z);
+
+            if (!Candidate->Bounds.intersects(physx::PxBounds3::centerExtents(Position, Frame.VoxelWorldExtent)))
+            {
+                return false;
+            }
+
+            Center = TileFrame.transformInv(Position);
+
+            return true;
+        }
+
+        void Hit(int32 X, int32 Y, int32 Z)
+        {
+            const int32 FlatIndex = GetFlatIndex(X, Y, Z);
+
+            if (Rules.Apply(Labels[FlatIndex], Candidate->Label))
+            {
+                Ties.Add(FlatIndex);
+            }
+        }
+
+        void Defer(int32 X, int32 Y, int32 Z)
+        {
+            Deferred.Add(Lattice.GetIndex(X, Y, Z));
+        }
+
+        bool Overlaps(int32 X, int32 Y, int32 Z) const
+        {
+            const physx::PxTransform VoxelPose(GetWorldPosition(X, Y, Z), Frame.VoxelQuat);
+
+            return physx::PxGeometryQuery::overlap(Frame.VoxelAdapter.GetGeometry(), VoxelPose, Candidate->Geometry.any(), Candidate->Pose);
+        }
+
+        bool OverlapsBrick(const int32* BrickBegin, const int32* BrickEnd) const
+        {
+            const FChunkBounds Bounds = Frame.MakeChunkBounds(
+                FIntVector(Begin.X + BrickBegin[0], Begin.Y + BrickBegin[1], Begin.Z + BrickBegin[2]),
+                FIntVector(Begin.X + BrickEnd[0], Begin.Y + BrickEnd[1], Begin.Z + BrickEnd[2])
+            );
+
+            return physx::PxGeometryQuery::overlap(Bounds.Geometry, Bounds.Pose, Candidate->Geometry.any(), Candidate->Pose);
+        }
+    };
+
+    // Label every voxel of one tile with the surface raster. Gives the same labels as the chunked path, which still runs tiles the raster cannot handle exactly.
+    template <bool bProfile>
+    void ProcessTile(const FVoxelFrame& Frame, const VoxelSurfaceRaster::FLabelRules& Rules, const FIntVector& TileSize, const FIntVector& Tile, int32 FootprintPadding, uint8* Labels, FVoxelTileProfile& Profile)
+    {
+        const uint64 TileStart = bProfile ? FPlatformTime::Cycles64() : 0;
+
+        uint64 Clock = TileStart;
+
+        // Add the cycles since the previous lap to one phase.
+        const auto Lap = [&](uint64& Cycles)
+        {
+            if (bProfile)
+            {
+                const uint64 Now = FPlatformTime::Cycles64();
+
+                Cycles += Now - Clock;
+
+                Clock = Now;
+            }
+        };
+
+        const auto Finish = [&]()
+        {
+            if (bProfile)
+            {
+                const uint64 Cycles = FPlatformTime::Cycles64() - TileStart;
+
+                Profile.TotalCycles += Cycles;
+
+                Profile.SlowestCycles = FMath::Max(Profile.SlowestCycles, Cycles);
+
+                ++Profile.Tiles;
+            }
+        };
+
+        const FIntVector Begin(Tile.X * TileSize.X, Tile.Y * TileSize.Y, Tile.Z * TileSize.Z);
+
+        const FIntVector End = Frame.GetChunkEnd(TileSize, Tile.X + 1, Tile.Y + 1, Tile.Z + 1);
+
+        const FIntVector Size = End - Begin;
+
+        // Labels accumulate in the output, so the tile starts empty.
+        for (int32 X = Begin.X; X < End.X; ++X)
+        {
+            for (int32 Y = Begin.Y; Y < End.Y; ++Y)
+            {
+                FMemory::Memzero(Labels + X * Frame.GridSizeY * Frame.GridSizeZ + Y * Frame.GridSizeZ + Begin.Z, Size.Z);
+            }
+        }
+
+        Lap(Profile.ZeroCycles);
+
+        const FChunkBounds TileBounds = Frame.MakeChunkBounds(Begin, End);
+
+        FVoxelCandidateCollector Collector(Frame.QueryParams, Frame.ObjectParams, Frame.Priorities, Frame.NumLabels);
+
+        {
+            TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherTileCandidates);
+
+            // PhysX requires touch storage even though the prefilter returns eNONE.
+            physx::PxOverlapHit UnusedHit;
+            physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
+
+            const physx::PxQueryFilterData Filter(PhysXInterface::StaticDynamicQueryFlags(Frame.QueryParams) | physx::PxQueryFlag::ePREFILTER);
+
+            Frame.Scene->overlap(TileBounds.Geometry, TileBounds.Pose, UnusedHits, Filter, &Collector);
+        }
+
+        Lap(Profile.GatherCycles);
+
+        // The chunked path labels this tile when the raster cannot reproduce it.
+        const auto RunReferenceChunks = [&]()
+        {
+            FVoxelProfile UnusedProfile;
+
+            for (int32 CX = Begin.X / ReferenceChunkSize.X; CX * ReferenceChunkSize.X < End.X; ++CX)
+            {
+                for (int32 CY = Begin.Y / ReferenceChunkSize.Y; CY * ReferenceChunkSize.Y < End.Y; ++CY)
+                {
+                    for (int32 CZ = Begin.Z / ReferenceChunkSize.Z; CZ * ReferenceChunkSize.Z < End.Z; ++CZ)
+                    {
+                        ProcessChunk<false>(Frame, ReferenceChunkSize, FIntVector(CX, CY, CZ), Labels, UnusedProfile);
+                    }
+                }
+            }
+
+            if (bProfile)
+            {
+                ++Profile.FallbackTiles;
+            }
+
+            Lap(Profile.FallbackCycles);
+
+            Finish();
+        };
+
+        // Chunk gathers see a kinematic body at its target while its shapes are tested at the current pose, so their output depends on the chunk boundaries.
+        if (Collector.bKinematicTarget)
+        {
+            RunReferenceChunks();
+
+            return;
+        }
+
+        // Meshes are culled by their triangle fetch below.
+        Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
+        {
+            return Candidate.Geometry.getType() != physx::PxGeometryType::eTRIANGLEMESH && !physx::PxGeometryQuery::overlap(TileBounds.Geometry, TileBounds.Pose, Candidate.Geometry.any(), Candidate.Pose);
+        });
+
+        Collector.Candidates.StableSort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
+        {
+            return A.Priority > B.Priority;
+        });
+
+        if (bProfile)
+        {
+            Profile.Candidates += Collector.Candidates.Num();
+        }
+
+        Lap(Profile.CullCycles);
+
+        if (Collector.Candidates.Num() == 0)
+        {
+            Finish();
+
+            return;
+        }
+
+        const physx::PxTransform TileFrame(TileBounds.Pose.p, Frame.VoxelQuat);
+
+        const VoxelSurfaceRaster::FLattice Lattice = Frame.MakeLattice(Begin, Size, TileFrame, FootprintPadding);
+
+        if (!Lattice.IsValid())
+        {
+            RunReferenceChunks();
+
+            return;
+        }
+
+        // Sensor-aligned box around every voxel query box of the tile, with the same 0.1 cm margin as the chunk bounds.
+        physx::PxVec3 FetchExtent;
+
+        for (int32 Axis = 0; Axis < 3; ++Axis)
+        {
+            const double Extent = FMath::Max(FMath::Abs(Lattice.Center(Axis, 0)), FMath::Abs(Lattice.Center(Axis, Lattice.Size[Axis] - 1)));
+
+            FetchExtent[Axis] = float(Extent + Lattice.Margin) + Frame.VoxelHalfExtent[Axis] + 0.1f;
+        }
+
+        const physx::PxBoxGeometry FetchBox(FetchExtent);
+
+        const int32 BrickSize[3] = {ReferenceChunkSize.X, ReferenceChunkSize.Y, ReferenceChunkSize.Z};
+
+        struct FDegenerateTriangle
+        {
+            physx::PxTriangle Triangle;
+            float PositionError;
+        };
+
+        TArray<physx::PxU32> Indices;
+
+        Indices.SetNumUninitialized(4096);
+
+        TArray<VoxelTriangleOverlap::FTriangle> Triangles;
+
+        TArray<FDegenerateTriangle> DegenerateTriangles;
+
+        VoxelSurfaceRaster::FVoxelSet Deferred;
+
+        Deferred.Reset(Lattice.GetNumVoxels());
+
+        TArray<int32> Ties;
+
+        FTileEnv Env{Frame, Rules, Lattice, TileFrame, Begin, Labels, Deferred, Ties, nullptr};
+
+        // Candidates go in descending priority, so a voxel closes as soon as no later candidate can change its label.
+        for (const FVoxelCandidate& Candidate : Collector.Candidates)
+        {
+            Env.Candidate = &Candidate;
+
+            if (Candidate.Geometry.getType() != physx::PxGeometryType::eTRIANGLEMESH)
+            {
+                if (bProfile)
+                {
+                    ++Profile.PrimitiveCandidates;
+                }
+
+                const VoxelSurfaceRaster::FIndexBox Box = VoxelSurfaceRaster::GetBoundsBox(Candidate.Bounds, Frame.VoxelWorldExtent, TileFrame, Lattice);
+
+                VoxelSurfaceRaster::RasterizeBounds<bProfile>(Box, BrickSize, Lattice, Env, Profile.Raster);
+
+                Lap(Profile.PrimitiveCycles);
+
+                continue;
+            }
+
+            if (bProfile)
+            {
+                ++Profile.MeshCandidates;
+            }
+
+            const physx::PxTriangleMeshGeometry& Mesh = Candidate.Geometry.triangleMesh();
+
+            bool bOverflow = false;
+
+            physx::PxU32 Count = physx::PxMeshQuery::findOverlapTriangleMesh(FetchBox, TileFrame, Mesh, Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+
+            if (bOverflow)
+            {
+                // Paging with a start index reruns the midphase, so query once more with room for every triangle.
+                Indices.SetNumUninitialized(FMath::Max<int32>(2 * Indices.Num(), Mesh.triangleMesh->getNbTriangles()));
+
+                bOverflow = false;
+
+                Count = physx::PxMeshQuery::findOverlapTriangleMesh(FetchBox, TileFrame, Mesh, Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+
+                if (bProfile)
+                {
+                    ++Profile.Regrowths;
+                }
+
+                if (bOverflow)
+                {
+                    RunReferenceChunks();
+
+                    return;
+                }
+            }
+
+            Triangles.Reset();
+
+            DegenerateTriangles.Reset();
+
+            const physx::PxTransform MeshToTile = TileFrame.transformInv(Candidate.Pose);
+
+            for (physx::PxU32 Index = 0; Index < Count; ++Index)
+            {
+                physx::PxTriangle Triangle;
+
+                const float PositionError = VoxelTriangleOverlap::FetchTriangle(Mesh, Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Triangle);
+
+                const VoxelTriangleOverlap::FTriangle Prepared = VoxelTriangleOverlap::MakeTriangle(Triangle, Frame.VoxelHalfExtent, PositionError);
+
+                if (Prepared.Degenerate)
+                {
+                    DegenerateTriangles.Add(FDegenerateTriangle{Triangle, PositionError});
+                }
+                else
+                {
+                    Triangles.Add(Prepared);
+                }
+            }
+
+            Lap(Profile.FetchCycles);
+
+            for (const VoxelTriangleOverlap::FTriangle& Triangle : Triangles)
+            {
+                VoxelSurfaceRaster::RasterizeTriangle<bProfile>(Triangle, Lattice, Env, Profile.Raster);
+            }
+
+            for (const FDegenerateTriangle& Degenerate : DegenerateTriangles)
+            {
+                VoxelSurfaceRaster::RasterizeDegenerate<bProfile>(Degenerate.Triangle, Degenerate.PositionError, Frame.VoxelHalfExtent, Lattice, Env, Profile.Raster);
+            }
+
+            Lap(Profile.RasterCycles);
+
+            VoxelSurfaceRaster::ResolveDeferred<bProfile>(Deferred, Lattice, Env, Profile.Raster);
+
+            Lap(Profile.DeferredCycles);
+        }
+
+        // Two different labels share the highest priority; the per-voxel query keeps PhysX hit order, as in the chunked path.
+        for (const int32 FlatIndex : Ties)
+        {
+            const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
+            const int32 Remainder = FlatIndex % (Frame.GridSizeY * Frame.GridSizeZ);
+            const int32 Y = Remainder / Frame.GridSizeZ;
+            const int32 Z = Remainder % Frame.GridSizeZ;
+
+            Labels[FlatIndex] = Frame.QueryVoxelLabel(Frame.GetWorldPosition(X, Y, Z));
+        }
+
+        if (bProfile)
+        {
+            Profile.Ties += Ties.Num();
+        }
+
+        Lap(Profile.TieCycles);
+
+        Finish();
+    }
+
+    // Label every voxel tile by tile and return the number of tiles.
+    int32 RunTiles(const FVoxelFrame& Frame, const FIntVector& TileSize, int32 FootprintPadding, uint8* Labels, bool bShowCalculationTime, TArray<FVoxelTileProfile>& OutProfiles)
+    {
+        const int32 STilesX = FMath::DivideAndRoundUp(Frame.GridSizeX, TileSize.X);
+        const int32 STilesY = FMath::DivideAndRoundUp(Frame.GridSizeY, TileSize.Y);
+        const int32 STilesZ = FMath::DivideAndRoundUp(Frame.GridSizeZ, TileSize.Z);
+
+        const int32 TotalTiles = STilesX * STilesY * STilesZ;
+
+        const VoxelSurfaceRaster::FLabelRules Rules(Frame.Priorities, Frame.NumLabels);
+
+        // Tile costs vary a lot, so batches hold a single tile unless tiles are tiny.
+        const int32 NumBatches = FMath::Min(TotalTiles, 64 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
+
+        OutProfiles.Reset();
+
+        if (bShowCalculationTime)
+        {
+            OutProfiles.SetNum(NumBatches);
+        }
+
+        ParallelFor(NumBatches, [&](int32 Batch)
+        {
+            TRACE_CPUPROFILER_EVENT_SCOPE(VoxelProcessTiles);
+
+            physx::PxSceneReadLock SceneLock(*Frame.Scene);
+
+            FVoxelTileProfile Profile;
+
+            const int32 Begin = int32(int64(TotalTiles) * Batch / NumBatches);
+            const int32 End = int32(int64(TotalTiles) * (Batch + 1) / NumBatches);
+
+            for (int32 Index = Begin; Index < End; ++Index)
+            {
+                const int32 TX = Index / (STilesY * STilesZ);
+                const int32 Remainder = Index % (STilesY * STilesZ);
+                const int32 TY = Remainder / STilesZ;
+                const int32 TZ = Remainder % STilesZ;
+
+                const FIntVector Tile(TX, TY, TZ);
+
+                if (bShowCalculationTime)
+                {
+                    ProcessTile<true>(Frame, Rules, TileSize, Tile, FootprintPadding, Labels, Profile);
+                }
+                else
+                {
+                    ProcessTile<false>(Frame, Rules, TileSize, Tile, FootprintPadding, Labels, Profile);
+                }
+            }
+
+            if (bShowCalculationTime)
+            {
+                OutProfiles[Batch] = Profile;
+            }
+        }, EParallelForFlags::Unbalanced);
+
+        return TotalTiles;
+    }
+
     // Fill the whole voxel buffer with one value, in parallel slices.
     void FillVoxels(uint8* Labels, int32 TotalVoxels, uint8 Value)
     {
@@ -863,6 +1394,103 @@ namespace
             }
         }
     }
+
+    // Log the sampled chunk profile.
+    void LogChunkProfile(const TArray<FVoxelProfile>& Profiles, int32 TotalChunks)
+    {
+        FVoxelProfile Profile;
+
+        for (const FVoxelProfile& Batch : Profiles)
+        {
+            Profile.GatherCycles += Batch.GatherCycles;
+            Profile.CullCycles += Batch.CullCycles;
+            Profile.TriangleCycles += Batch.TriangleCycles;
+            Profile.FineCycles += Batch.FineCycles;
+            Profile.PhysXCycles += Batch.PhysXCycles;
+            Profile.TieCycles += Batch.TieCycles;
+            Profile.Regions += Batch.Regions;
+            Profile.Candidates += Batch.Candidates;
+            Profile.Chunks += Batch.Chunks;
+            Profile.Voxels += Batch.Voxels;
+            Profile.Tests += Batch.Tests;
+            Profile.PhysXQueries += Batch.PhysXQueries;
+            Profile.Ties += Batch.Ties;
+            Profile.CachedMeshes += Batch.CachedMeshes;
+            Profile.CachedTriangles += Batch.CachedTriangles;
+            Profile.TriangleQueries += Batch.TriangleQueries;
+            Profile.BoundaryFallbacks += Batch.BoundaryFallbacks;
+        }
+
+        // These are sampled sums across workers, not frame wall time. Fine time is split into triangle tests and per-voxel PhysX queries; both exclude ties.
+        carla::log_warning("Voxel sampled worker time (ms): gather=", FPlatformTime::ToMilliseconds64(Profile.GatherCycles),
+            ", cull/sort=", FPlatformTime::ToMilliseconds64(Profile.CullCycles),
+            ", triangle cache=", FPlatformTime::ToMilliseconds64(Profile.TriangleCycles),
+            ", fine triangles=", FPlatformTime::ToMilliseconds64(Profile.FineCycles - Profile.TieCycles - Profile.PhysXCycles),
+            ", fine PhysX=", FPlatformTime::ToMilliseconds64(Profile.PhysXCycles),
+            ", ties=", FPlatformTime::ToMilliseconds64(Profile.TieCycles));
+
+        carla::log_warning("Voxel sampled counts: regions=", Profile.Regions, "/", TotalChunks,
+            ", candidates=", Profile.Candidates,
+            ", active chunks=", Profile.Chunks,
+            ", visited voxels=", Profile.Voxels,
+            ", candidate tests=", Profile.Tests,
+            ", PhysX voxel queries=", Profile.PhysXQueries,
+            ", tie queries=", Profile.Ties);
+
+        carla::log_warning("Voxel sampled triangle counts: cached meshes=", Profile.CachedMeshes,
+            ", cached triangles=", Profile.CachedTriangles,
+            ", reused queries=", Profile.TriangleQueries,
+            ", boundary fallbacks=", Profile.BoundaryFallbacks);
+    }
+
+    // Log the tile profile. Every tile is profiled.
+    void LogTileProfile(const TArray<FVoxelTileProfile>& Profiles, int32 TotalTiles)
+    {
+        FVoxelTileProfile Profile;
+
+        for (const FVoxelTileProfile& Batch : Profiles)
+        {
+            Profile.Add(Batch);
+        }
+
+        const VoxelSurfaceRaster::FRasterStats& Raster = Profile.Raster;
+
+        // Phase times are sums across workers, not frame wall time.
+        carla::log_warning("Voxel tile worker time (ms): zero=", FPlatformTime::ToMilliseconds64(Profile.ZeroCycles),
+            ", gather=", FPlatformTime::ToMilliseconds64(Profile.GatherCycles),
+            ", cull/sort=", FPlatformTime::ToMilliseconds64(Profile.CullCycles),
+            ", fetch=", FPlatformTime::ToMilliseconds64(Profile.FetchCycles),
+            ", raster=", FPlatformTime::ToMilliseconds64(Profile.RasterCycles),
+            ", deferred PhysX=", FPlatformTime::ToMilliseconds64(Profile.DeferredCycles),
+            ", primitive PhysX=", FPlatformTime::ToMilliseconds64(Profile.PrimitiveCycles),
+            ", ties=", FPlatformTime::ToMilliseconds64(Profile.TieCycles),
+            ", legacy fallback=", FPlatformTime::ToMilliseconds64(Profile.FallbackCycles),
+            ", total=", FPlatformTime::ToMilliseconds64(Profile.TotalCycles),
+            ", slowest tile=", FPlatformTime::ToMilliseconds64(Profile.SlowestCycles));
+
+        carla::log_warning("Voxel tile counts: tiles=", Profile.Tiles, "/", TotalTiles,
+            ", legacy fallback tiles=", Profile.FallbackTiles,
+            ", candidates=", Profile.Candidates,
+            ", meshes=", Profile.MeshCandidates,
+            ", primitives=", Profile.PrimitiveCandidates,
+            ", triangles=", Raster.Triangles,
+            ", degenerate=", Raster.Degenerate,
+            ", index regrowths=", Profile.Regrowths);
+
+        carla::log_warning("Voxel tile voxel counts: visited=", Raster.Visited,
+            ", closed=", Raster.Closed,
+            ", gated=", Raster.Gated,
+            ", overlap=", Raster.Overlaps,
+            ", uncertain=", Raster.Uncertain,
+            ", outside=", Raster.Outside,
+            ", deferred queries=", Raster.DeferredQueries,
+            ", deferred hits=", Raster.DeferredHits,
+            ", bricks=", Raster.Bricks,
+            ", culled bricks=", Raster.CulledBricks,
+            ", primitive queries=", Raster.PrimitiveQueries,
+            ", primitive hits=", Raster.PrimitiveHits,
+            ", ties=", Profile.Ties);
+    }
 }
 
 TMap<int32, FLinearColor> AVoxelDetectionSensor::ColorMap = AVoxelDetectionSensor::CreateColorMap();
@@ -956,6 +1584,18 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     OracleStride.RecommendedValues = { TEXT("0") };
     OracleStride.bRestrictToRecommended = false;
 
+    FActorVariation UseSurfaceRaster;
+    UseSurfaceRaster.Id = TEXT("use_surface_raster");
+    UseSurfaceRaster.Type = EActorAttributeType::Bool;
+    UseSurfaceRaster.RecommendedValues = { TEXT("False") };
+    UseSurfaceRaster.bRestrictToRecommended = false;
+
+    FActorVariation FootprintPadding;
+    FootprintPadding.Id = TEXT("footprint_padding");
+    FootprintPadding.Type = EActorAttributeType::Int;
+    FootprintPadding.RecommendedValues = { TEXT("0") };
+    FootprintPadding.bRestrictToRecommended = false;
+
     Definition.Variations.Append(
         {
             Range,
@@ -971,6 +1611,8 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
             ChunkZ,
             ValidateOutput,
             OracleStride,
+            UseSurfaceRaster,
+            FootprintPadding,
         }
     );
 
@@ -1010,6 +1652,12 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 
     // Zero disables the comparison with the original per-voxel query.
     OracleStride = FMath::Max(0, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("oracle_stride", Description.Variations, 0));
+
+    // With the surface raster, chunk_x, chunk_y and chunk_z give the tile size.
+    UseSurfaceRaster = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_surface_raster", Description.Variations, false);
+
+    // Padding only grows footprints and must not change the output.
+    FootprintPadding = FMath::Max(0, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("footprint_padding", Description.Variations, 0));
 
     // Pre-calculate grid dimensions.
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
@@ -1089,9 +1737,18 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const double ParallelStart = FPlatformTime::Seconds();
 
+    const FIntVector ChunkSize(ChunkX, ChunkY, ChunkZ);
+
+    const FIntVector TileSize = GetTileSize(ChunkSize);
+
+    // Configurations the raster cannot handle exactly keep the chunked path.
+    const bool bSurfaceRaster = UseSurfaceRaster && Frame.SupportsRaster();
+
     TArray<FVoxelProfile> Profiles;
 
-    const int32 TotalChunks = RunChunks(Frame, FIntVector(ChunkX, ChunkY, ChunkZ), Labels, ShowCalculationTime, Profiles);
+    TArray<FVoxelTileProfile> TileProfiles;
+
+    const int32 TotalRegions = bSurfaceRaster ? RunTiles(Frame, TileSize, FootprintPadding, Labels, ShowCalculationTime, TileProfiles) : RunChunks(Frame, ChunkSize, Labels, ShowCalculationTime, Profiles);
 
     const double ParallelEnd = FPlatformTime::Seconds();
 
@@ -1142,7 +1799,15 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     if (ShowCalculationTime)
     {
-        carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms (chunks: ", TotalChunks, ", batches: ", Profiles.Num(), ")");
+        if (bSurfaceRaster)
+        {
+            carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms (tiles: ", TotalRegions,
+                " of ", TileSize.X, "x", TileSize.Y, "x", TileSize.Z, ", batches: ", TileProfiles.Num(), ")");
+        }
+        else
+        {
+            carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms (chunks: ", TotalRegions, ", batches: ", Profiles.Num(), ")");
+        }
 
         carla::log_warning("Voxel wall time (ms): setup=", 1000.0 * (ParallelStart - StartTime),
             ", parallel=", 1000.0 * (ParallelEnd - ParallelStart),
@@ -1150,48 +1815,13 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
             ", debug=", 1000.0 * (SendStart - ValidateEnd),
             ", send=", 1000.0 * (EndTime - SendStart));
 
-        FVoxelProfile Profile;
-
-        for (const FVoxelProfile& Batch : Profiles)
+        if (bSurfaceRaster)
         {
-            Profile.GatherCycles += Batch.GatherCycles;
-            Profile.CullCycles += Batch.CullCycles;
-            Profile.TriangleCycles += Batch.TriangleCycles;
-            Profile.FineCycles += Batch.FineCycles;
-            Profile.PhysXCycles += Batch.PhysXCycles;
-            Profile.TieCycles += Batch.TieCycles;
-            Profile.Regions += Batch.Regions;
-            Profile.Candidates += Batch.Candidates;
-            Profile.Chunks += Batch.Chunks;
-            Profile.Voxels += Batch.Voxels;
-            Profile.Tests += Batch.Tests;
-            Profile.PhysXQueries += Batch.PhysXQueries;
-            Profile.Ties += Batch.Ties;
-            Profile.CachedMeshes += Batch.CachedMeshes;
-            Profile.CachedTriangles += Batch.CachedTriangles;
-            Profile.TriangleQueries += Batch.TriangleQueries;
-            Profile.BoundaryFallbacks += Batch.BoundaryFallbacks;
+            LogTileProfile(TileProfiles, TotalRegions);
         }
-
-        // These are sampled sums across workers, not frame wall time. Fine time is split into triangle tests and per-voxel PhysX queries; both exclude ties.
-        carla::log_warning("Voxel sampled worker time (ms): gather=", FPlatformTime::ToMilliseconds64(Profile.GatherCycles),
-            ", cull/sort=", FPlatformTime::ToMilliseconds64(Profile.CullCycles),
-            ", triangle cache=", FPlatformTime::ToMilliseconds64(Profile.TriangleCycles),
-            ", fine triangles=", FPlatformTime::ToMilliseconds64(Profile.FineCycles - Profile.TieCycles - Profile.PhysXCycles),
-            ", fine PhysX=", FPlatformTime::ToMilliseconds64(Profile.PhysXCycles),
-            ", ties=", FPlatformTime::ToMilliseconds64(Profile.TieCycles));
-
-        carla::log_warning("Voxel sampled counts: regions=", Profile.Regions, "/", TotalChunks,
-            ", candidates=", Profile.Candidates,
-            ", active chunks=", Profile.Chunks,
-            ", visited voxels=", Profile.Voxels,
-            ", candidate tests=", Profile.Tests,
-            ", PhysX voxel queries=", Profile.PhysXQueries,
-            ", tie queries=", Profile.Ties);
-
-        carla::log_warning("Voxel sampled triangle counts: cached meshes=", Profile.CachedMeshes,
-            ", cached triangles=", Profile.CachedTriangles,
-            ", reused queries=", Profile.TriangleQueries,
-            ", boundary fallbacks=", Profile.BoundaryFallbacks);
+        else
+        {
+            LogChunkProfile(Profiles, TotalRegions);
+        }
     }
 }
