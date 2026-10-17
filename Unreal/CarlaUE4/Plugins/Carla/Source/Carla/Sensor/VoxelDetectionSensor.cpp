@@ -952,7 +952,8 @@ namespace
 
         const int32 BrickSize[3] = {ReferenceChunkSize.X, ReferenceChunkSize.Y, ReferenceChunkSize.Z};
 
-        struct FDegenerateTriangle
+        // Separating axes are only built for triangles that can still change a label.
+        struct FFetchedTriangle
         {
             physx::PxTriangle Triangle;
             float PositionError;
@@ -962,9 +963,7 @@ namespace
 
         Indices.SetNumUninitialized(4096);
 
-        TArray<VoxelTriangleOverlap::FTriangle> Triangles;
-
-        TArray<FDegenerateTriangle> DegenerateTriangles;
+        TArray<FFetchedTriangle> Triangles;
 
         VoxelSurfaceRaster::FVoxelSet Deferred;
 
@@ -1030,38 +1029,20 @@ namespace
 
             Triangles.Reset();
 
-            DegenerateTriangles.Reset();
-
             const physx::PxTransform MeshToTile = TileFrame.transformInv(Candidate.Pose);
+
+            Triangles.SetNumUninitialized(Count);
 
             for (physx::PxU32 Index = 0; Index < Count; ++Index)
             {
-                physx::PxTriangle Triangle;
-
-                const float PositionError = VoxelTriangleOverlap::FetchTriangle(Mesh, Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Triangle);
-
-                const VoxelTriangleOverlap::FTriangle Prepared = VoxelTriangleOverlap::MakeTriangle(Triangle, Frame.VoxelHalfExtent, PositionError);
-
-                if (Prepared.Degenerate)
-                {
-                    DegenerateTriangles.Add(FDegenerateTriangle{Triangle, PositionError});
-                }
-                else
-                {
-                    Triangles.Add(Prepared);
-                }
+                Triangles[Index].PositionError = VoxelTriangleOverlap::FetchTriangle(Mesh, Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Triangles[Index].Triangle);
             }
 
             Lap(Profile.FetchCycles);
 
-            for (const VoxelTriangleOverlap::FTriangle& Triangle : Triangles)
+            for (const FFetchedTriangle& Fetched : Triangles)
             {
-                VoxelSurfaceRaster::RasterizeTriangle<bProfile>(Triangle, Lattice, Env, Profile.Raster);
-            }
-
-            for (const FDegenerateTriangle& Degenerate : DegenerateTriangles)
-            {
-                VoxelSurfaceRaster::RasterizeDegenerate<bProfile>(Degenerate.Triangle, Degenerate.PositionError, Frame.VoxelHalfExtent, Lattice, Env, Profile.Raster);
+                VoxelSurfaceRaster::RasterizeMeshTriangle<bProfile>(Fetched.Triangle, Fetched.PositionError, Frame.VoxelHalfExtent, Lattice, Env, Profile.Raster);
             }
 
             Lap(Profile.RasterCycles);
@@ -1473,12 +1454,14 @@ namespace
             ", candidates=", Profile.Candidates,
             ", meshes=", Profile.MeshCandidates,
             ", primitives=", Profile.PrimitiveCandidates,
-            ", triangles=", Raster.Triangles,
+            ", rasterized triangles=", Raster.Triangles,
+            ", skipped closed triangles=", Raster.Skipped,
             ", degenerate=", Raster.Degenerate,
             ", index regrowths=", Profile.Regrowths);
 
         carla::log_warning("Voxel tile voxel counts: visited=", Raster.Visited,
             ", closed=", Raster.Closed,
+            ", certain=", Raster.Certain,
             ", gated=", Raster.Gated,
             ", overlap=", Raster.Overlaps,
             ", uncertain=", Raster.Uncertain,

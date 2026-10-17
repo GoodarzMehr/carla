@@ -210,7 +210,7 @@ static void buildTile(const Tile& tile, double padding, TileEnv& env)
 
 struct RasterTotals
 {
-    unsigned tiles = 0, voxels = 0, hits = 0;
+    unsigned tiles = 0, voxels = 0, hits = 0, certain = 0;
     VoxelSurfaceRaster::FRasterStats stats;
 };
 
@@ -259,24 +259,43 @@ static bool rasterMesh(const Tile& tile, const PxTriangleMeshGeometry& geometry,
         const float error = VoxelTriangleOverlap::FetchTriangle(geometry, meshPose, env.tileFrame, meshToTile,
             indices[i], halfExtent, triangle);
         const VoxelTriangleOverlap::FTriangle prepared = VoxelTriangleOverlap::MakeTriangle(triangle, halfExtent, error);
-        if (prepared.Degenerate)
+        if (!prepared.Degenerate)
         {
-            VoxelSurfaceRaster::RasterizeDegenerate<true>(triangle, error, halfExtent, env.lattice, env, totals.stats);
-            continue;
-        }
-        std::fill(visited.begin(), visited.end(), false);
-        VoxelSurfaceRaster::ForEachTriangleVoxel(prepared, env.lattice, [&](int x, int y, int z)
-        {
-            visited[env.index(x, y, z)] = true;
-        });
-        for (size_t voxel = 0; voxel < env.world.size(); ++voxel)
-            if (!visited[voxel] && VoxelTriangleOverlap::Test(prepared, env.tileFrame.transformInv(env.world[voxel])) !=
-                VoxelTriangleOverlap::EResult::Outside)
+            // The footprint and the early-out box must both hold every voxel where Test is not Outside.
+            std::fill(visited.begin(), visited.end(), false);
+            bool sound = true;
+            VoxelSurfaceRaster::ForEachTriangleVoxel(prepared, env.lattice, halfExtent, [&](int x, int y, int z, bool certain)
             {
-                fprintf(stderr, "Incomplete footprint: triangle=%u voxel=%zu\n", indices[i], voxel);
-                return false;
-            }
-        VoxelSurfaceRaster::RasterizeTriangle<true>(prepared, env.lattice, env, totals.stats);
+                const int voxel = env.index(x, y, z);
+                visited[voxel] = true;
+                PxVec3 center;
+                // Certain voxels skip the test, so the test and the gate must agree with them.
+                if (certain && (!env.GetCenter(x, y, z, center) || VoxelTriangleOverlap::Test(prepared, center) !=
+                    VoxelTriangleOverlap::EResult::Overlap))
+                {
+                    fprintf(stderr, "Unsound certain voxel: triangle=%u voxel=%d\n", indices[i], voxel);
+                    sound = false;
+                }
+                totals.certain += certain;
+            });
+            if (!sound) return false;
+            const VoxelSurfaceRaster::FIndexBox box = VoxelSurfaceRaster::GetTriangleBox(triangle, error, halfExtent, env.lattice);
+            for (int x = 0; x < tile.size[0]; ++x)
+                for (int y = 0; y < tile.size[1]; ++y)
+                    for (int z = 0; z < tile.size[2]; ++z)
+                    {
+                        const int voxel = env.index(x, y, z);
+                        const bool inBox = x >= box.Begin[0] && x < box.End[0] && y >= box.Begin[1] &&
+                            y < box.End[1] && z >= box.Begin[2] && z < box.End[2];
+                        if ((!visited[voxel] || !inBox) && VoxelTriangleOverlap::Test(prepared,
+                            env.tileFrame.transformInv(env.world[voxel])) != VoxelTriangleOverlap::EResult::Outside)
+                        {
+                            fprintf(stderr, "Incomplete %s: triangle=%u voxel=%d\n", inBox ? "footprint" : "box", indices[i], voxel);
+                            return false;
+                        }
+                    }
+        }
+        VoxelSurfaceRaster::RasterizeMeshTriangle<true>(triangle, error, halfExtent, env.lattice, env, totals.stats);
     }
     VoxelSurfaceRaster::ResolveDeferred<true>(env.deferred, env.lattice, env, totals.stats);
     return compareTile(env, "mesh", totals);
@@ -350,6 +369,7 @@ static bool checkClip()
         lattice.Size[0] = 1 + random() % 20;
         lattice.Pivot[0] = value(random);
         lattice.Step[0] = (random() % 2 ? 1 : -1) * (.1 + std::abs(value(random)) / 10);
+        lattice.InverseStep[0] = 1.0 / lattice.Step[0];
         double low = value(random), high = value(random);
         if (trial % 7 == 0) std::swap(low, high);
         if (trial % 11 == 0) low = -INFINITY;
@@ -413,11 +433,13 @@ static bool checkRaster(PxPhysics& physics, const std::vector<PxTriangleMesh*>& 
     for (PxTriangleMesh* mesh : meshes)
     for (const PxVec3 scale : {PxVec3(1), PxVec3(.6f,1.7f,.8f), PxVec3(-1,1.2f,.7f)})
     for (const PxVec3 offset : {PxVec3(0), PxVec3(100000,-80000,120000)})
-    for (int rotation = 0; rotation < 2; ++rotation)
+    for (int rotation = 0; rotation < 3; ++rotation)
     for (int variant = 0; variant < 4; ++variant)
     {
-        const PxQuat meshRotation = rotation ? PxQuat(.35f, PxVec3(1,0,0)) : PxQuat(PxIdentity);
-        const PxQuat sensorRotation = rotation ? PxQuat(.6457718f, PxVec3(0,0,1)) *
+        // Rotation 2 turns the mesh upside down, so triangles face away from the dominant axis.
+        const PxQuat meshRotation = rotation == 2 ? PxQuat(2.9f, PxVec3(1,0,0)) :
+            rotation ? PxQuat(.35f, PxVec3(1,0,0)) : PxQuat(PxIdentity);
+        const PxQuat sensorRotation = rotation == 1 ? PxQuat(.6457718f, PxVec3(0,0,1)) *
             PxQuat(.1745329f, PxVec3(0,1,0)) : PxQuat(PxIdentity);
         const PxTriangleMeshGeometry geometry(mesh, PxMeshScale(scale, PxQuat(.2f, PxVec3(0,0,1))));
         const PxTransform meshPose(offset, meshRotation);
@@ -456,12 +478,13 @@ static bool checkRaster(PxPhysics& physics, const std::vector<PxTriangleMesh*>& 
         }
     }
     printf("PASS: raster matched PhysX on %u tiles (%u voxels, %u hits); visited=%llu tests=%llu uncertain=%llu "
-        "deferred=%llu primitive queries=%llu culled bricks=%llu degenerate=%llu; %.0f ms\n",
+        "deferred=%llu primitive queries=%llu culled bricks=%llu degenerate=%llu skipped=%llu certain=%llu (%u checked); %.0f ms\n",
         totals.tiles, totals.voxels, totals.hits, (unsigned long long)totals.stats.Visited,
         (unsigned long long)(totals.stats.Overlaps + totals.stats.Uncertain + totals.stats.Outside),
         (unsigned long long)totals.stats.Uncertain, (unsigned long long)totals.stats.DeferredQueries,
         (unsigned long long)totals.stats.PrimitiveQueries, (unsigned long long)totals.stats.CulledBricks,
-        (unsigned long long)totals.stats.Degenerate,
+        (unsigned long long)totals.stats.Degenerate, (unsigned long long)totals.stats.Skipped,
+        (unsigned long long)totals.stats.Certain, totals.certain,
         std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count());
     return true;
 }

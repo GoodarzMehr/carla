@@ -43,6 +43,7 @@ namespace VoxelSurfaceRaster
     {
         double Pivot[3] = {0.0, 0.0, 0.0};
         double Step[3] = {0.0, 0.0, 0.0};
+        double InverseStep[3] = {0.0, 0.0, 0.0};
         int32_t Size[3] = {0, 0, 0};
         double Margin = 0.0;
 
@@ -78,7 +79,7 @@ namespace VoxelSurfaceRaster
 
             for (int Axis = 0; Axis < 3; ++Axis)
             {
-                bValid = bValid && std::isfinite(Pivot[Axis]) && std::isfinite(Step[Axis]) && Step[Axis] != 0.0 && Size[Axis] > 0;
+                bValid = bValid && std::isfinite(Pivot[Axis]) && std::isfinite(Step[Axis]) && std::isfinite(InverseStep[Axis]) && Step[Axis] != 0.0 && Size[Axis] > 0;
             }
 
             return bValid;
@@ -87,8 +88,8 @@ namespace VoxelSurfaceRaster
         // Narrow [Begin, End) to the voxels whose approximate center along Axis lies in [Low, High].
         void Clip(int Axis, double Low, double High, int32_t& Begin, int32_t& End) const
         {
-            double First = (Low - Pivot[Axis]) / Step[Axis];
-            double Last = (High - Pivot[Axis]) / Step[Axis];
+            double First = (Low - Pivot[Axis]) * InverseStep[Axis];
+            double Last = (High - Pivot[Axis]) * InverseStep[Axis];
 
             if (Step[Axis] < 0.0)
             {
@@ -103,17 +104,33 @@ namespace VoxelSurfaceRaster
                 return;
             }
 
-            First = std::ceil(First);
-            Last = std::floor(Last) + 1.0;
-
+            // Rounding by truncation, only on values already inside the range: std::ceil and std::floor are library calls without SSE4.1.
             if (First > Begin)
             {
-                Begin = First < End ? int32_t(First) : End;
+                if (First < End)
+                {
+                    const int32_t Truncated = int32_t(First);
+
+                    Begin = Truncated < First ? Truncated + 1 : Truncated;
+                }
+                else
+                {
+                    Begin = End;
+                }
             }
 
-            if (Last < End)
+            if (Last + 1.0 < End)
             {
-                End = Last > Begin ? int32_t(Last) : Begin;
+                if (Last + 1.0 > Begin)
+                {
+                    const int32_t Truncated = int32_t(Last);
+
+                    End = (Truncated > Last ? Truncated - 1 : Truncated) + 1;
+                }
+                else
+                {
+                    End = Begin;
+                }
             }
         }
     };
@@ -131,6 +148,7 @@ namespace VoxelSurfaceRaster
         {
             Lattice.Pivot[Axis] = Pivot[Axis];
             Lattice.Step[Axis] = Step[Axis];
+            Lattice.InverseStep[Axis] = 1.0 / Step[Axis];
             Lattice.Size[Axis] = Size[Axis];
         }
 
@@ -259,8 +277,10 @@ namespace VoxelSurfaceRaster
     struct FRasterStats
     {
         uint64_t Triangles = 0;
+        uint64_t Skipped = 0;
         uint64_t Degenerate = 0;
         uint64_t Visited = 0;
+        uint64_t Certain = 0;
         uint64_t Closed = 0;
         uint64_t Gated = 0;
         uint64_t Overlaps = 0;
@@ -276,8 +296,10 @@ namespace VoxelSurfaceRaster
         void Add(const FRasterStats& Other)
         {
             Triangles += Other.Triangles;
+            Skipped += Other.Skipped;
             Degenerate += Other.Degenerate;
             Visited += Other.Visited;
+            Certain += Other.Certain;
             Closed += Other.Closed;
             Gated += Other.Gated;
             Overlaps += Other.Overlaps;
@@ -307,29 +329,36 @@ namespace VoxelSurfaceRaster
         }
     }
 
-    // Distance by which a triangle footprint grows to cover the lattice margin, rounding in VoxelTriangleOverlap::Test and padding.
-    inline double GetTrianglePad(const VoxelTriangleOverlap::FTriangle& Triangle, const FLattice& Lattice)
+    // Visit every voxel where VoxelTriangleOverlap::Test of a non-degenerate triangle may return anything but Outside.
+    // Test returns Outside as soon as one axis separates by more than its error, so each subset of axes bounds the footprint:
+    // the three box axes give an index box, the 2D edge axes clip rows across the dominant normal axis D, and the plane axis
+    // gives the range along D. Visit(X, Y, Z, bCertain) also learns which voxels certainly give Overlap: those whose exact
+    // center projects into the triangle along D and lies within the half extent, less more than the error band, of the
+    // triangle along D. The triangle point straight along D then lies in the voxel box shrunk by that margin on every axis,
+    // so every axis passes by more than its error. That point also lies in the candidate's inflated world bounds.
+    template <typename FVisit>
+    void ForEachTriangleVoxel(const VoxelTriangleOverlap::FTriangle& Triangle, const FLattice& Lattice, const physx::PxVec3& HalfExtent, FVisit&& Visit)
     {
         double Magnitude = 0.0;
+
+        double MaxError = 0.0;
 
         for (physx::PxU32 Index = 0; Index < Triangle.NumAxes; ++Index)
         {
             const VoxelTriangleOverlap::FAxis& Axis = Triangle.Axes[Index];
 
             Magnitude = std::max(Magnitude, std::max(std::abs(double(Axis.Minimum)), std::abs(double(Axis.Maximum))) + Axis.Error);
+
+            MaxError = std::max(MaxError, double(Axis.Error));
         }
 
-        return Lattice.Margin + Lattice.Padding + 8.0 * FLT_EPSILON * (Lattice.Magnitude + Magnitude);
-    }
+        // Bounds rounding in VoxelTriangleOverlap::Test and in the projections recovered below.
+        const double Slack = 8.0 * FLT_EPSILON * (Lattice.Magnitude + Magnitude);
 
-    // Visit every voxel where VoxelTriangleOverlap::Test of a non-degenerate triangle may return anything but Outside.
-    // Test returns Outside as soon as one axis separates by more than its error, so each subset of axes bounds the footprint:
-    // the three box axes give an index box, the 2D edge axes clip rows across the dominant normal axis, and the plane axis
-    // gives the range along it.
-    template <typename FVisit>
-    void ForEachTriangleVoxel(const VoxelTriangleOverlap::FTriangle& Triangle, const FLattice& Lattice, FVisit&& Visit)
-    {
-        const double Pad = GetTrianglePad(Triangle, Lattice);
+        const double Pad = Lattice.Margin + Lattice.Padding + Slack;
+
+        // Inner margin for certain voxels: approximate centers are within Lattice.Margin of the exact ones.
+        const double Inset = Lattice.Margin + Slack;
 
         FIndexBox Box = Lattice.Full();
 
@@ -358,13 +387,26 @@ namespace VoxelSurfaceRaster
         const double PlaneLow = double(Plane.Minimum) - Plane.Error - Pad;
         const double PlaneHigh = double(Plane.Maximum) + Plane.Error + Pad;
 
+        // The dominant component holds at least a third of the unit L1 normal, so this is finite.
+        const double InverseNormal = 1.0 / Normal[D];
+
+        // Range of the triangle's own projection on the normal, and how far along D a certain center may lie from the triangle.
+        const double PlaneRadius = HalfExtent.x * std::abs(double(Normal.x)) + HalfExtent.y * std::abs(double(Normal.y)) + HalfExtent.z * std::abs(double(Normal.z));
+
+        const double Depth = std::abs(double(Normal[D])) * (HalfExtent[D] - MaxError - 2.0 * Slack) - Inset;
+
+        const double CertainPlaneLow = double(Plane.Maximum) - PlaneRadius - Depth;
+        const double CertainPlaneHigh = double(Plane.Minimum) + PlaneRadius + Depth;
+
         // Edge axes perpendicular to D bound the triangle's projection onto the U-V plane.
         struct FEdge
         {
             double U;
-            double V;
+            double InverseV;
             double Low;
             double High;
+            double CertainLow;
+            double CertainHigh;
         };
 
         FEdge Edges[9];
@@ -377,9 +419,69 @@ namespace VoxelSurfaceRaster
 
             if (Axis.Direction[D] == 0.0f)
             {
-                Edges[NumEdges++] = FEdge{Axis.Direction[U], Axis.Direction[V], double(Axis.Minimum) - Axis.Error - Pad, double(Axis.Maximum) + Axis.Error + Pad};
+                const double InverseV = Axis.Direction[V] == 0.0f ? 0.0 : 1.0 / Axis.Direction[V];
+
+                const double Radius = HalfExtent[U] * std::abs(double(Axis.Direction[U])) + HalfExtent[V] * std::abs(double(Axis.Direction[V]));
+
+                Edges[NumEdges++] = FEdge{
+                    Axis.Direction[U],
+                    InverseV,
+                    double(Axis.Minimum) - Axis.Error - Pad,
+                    double(Axis.Maximum) + Axis.Error + Pad,
+                    double(Axis.Minimum) + Radius + Inset,
+                    double(Axis.Maximum) - Radius - Inset
+                };
             }
         }
+
+        // The three edges of the projected triangle are always among these axes; without them nothing is certain.
+        const bool bCertainPossible = Depth > 0.0 && NumEdges >= 3;
+
+        // Narrow [Begin, End) along V to the row voxels whose edge projections lie in [Low, High] for every edge.
+        const auto ClipRow = [&](double CenterU, bool bCertain, int32_t& Begin, int32_t& End)
+        {
+            for (int Edge = 0; Edge < NumEdges && Begin < End; ++Edge)
+            {
+                const double Offset = Edges[Edge].U * CenterU;
+
+                const double EdgeLow = bCertain ? Edges[Edge].CertainLow : Edges[Edge].Low;
+                const double EdgeHigh = bCertain ? Edges[Edge].CertainHigh : Edges[Edge].High;
+
+                if (Edges[Edge].InverseV == 0.0)
+                {
+                    if (!(Offset >= EdgeLow && Offset <= EdgeHigh))
+                    {
+                        End = Begin;
+                    }
+                }
+                else
+                {
+                    double Low = (EdgeLow - Offset) * Edges[Edge].InverseV;
+                    double High = (EdgeHigh - Offset) * Edges[Edge].InverseV;
+
+                    if (Edges[Edge].InverseV < 0.0)
+                    {
+                        std::swap(Low, High);
+                    }
+
+                    Lattice.Clip(V, Low, High, Begin, End);
+                }
+            }
+        };
+
+        // Narrow [Begin, End) along D to the column voxels whose normal projection lies in [Low, High].
+        const auto ClipColumn = [&](double Offset, double Low, double High, int32_t& Begin, int32_t& End)
+        {
+            double First = (Low - Offset) * InverseNormal;
+            double Last = (High - Offset) * InverseNormal;
+
+            if (InverseNormal < 0.0)
+            {
+                std::swap(First, Last);
+            }
+
+            Lattice.Clip(D, First, Last, Begin, End);
+        };
 
         int32_t Index[3];
 
@@ -390,51 +492,40 @@ namespace VoxelSurfaceRaster
             int32_t BeginV = Box.Begin[V];
             int32_t EndV = Box.End[V];
 
-            for (int Edge = 0; Edge < NumEdges && BeginV < EndV; ++Edge)
+            ClipRow(CenterU, false, BeginV, EndV);
+
+            int32_t CertainBeginV = BeginV;
+            int32_t CertainEndV = BeginV;
+
+            if (bCertainPossible && BeginV < EndV)
             {
-                const double Offset = Edges[Edge].U * CenterU;
+                CertainEndV = EndV;
 
-                if (Edges[Edge].V == 0.0)
-                {
-                    if (!(Offset >= Edges[Edge].Low && Offset <= Edges[Edge].High))
-                    {
-                        EndV = BeginV;
-                    }
-                }
-                else
-                {
-                    double Low = (Edges[Edge].Low - Offset) / Edges[Edge].V;
-                    double High = (Edges[Edge].High - Offset) / Edges[Edge].V;
-
-                    if (Edges[Edge].V < 0.0)
-                    {
-                        std::swap(Low, High);
-                    }
-
-                    Lattice.Clip(V, Low, High, BeginV, EndV);
-                }
+                ClipRow(CenterU, true, CertainBeginV, CertainEndV);
             }
 
             for (Index[V] = BeginV; Index[V] < EndV; ++Index[V])
             {
                 const double Offset = Normal[U] * CenterU + Normal[V] * Lattice.Center(V, Index[V]);
 
-                double Low = (PlaneLow - Offset) / Normal[D];
-                double High = (PlaneHigh - Offset) / Normal[D];
-
-                if (Normal[D] < 0.0f)
-                {
-                    std::swap(Low, High);
-                }
-
                 int32_t BeginD = Box.Begin[D];
                 int32_t EndD = Box.End[D];
 
-                Lattice.Clip(D, Low, High, BeginD, EndD);
+                ClipColumn(Offset, PlaneLow, PlaneHigh, BeginD, EndD);
+
+                int32_t CertainBeginD = BeginD;
+                int32_t CertainEndD = BeginD;
+
+                if (Index[V] >= CertainBeginV && Index[V] < CertainEndV)
+                {
+                    CertainEndD = EndD;
+
+                    ClipColumn(Offset, CertainPlaneLow, CertainPlaneHigh, CertainBeginD, CertainEndD);
+                }
 
                 for (Index[D] = BeginD; Index[D] < EndD; ++Index[D])
                 {
-                    Visit(Index[0], Index[1], Index[2]);
+                    Visit(Index[0], Index[1], Index[2], Index[D] >= CertainBeginD && Index[D] < CertainEndD);
                 }
             }
         }
@@ -442,14 +533,14 @@ namespace VoxelSurfaceRaster
 
     // Test one triangle of the current candidate against its footprint.
     template <bool bStats, typename FEnv>
-    void RasterizeTriangle(const VoxelTriangleOverlap::FTriangle& Triangle, const FLattice& Lattice, FEnv& Env, FRasterStats& Stats)
+    void RasterizeTriangle(const VoxelTriangleOverlap::FTriangle& Triangle, const physx::PxVec3& HalfExtent, const FLattice& Lattice, FEnv& Env, FRasterStats& Stats)
     {
         if (bStats)
         {
             ++Stats.Triangles;
         }
 
-        ForEachTriangleVoxel(Triangle, Lattice, [&](int32_t X, int32_t Y, int32_t Z)
+        ForEachTriangleVoxel(Triangle, Lattice, HalfExtent, [&](int32_t X, int32_t Y, int32_t Z, bool bCertain)
         {
             if (bStats)
             {
@@ -462,6 +553,18 @@ namespace VoxelSurfaceRaster
                 {
                     ++Stats.Closed;
                 }
+
+                return;
+            }
+
+            if (bCertain)
+            {
+                if (bStats)
+                {
+                    ++Stats.Certain;
+                }
+
+                Env.Hit(X, Y, Z);
 
                 return;
             }
@@ -548,6 +651,78 @@ namespace VoxelSurfaceRaster
                 Env.Defer(X, Y, Z);
             }
         });
+    }
+
+    // Index box around every voxel where a mesh triangle can matter: where VoxelTriangleOverlap::Test may return anything but Outside, or,
+    // for a degenerate triangle, where RasterizeDegenerate defers. Cheaper than MakeTriangle, so closed triangles can be skipped first.
+    inline FIndexBox GetTriangleBox(const physx::PxTriangle& Triangle, float PositionError, const physx::PxVec3& HalfExtent, const FLattice& Lattice)
+    {
+        FIndexBox Box = Lattice.Full();
+
+        if (!Triangle.verts[0].isFinite() || !Triangle.verts[1].isFinite() || !Triangle.verts[2].isFinite() || !HalfExtent.isFinite() || !physx::PxIsFinite(PositionError))
+        {
+            return Box;
+        }
+
+        const double VertexMagnitude = std::max(VoxelTriangleOverlap::MaxAbs(Triangle.verts[0]), std::max(VoxelTriangleOverlap::MaxAbs(Triangle.verts[1]), VoxelTriangleOverlap::MaxAbs(Triangle.verts[2])));
+
+        const double HalfMagnitude = VoxelTriangleOverlap::MaxAbs(HalfExtent);
+
+        // At least twice the box-axis error of MakeTriangle and the degenerate band.
+        const double Error = 2.0 * std::abs(PositionError) + 128.0 * FLT_EPSILON * (VertexMagnitude + HalfMagnitude + std::abs(PositionError));
+
+        const double Pad = Lattice.Margin + Lattice.Padding + 8.0 * FLT_EPSILON * (Lattice.Magnitude + VertexMagnitude + HalfMagnitude + Error);
+
+        for (int Axis = 0; Axis < 3; ++Axis)
+        {
+            const double Low = std::min(Triangle.verts[0][Axis], std::min(Triangle.verts[1][Axis], Triangle.verts[2][Axis]));
+            const double High = std::max(Triangle.verts[0][Axis], std::max(Triangle.verts[1][Axis], Triangle.verts[2][Axis]));
+
+            Lattice.Clip(Axis, Low - HalfExtent[Axis] - Error - Pad, High + HalfExtent[Axis] + Error + Pad, Box.Begin[Axis], Box.End[Axis]);
+        }
+
+        return Box;
+    }
+
+    // Rasterize one fetched mesh triangle of the current candidate, unless every voxel it can matter for is already closed.
+    template <bool bStats, typename FEnv>
+    void RasterizeMeshTriangle(const physx::PxTriangle& Triangle, float PositionError, const physx::PxVec3& HalfExtent, const FLattice& Lattice, FEnv& Env, FRasterStats& Stats)
+    {
+        const FIndexBox Box = GetTriangleBox(Triangle, PositionError, HalfExtent, Lattice);
+
+        bool bOpen = false;
+
+        for (int32_t X = Box.Begin[0]; X < Box.End[0] && !bOpen; ++X)
+        {
+            for (int32_t Y = Box.Begin[1]; Y < Box.End[1] && !bOpen; ++Y)
+            {
+                for (int32_t Z = Box.Begin[2]; Z < Box.End[2] && !bOpen; ++Z)
+                {
+                    bOpen = Env.IsOpen(X, Y, Z);
+                }
+            }
+        }
+
+        if (!bOpen)
+        {
+            if (bStats)
+            {
+                ++Stats.Skipped;
+            }
+
+            return;
+        }
+
+        const VoxelTriangleOverlap::FTriangle Prepared = VoxelTriangleOverlap::MakeTriangle(Triangle, HalfExtent, PositionError);
+
+        if (Prepared.Degenerate)
+        {
+            RasterizeDegenerate<bStats>(Triangle, PositionError, HalfExtent, Lattice, Env, Stats);
+        }
+        else
+        {
+            RasterizeTriangle<bStats>(Prepared, HalfExtent, Lattice, Env, Stats);
+        }
     }
 
     // Decide the deferred voxels of the current candidate that are still open with PhysX, then empty the set.

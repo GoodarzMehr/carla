@@ -16,6 +16,8 @@ Use a static scene with no other client advancing the world.
     python3 sweep_voxel_chunks.py --dry-run
     python3 sweep_voxel_chunks.py --port 18731 --output chunks.csv
     python3 sweep_voxel_chunks.py --chunk-x 4 8 16 --chunk-y 4 8 16 --chunk-z 2 4 8
+    python3 sweep_voxel_chunks.py --ground-offset -0.537 --attribute use_surface_raster=true \
+        --chunk-x 8 16 32 64 128 --chunk-y 8 16 32 64 128 --chunk-z 32 64 128
 
 Results are flushed to CSV after each child run. Ctrl+C stops the sweep and
 allows the active child to destroy its sensors and restore world settings.
@@ -75,7 +77,11 @@ def main():
     parser.add_argument('--preset', choices=('default', 'simbev'), default='simbev')
     parser.add_argument('--attribute', action='append', default=[], metavar='NAME=VALUE')
     parser.add_argument('--spawn-point', type=int, default=0)
-    parser.add_argument('--height', type=float, default=2.0)
+    placement = parser.add_mutually_exclusive_group()
+    placement.add_argument('--height', type=float, default=2.0)
+    placement.add_argument('--ground-offset', type=float, metavar='M',
+                           help='place the sensor so the ground sits at M meters in the sensor '
+                                'frame; forwarded to compare_voxel_detection.py')
     parser.add_argument('--yaw', type=float, default=0.0)
     parser.add_argument('--pitch', type=float, default=0.0)
     parser.add_argument('--roll', type=float, default=0.0)
@@ -116,7 +122,8 @@ def main():
     helper = Path(__file__).with_name('compare_voxel_detection.py')
     forwarded = ['--host', args.host, '--port', str(args.port), '--timeout', str(args.timeout),
                  '--preset', args.preset, '--json']
-    for name in ('spawn_point', 'height', 'yaw', 'pitch', 'roll'):
+    placement = 'height' if args.ground_offset is None else 'ground_offset'
+    for name in ('spawn_point', placement, 'yaw', 'pitch', 'roll'):
         forwarded.extend(['--' + name.replace('_', '-'), str(getattr(args, name))])
     for attribute in args.attribute + ['draw_debug=false', 'show_calculation_time=false']:
         forwarded.extend(['--attribute', attribute])

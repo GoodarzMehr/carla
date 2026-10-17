@@ -70,6 +70,20 @@ class TestVoxelChunkSweep(unittest.TestCase):
         self.assertEqual({(row['stage'], row['status']) for row in rows}, {('sweep', 'complete')})
         self.assertIn('Best tested chunks: 4x4x8', printed)
 
+    def test_ground_offset_is_forwarded_instead_of_height(self):
+        _, calls, _ = self.run_sweep(
+            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8', '--retest-top', '0',
+             '--ground-offset', '-0.537', '--attribute', 'use_surface_raster=true'],
+            result_for)
+        command = calls[0]
+        self.assertEqual(command[command.index('--ground-offset') + 1], '-0.537')
+        self.assertNotIn('--height', command)
+        self.assertIn('use_surface_raster=true', command)
+        _, calls, _ = self.run_sweep(
+            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8', '--retest-top', '0'], result_for)
+        self.assertEqual(calls[0][calls[0].index('--height') + 1], '2.0')
+        self.assertNotIn('--ground-offset', calls[0])
+
     def test_retest_changes_winner(self):
         def child(command):
             result = result_for(command)
