@@ -59,16 +59,16 @@ class TestVoxelChunkSweep(unittest.TestCase):
 
     def test_sweep_covers_unique_axis_product_with_baseline_first(self):
         rows, calls, printed = self.run_sweep(
-            ['--chunk-x', '2', '4', '4', '--chunk-y', '2', '4',
-             '--chunk-z', '1', '8', '8', '--retest-top', '0'],
+            ['--chunk-x', '16', '32', '32', '--chunk-y', '16', '32',
+             '--chunk-z', '64', '128', '128', '--retest-top', '0'],
             result_for)
         triples = [tuple(result_for(command)['chunks']) for command in calls]
-        expected = {(x, y, z) for x in (2, 4) for y in (2, 4) for z in (1, 8)}
-        self.assertEqual(triples[0], (4, 4, 8))
+        expected = {(x, y, z) for x in (16, 32) for y in (16, 32) for z in (64, 128)}
+        self.assertEqual(triples[0], (32, 32, 128))
         self.assertEqual(len(triples), len(expected))
         self.assertEqual(set(triples), expected)
         self.assertEqual({(row['stage'], row['status']) for row in rows}, {('sweep', 'complete')})
-        self.assertIn('Best tested chunks: 4x4x8', printed)
+        self.assertIn('Best tested chunks: 32x32x128', printed)
 
     def test_ground_offset_is_forwarded_instead_of_height(self):
         _, calls, _ = self.run_sweep(

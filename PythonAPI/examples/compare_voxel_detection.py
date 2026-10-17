@@ -103,7 +103,7 @@ def main():
     parser.add_argument('--frames', type=int, default=10)
     parser.add_argument('--warmup', type=int, default=2)
     parser.add_argument('--preset', choices=('default', 'simbev'), default='default',
-                        help='simbev: range 64 m, voxels 0.1 m, height -1..7 m, chunks 4x4x8')
+                        help='simbev: range 64 m, voxels 0.1 m, height -1..7 m, tiles 32x32x128')
     parser.add_argument('--json', action='store_true',
                         help='print a JSON result on the final line for sweep_voxel_chunks.py')
     parser.add_argument('--attribute', action='append', default=[], metavar='NAME=VALUE',
@@ -130,7 +130,7 @@ def main():
     if args.preset == 'simbev':
         attributes.update({'range': '64', 'voxel_size': '0.1',
                            'lower_limit': '-1', 'upper_limit': '7',
-                           'chunk_x': '4', 'chunk_y': '4', 'chunk_z': '8'})
+                           'chunk_x': '32', 'chunk_y': '32', 'chunk_z': '128'})
     for item in args.attribute:
         name, separator, value = item.partition('=')
         if not separator or not name or not value:

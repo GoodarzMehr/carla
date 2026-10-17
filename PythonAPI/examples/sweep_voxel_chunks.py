@@ -15,9 +15,11 @@ Use a static scene with no other client advancing the world.
 
     python3 sweep_voxel_chunks.py --dry-run
     python3 sweep_voxel_chunks.py --port 18731 --output chunks.csv
-    python3 sweep_voxel_chunks.py --chunk-x 4 8 16 --chunk-y 4 8 16 --chunk-z 2 4 8
-    python3 sweep_voxel_chunks.py --ground-offset -0.537 --attribute use_surface_raster=true \
-        --chunk-x 8 16 32 64 128 --chunk-y 8 16 32 64 128 --chunk-z 32 64 128
+    python3 sweep_voxel_chunks.py --ground-offset -0.537
+    python3 sweep_voxel_chunks.py --attribute use_surface_raster=false \
+        --chunk-x 2 4 8 16 --chunk-y 2 4 8 16 --chunk-z 2 4 8
+
+With the surface raster (the default) the chunk sizes are tile sizes.
 
 Results are flushed to CSV after each child run. Ctrl+C stops the sweep and
 allows the active child to destroy its sensors and restore world settings.
@@ -68,9 +70,9 @@ def run_child(command):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--chunk-x', nargs='+', type=power_of_two, default=[2, 4, 8, 16, 32, 64])
-    parser.add_argument('--chunk-y', nargs='+', type=power_of_two, default=[2, 4, 8, 16, 32, 64])
-    parser.add_argument('--chunk-z', nargs='+', type=power_of_two, default=[1, 2, 4, 8, 16])
+    parser.add_argument('--chunk-x', nargs='+', type=power_of_two, default=[8, 16, 32, 64, 128])
+    parser.add_argument('--chunk-y', nargs='+', type=power_of_two, default=[8, 16, 32, 64, 128])
+    parser.add_argument('--chunk-z', nargs='+', type=power_of_two, default=[32, 64, 128])
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=2000)
     parser.add_argument('--timeout', type=float, default=120.0)
@@ -111,7 +113,7 @@ def main():
     axes = [list(dict.fromkeys(axis)) for axis in (args.chunk_x, args.chunk_y, args.chunk_z)]
     triples = list(itertools.product(*axes))
     random.Random(args.seed).shuffle(triples)
-    baseline = (4, 4, 8)
+    baseline = (32, 32, 128)
     if baseline in triples:
         triples.remove(baseline)
         triples.insert(0, baseline)

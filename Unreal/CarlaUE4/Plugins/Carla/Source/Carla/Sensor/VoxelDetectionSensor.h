@@ -117,11 +117,11 @@ private:
     bool ShowCalculationTime = false;
     bool UseTraceComplex = true;
     bool ValidateOutput = false;
-    bool UseSurfaceRaster = false;
+    bool UseSurfaceRaster = true;
 
-    int32 ChunkX = 4;
-    int32 ChunkY = 4;
-    int32 ChunkZ = 8;
+    int32 ChunkX = 32;
+    int32 ChunkY = 32;
+    int32 ChunkZ = 128;
 
     int32 OracleStride = 0;
     int32 FootprintPadding = 0;

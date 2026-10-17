@@ -1540,19 +1540,19 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     FActorVariation ChunkX;
     ChunkX.Id = TEXT("chunk_x");
     ChunkX.Type = EActorAttributeType::Int;
-    ChunkX.RecommendedValues = { TEXT("4") };
+    ChunkX.RecommendedValues = { TEXT("32") };
     ChunkX.bRestrictToRecommended = false;
 
     FActorVariation ChunkY;
     ChunkY.Id = TEXT("chunk_y");
     ChunkY.Type = EActorAttributeType::Int;
-    ChunkY.RecommendedValues = { TEXT("4") };
+    ChunkY.RecommendedValues = { TEXT("32") };
     ChunkY.bRestrictToRecommended = false;
 
     FActorVariation ChunkZ;
     ChunkZ.Id = TEXT("chunk_z");
     ChunkZ.Type = EActorAttributeType::Int;
-    ChunkZ.RecommendedValues = { TEXT("8") };
+    ChunkZ.RecommendedValues = { TEXT("128") };
     ChunkZ.bRestrictToRecommended = false;
 
     FActorVariation ValidateOutput;
@@ -1570,7 +1570,7 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     FActorVariation UseSurfaceRaster;
     UseSurfaceRaster.Id = TEXT("use_surface_raster");
     UseSurfaceRaster.Type = EActorAttributeType::Bool;
-    UseSurfaceRaster.RecommendedValues = { TEXT("False") };
+    UseSurfaceRaster.RecommendedValues = { TEXT("True") };
     UseSurfaceRaster.bRestrictToRecommended = false;
 
     FActorVariation FootprintPadding;
@@ -1624,12 +1624,12 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 
     UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
 
-    // Chunks need at least one voxel per axis.
-    ChunkX = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_x", Description.Variations, 4));
+    // Chunks need at least one voxel per axis. The defaults are surface raster tiles; the chunked path is fastest at 4 x 4 x 8.
+    ChunkX = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_x", Description.Variations, 32));
 
-    ChunkY = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 4));
+    ChunkY = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_y", Description.Variations, 32));
 
-    ChunkZ = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 8));
+    ChunkZ = FMath::Max(1, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("chunk_z", Description.Variations, 128));
 
     ValidateOutput = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("validate_output", Description.Variations, false);
 
@@ -1637,7 +1637,7 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     OracleStride = FMath::Max(0, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("oracle_stride", Description.Variations, 0));
 
     // With the surface raster, chunk_x, chunk_y and chunk_z give the tile size.
-    UseSurfaceRaster = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_surface_raster", Description.Variations, false);
+    UseSurfaceRaster = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_surface_raster", Description.Variations, true);
 
     // Padding only grows footprints and must not change the output.
     FootprintPadding = FMath::Max(0, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("footprint_padding", Description.Variations, 0));
@@ -1724,14 +1724,16 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const FIntVector TileSize = GetTileSize(ChunkSize);
 
-    // Configurations the raster cannot handle exactly keep the chunked path.
+    // Configurations the raster cannot handle exactly keep the chunked path, at its own chunk size unless that was asked for.
     const bool bSurfaceRaster = UseSurfaceRaster && Frame.SupportsRaster();
+
+    const FIntVector LegacyChunkSize = UseSurfaceRaster ? ReferenceChunkSize : ChunkSize;
 
     TArray<FVoxelProfile> Profiles;
 
     TArray<FVoxelTileProfile> TileProfiles;
 
-    const int32 TotalRegions = bSurfaceRaster ? RunTiles(Frame, TileSize, FootprintPadding, Labels, ShowCalculationTime, TileProfiles) : RunChunks(Frame, ChunkSize, Labels, ShowCalculationTime, Profiles);
+    const int32 TotalRegions = bSurfaceRaster ? RunTiles(Frame, TileSize, FootprintPadding, Labels, ShowCalculationTime, TileProfiles) : RunChunks(Frame, LegacyChunkSize, Labels, ShowCalculationTime, Profiles);
 
     const double ParallelEnd = FPlatformTime::Seconds();
 

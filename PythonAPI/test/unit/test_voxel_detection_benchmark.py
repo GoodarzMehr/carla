@@ -123,7 +123,7 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
             ['--preset', 'simbev', '--attribute', 'use_complex_collision=false'])
         self.assertEqual(result['attributes']['range'], 64.0)
         self.assertEqual(result['attributes']['voxel_size'], 0.1)
-        self.assertEqual(result['chunks'], [4, 4, 8])
+        self.assertEqual(result['chunks'], [32, 32, 128])
         self.assertIs(result['attributes']['use_complex_collision'], False)
 
     def test_empty_payload_and_future_frame_restore_settings_and_destroy_sensor(self):
