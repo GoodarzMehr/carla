@@ -30,9 +30,27 @@
 // accumulate in the output buffer, so candidates are applied from the highest priority down.
 namespace
 {
-    // Bricks of this size are the unit for shapes without triangles and for tiles that need per-brick gathers.
-    // It is also the chunk size of the original chunked sensor, whose output the bricks reproduce.
+    // Shapes without triangles are queried brick by brick, and tiles are whole multiples of a brick.
     const FIntVector BrickSize(4, 4, 8);
+
+    // Pose of a shape as PhysX scene queries see it. Unreal moves kinematic bodies by setting a target, and queries treat
+    // that target as the current pose, while the simulated pose only reaches it at the next physics step.
+    physx::PxTransform GetQueryPose(const physx::PxShape& Shape, const physx::PxRigidActor& Actor)
+    {
+        if (const physx::PxRigidDynamic* Dynamic = Actor.is<physx::PxRigidDynamic>())
+        {
+            const physx::PxRigidBodyFlags Flags = Dynamic->getRigidBodyFlags();
+
+            physx::PxTransform Target;
+
+            if ((Flags & physx::PxRigidBodyFlag::eKINEMATIC) && (Flags & physx::PxRigidBodyFlag::eUSE_KINEMATIC_TARGET_FOR_SCENE_QUERIES) && Dynamic->getKinematicTarget(Target))
+            {
+                return Target * Shape.getLocalPose();
+            }
+        }
+
+        return physx::PxShapeExt::getGlobalPose(Shape, Actor);
+    }
 
     struct FVoxelCandidate
     {
@@ -44,7 +62,7 @@ namespace
 
         FVoxelCandidate(const physx::PxShape& Shape, const physx::PxRigidActor& Actor, uint8 InLabel, uint8 InPriority)
             : Geometry(Shape.getGeometry())
-            , Pose(physx::PxShapeExt::getGlobalPose(Shape, Actor))
+            , Pose(GetQueryPose(Shape, Actor))
             , Bounds(physx::PxGeometryQuery::getWorldBounds(Geometry.any(), Pose))
             , Label(InLabel)
             , Priority(InPriority)
@@ -79,9 +97,6 @@ namespace
     {
     public:
         TArray<FVoxelCandidate, TInlineAllocator<16>> Candidates;
-
-        // Set when a candidate's scene-query bounds may follow a pending kinematic target instead of its current pose.
-        bool bKinematicTarget = false;
 
         FVoxelCandidateCollector(const FCollisionQueryParams& InParams, const FCollisionObjectQueryParams& InObjects, const uint8* InPriorities, int32 InNumLabels)
             : Params(InParams)
@@ -131,15 +146,6 @@ namespace
                 if (Label > 0 && Label < NumLabels && Priorities[Label] > 0)
                 {
                     Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label]);
-
-                    const physx::PxRigidDynamic* Dynamic = Actor->is<physx::PxRigidDynamic>();
-
-                    physx::PxTransform Target;
-
-                    if (Dynamic && Dynamic->getKinematicTarget(Target) && !(Target == Actor->getGlobalPose()))
-                    {
-                        bKinematicTarget = true;
-                    }
                 }
             }
 
@@ -356,7 +362,6 @@ namespace
         uint64 TotalCycles = 0;
         uint64 SlowestCycles = 0;
         uint64 Tiles = 0;
-        uint64 BrickTiles = 0;
         uint64 Candidates = 0;
         uint64 MeshCandidates = 0;
         uint64 HeightFieldCandidates = 0;
@@ -378,7 +383,6 @@ namespace
             TotalCycles += Other.TotalCycles;
             SlowestCycles = FMath::Max(SlowestCycles, Other.SlowestCycles);
             Tiles += Other.Tiles;
-            BrickTiles += Other.BrickTiles;
             Candidates += Other.Candidates;
             MeshCandidates += Other.MeshCandidates;
             HeightFieldCandidates += Other.HeightFieldCandidates;
@@ -533,30 +537,6 @@ namespace
         }
 
         Lap(Profile.GatherCycles);
-
-        // The scene query finds a kinematic body with a pending target at the target, while its shapes are tested at the
-        // current pose, so which voxels it labels depends on the query box. Brick-sized gathers keep the labels the original
-        // chunked sensor produced.
-        if (Collector.bKinematicTarget && TileSize != BrickSize)
-        {
-            if (bProfile)
-            {
-                ++Profile.BrickTiles;
-            }
-
-            for (int32 BX = Begin.X / BrickSize.X; BX * BrickSize.X < End.X; ++BX)
-            {
-                for (int32 BY = Begin.Y / BrickSize.Y; BY * BrickSize.Y < End.Y; ++BY)
-                {
-                    for (int32 BZ = Begin.Z / BrickSize.Z; BZ * BrickSize.Z < End.Z; ++BZ)
-                    {
-                        ProcessTile<bProfile>(Frame, Rules, BrickSize, FIntVector(BX, BY, BZ), Labels, Profile);
-                    }
-                }
-            }
-
-            return;
-        }
 
         // Labels accumulate in the output, so the tile starts empty.
         for (int32 X = Begin.X; X < End.X; ++X)
@@ -930,8 +910,7 @@ namespace
             ", slowest tile=", FPlatformTime::ToMilliseconds64(Profile.SlowestCycles));
 
         carla::log_warning("Voxel tile counts: tiles=", TotalTiles,
-            ", split into bricks=", Profile.BrickTiles,
-            ", processed tiles and bricks=", Profile.Tiles,
+            ", processed=", Profile.Tiles,
             ", candidates=", Profile.Candidates,
             ", meshes=", Profile.MeshCandidates,
             ", heightfields=", Profile.HeightFieldCandidates,
@@ -1100,6 +1079,27 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
     GridSizeY = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
     GridSizeZ = FMath::CeilToInt((Top - Bottom) / BoxSize);
+
+    // Voxels are indexed with 32-bit integers and sent as one buffer, so larger grids would overflow. Send empty frames instead.
+    const int64 NumVoxels = int64(GridSizeX) * GridSizeY * GridSizeZ;
+
+    if (GridSizeX <= 0 || GridSizeY <= 0 || GridSizeZ <= 0 || NumVoxels > MAX_int32)
+    {
+        UE_LOG(
+            LogCarla,
+            Error,
+            TEXT("VoxelDetectionSensor: a %d x %d x %d grid (%lld voxels) is not supported; the limit is %d voxels. Increase voxel_size or reduce the range or height."),
+            GridSizeX,
+            GridSizeY,
+            GridSizeZ,
+            NumVoxels,
+            MAX_int32
+        );
+
+        GridSizeX = 0;
+        GridSizeY = 0;
+        GridSizeZ = 0;
+    }
 
     UE_LOG(
         LogCarla,
