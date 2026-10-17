@@ -37,9 +37,10 @@ struct Allocator final : PxAllocatorCallback
 
 struct Errors final : PxErrorCallback
 {
-    void reportError(PxErrorCode::Enum, const char* message, const char*, int) override
+    void reportError(PxErrorCode::Enum code, const char* message, const char*, int) override
     {
-        fprintf(stderr, "PhysX: %s\n", message);
+        // Unreal drops logging info, such as the heightfield query's note that it flushed a full buffer.
+        if (code != PxErrorCode::eLOGGING_INFO) fprintf(stderr, "PhysX: %s\n", message);
     }
 };
 
@@ -272,6 +273,77 @@ static bool checkMeshTile(const Tile& tile, const PxTriangleMeshGeometry& geomet
     return compareTile(env, "mesh", totals);
 }
 
+// Heightfield of rows x columns samples with random heights, optional spikes and holes, cooked like a landscape.
+static PxHeightField* makeHeightField(PxPhysics& physics, PxCooking& cooking, int rows, int columns,
+    int roughness, int spikes, int holes, std::mt19937& random)
+{
+    std::vector<PxHeightFieldSample> samples(size_t(rows * columns));
+    std::uniform_int_distribution<int> height(-roughness, roughness);
+    for (PxHeightFieldSample& sample : samples)
+    {
+        sample.height = PxI16(height(random));
+        sample.materialIndex0 = 0;
+        sample.materialIndex1 = 0;
+    }
+    for (int spike = 0; spike < spikes; ++spike)
+        samples[random() % samples.size()].height = PxI16((random() % 2 ? 1 : -1) * (4000 + int(random() % 4000)));
+    for (int hole = 0; hole < holes; ++hole)
+    {
+        PxHeightFieldSample& sample = samples[random() % samples.size()];
+        sample.materialIndex0 = PxHeightFieldMaterial::eHOLE;
+        sample.materialIndex1 = PxHeightFieldMaterial::eHOLE;
+    }
+    PxHeightFieldDesc desc;
+    desc.format = PxHeightFieldFormat::eS16_TM;
+    desc.nbRows = PxU32(rows);
+    desc.nbColumns = PxU32(columns);
+    desc.samples.data = samples.data();
+    desc.samples.stride = sizeof(PxHeightFieldSample);
+    desc.flags = PxHeightFieldFlag::eNO_BOUNDARY_EDGES;
+    PxHeightField* result = cooking.createHeightField(desc, physics.getPhysicsInsertionCallback());
+    if (!result) throw std::runtime_error("Heightfield creation failed");
+    return result;
+}
+
+// Rasterize every heightfield triangle the sensor would fetch for this tile, with the skin and edge-crossing rules,
+// and compare with PhysX per voxel.
+static bool checkHeightFieldTile(const Tile& tile, const PxHeightFieldGeometry& geometry, const PxTransform& pose,
+    Totals& totals, VoxelSurfaceRaster::FRasterStats& surfaceStats)
+{
+    TileEnv env;
+    buildTile(tile, 0.0, env);
+    if (!env.lattice.IsValid()) { fprintf(stderr, "Invalid lattice\n"); return false; }
+    env.geometry = &geometry;
+    env.pose = pose;
+    env.bounds = PxGeometryQuery::getWorldBounds(geometry, pose);
+    const PxVec3 halfExtent(tile.voxel * .5f);
+    const PxTransform hfToTile = env.tileFrame.transformInv(pose);
+    VoxelSurfaceRaster::FSurface surface;
+    surface.Up = hfToTile.q.rotate(PxVec3(0, 1, 0));
+    surface.Skin = std::abs(geometry.heightField->getThickness());
+    PxVec3 fetchExtent;
+    for (int axis = 0; axis < 3; ++axis)
+        fetchExtent[axis] = float(std::max(std::abs(env.lattice.Center(axis, 0)),
+            std::abs(env.lattice.Center(axis, tile.size[axis] - 1))) + env.lattice.Margin) + halfExtent[axis] + .1f + surface.Skin;
+    std::vector<PxU32> indices(2 * geometry.heightField->getNbRows() * geometry.heightField->getNbColumns());
+    bool overflow = false;
+    const PxU32 count = PxMeshQuery::findOverlapHeightField(PxBoxGeometry(fetchExtent), env.tileFrame,
+        geometry, pose, indices.data(), PxU32(indices.size()), 0, overflow);
+    if (overflow) { fprintf(stderr, "Unexpected overflow\n"); return false; }
+    VoxelSurfaceRaster::FRasterStats stats;
+    for (PxU32 i = 0; i < count; ++i)
+    {
+        PxTriangle triangle;
+        const float error = VoxelTriangleOverlap::FetchTriangle(geometry, pose, env.tileFrame, hfToTile,
+            indices[i], halfExtent, triangle);
+        VoxelSurfaceRaster::RasterizeMeshTriangle<true>(triangle, error, halfExtent, env.lattice, env, stats, &surface);
+    }
+    VoxelSurfaceRaster::ResolveDeferred<true>(env.deferred, env.lattice, env, stats);
+    surfaceStats.Add(stats);
+    totals.stats.Add(stats);
+    return compareTile(env, "heightfield", totals);
+}
+
 static bool checkPrimitiveTile(const Tile& tile, const PxGeometry& geometry, const PxTransform& pose, Totals& totals)
 {
     TileEnv env;
@@ -491,6 +563,42 @@ int main()
         }
     }
 
+    // Landscapes: heightfields turned so their height axis is world z, with smooth, rough and spiky terrain and holes,
+    // scaled like Unreal landscapes (50 or 100 cm quads, fine height steps).
+    unsigned heightFieldTiles = 0, heightFieldColumns = 0;
+    VoxelSurfaceRaster::FRasterStats surfaceStats[3];
+    const PxQuat heightUp(PxHalfPi, PxVec3(1, 0, 0));
+    for (int kind = 0; kind < 4; ++kind)
+    {
+        const int roughness = kind == 0 ? 200 : 1500;
+        PxHeightField* heightField = makeHeightField(*physics, *cooking, 13, 13, roughness,
+            kind >= 2 ? 12 : 0, kind == 3 ? 20 : 0, random);
+        for (const float quad : {50.f, 100.f})
+        for (int place = 0; place < 3; ++place)
+        for (int variant = 0; variant < 4; ++variant)
+        {
+            // At the origin, at Town-like coordinates and a kilometre out.
+            const PxVec3 offset = place == 0 ? PxVec3(0) : place == 1 ? PxVec3(15000, -9000, 300) : PxVec3(100000, -80000, 120000);
+            const PxHeightFieldGeometry geometry(heightField, PxMeshGeometryFlags(), 1.f / 64.f, quad, quad);
+            const PxTransform pose(offset, heightUp);
+            const PxVec3 middle = pose.transform(PxVec3(6 * quad, 0, 6 * quad));
+            const PxQuat sensorRotation = variant == 1 ? PxQuat(.6457718f, PxVec3(0,0,1)) * PxQuat(.07f, PxVec3(0,1,0)) :
+                variant == 3 ? PxQuat(.3f, PxVec3(1,0,0)) : PxQuat(PxIdentity);
+            Tile tile{{16, 16, 24}, 10.f, PxVec3(1), PxTransform(middle + PxVec3(value(random), value(random), 0) * 200.f,
+                sensorRotation), PxVec3(-80, -80, -120)};
+            tile.sensor.p.z += value(random) * 20.f;
+            if (variant == 2) { tile.voxel = 50.f; tile.size[0] = tile.size[1] = 8; tile.size[2] = 8; tile.origin = PxVec3(-200); }
+            if (!checkHeightFieldTile(tile, geometry, pose, totals, surfaceStats[place]))
+            {
+                fprintf(stderr, "  terrain kind=%d quad=%g offset=%g variant=%d\n", kind, quad, offset.x, variant);
+                return 4;
+            }
+            ++heightFieldTiles;
+            heightFieldColumns += unsigned(tile.size[0] * tile.size[1]);
+        }
+        heightField->release();
+    }
+
     printf("PASS: raster matched PhysX on %u tiles (%u voxels, %u hits) in %.0f ms\n", totals.tiles, totals.voxels,
         totals.hits, std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count());
     printf("  visited=%llu tests=%llu uncertain=%llu deferred=%llu certain=%llu (%u checked) skipped triangles=%llu\n",
@@ -500,6 +608,16 @@ int main()
         (unsigned long long)totals.stats.Certain, totals.certain, (unsigned long long)totals.stats.Skipped);
     printf("  primitive queries=%llu culled bricks=%llu\n", (unsigned long long)totals.stats.PrimitiveQueries,
         (unsigned long long)totals.stats.CulledBricks);
+    printf("  heightfield tiles=%u (%u columns)\n", heightFieldTiles, heightFieldColumns);
+    const char* places[3] = {"origin", "150 m out", "1.7 km out"};
+    for (int place = 0; place < 3; ++place)
+    {
+        const VoxelSurfaceRaster::FRasterStats& stats = surfaceStats[place];
+        printf("    %-10s per column: tests=%.2f overlaps=%.2f unconfirmed=%.3f uncertain=%.3f PhysX queries=%.3f\n", places[place],
+            3.0 * stats.Visited / heightFieldColumns, 3.0 * stats.Overlaps / heightFieldColumns,
+            3.0 * stats.Unconfirmed / heightFieldColumns, 3.0 * stats.Uncertain / heightFieldColumns,
+            3.0 * stats.DeferredQueries / heightFieldColumns);
+    }
 
     convex->release();
     terrain->release(); plane->release(); shifted->release(); terrain34->release(); plane34->release();

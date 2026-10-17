@@ -7,6 +7,7 @@
 
 #include <foundation/PxMath.h>
 #include <foundation/PxTransform.h>
+#include <geometry/PxHeightFieldGeometry.h>
 #include <geometry/PxMeshQuery.h>
 #include <geometry/PxTriangle.h>
 #include <geometry/PxTriangleMeshGeometry.h>
@@ -106,9 +107,10 @@ namespace VoxelTriangleOverlap
         return Result;
     }
 
-    // Fetch a mesh triangle in the cache frame. MeshToCache must equal
+    // Fetch a triangle of a mesh or heightfield in the cache frame. MeshToCache must equal
     // CachePose.transformInv(MeshPose). Returns the position error of the vertices.
-    inline float FetchTriangle(const physx::PxTriangleMeshGeometry& Geometry,
+    template <typename FGeometry>
+    inline float FetchTriangle(const FGeometry& Geometry,
         const physx::PxTransform& MeshPose, const physx::PxTransform& CachePose,
         const physx::PxTransform& MeshToCache, physx::PxU32 Index,
         const physx::PxVec3& HalfExtent, physx::PxTriangle& Triangle)

@@ -16,6 +16,7 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "EngineUtils.h"
+#include "LandscapeHeightfieldCollisionComponent.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 
 namespace crp = carla::rpc;
@@ -245,6 +246,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation, ui
     }
 
     TaggedComponent->MarkRenderStateDirty();
+  }
+
+  // Landscape collision lives in separate components that never render. Give them the same label so
+  // sensors that read it from physics hits (semantic LiDAR, voxel detection) see terrain too.
+  TArray<ULandscapeHeightfieldCollisionComponent *> LandscapeCollisionComponents;
+  Actor.GetComponents<ULandscapeHeightfieldCollisionComponent>(LandscapeCollisionComponents);
+  for (ULandscapeHeightfieldCollisionComponent *Component : LandscapeCollisionComponents) {
+    Component->SetCustomDepthStencilValue(CastEnum(crp::CityObjectLabel::Terrain));
   }
 }
 

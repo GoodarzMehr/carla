@@ -284,6 +284,7 @@ namespace VoxelSurfaceRaster
         uint64_t Closed = 0;
         uint64_t Gated = 0;
         uint64_t Overlaps = 0;
+        uint64_t Unconfirmed = 0;
         uint64_t Uncertain = 0;
         uint64_t Outside = 0;
         uint64_t DeferredQueries = 0;
@@ -303,6 +304,7 @@ namespace VoxelSurfaceRaster
             Closed += Other.Closed;
             Gated += Other.Gated;
             Overlaps += Other.Overlaps;
+            Unconfirmed += Other.Unconfirmed;
             Uncertain += Other.Uncertain;
             Outside += Other.Outside;
             DeferredQueries += Other.DeferredQueries;
@@ -531,9 +533,217 @@ namespace VoxelSurfaceRaster
         }
     }
 
-    // Test one triangle of the current candidate against its footprint.
+    // A heightfield as seen from the tile frame. PhysX reports a box as touching a heightfield when a box corner lies within Skin
+    // under the surface along Up, when a box edge crosses the surface, or when a surface vertex lies inside the box. It has no
+    // face test, so a surface that cuts a box between its edges and corners is not reported.
+    struct FSurface
+    {
+        physx::PxVec3 Up = physx::PxVec3(0.0f, 0.0f, 1.0f);
+        float Skin = 0.0f;
+    };
+
+    // One heightfield triangle in the tile frame, prepared for ConfirmsSurfaceOverlap. Margin bounds how far its vertices and the
+    // voxel corners may be from what PhysX computes.
+    struct FSurfaceTriangle
+    {
+        double Origin[3] = {0.0, 0.0, 0.0};
+        double Vertices[3][3] = {};
+        double Normal[3] = {0.0, 0.0, 0.0};
+        double EdgeNormals[3][3] = {};
+        double Up[3] = {0.0, 0.0, 1.0};
+        double NormalUp = 0.0;
+        double Skin = 0.0;
+        double Margin = 0.0;
+        bool bValid = false;
+
+        FSurfaceTriangle(const physx::PxTriangle& Triangle, const FSurface& Surface, double InMargin)
+            : Skin(Surface.Skin)
+            , Margin(InMargin)
+        {
+            for (int Vertex = 0; Vertex < 3; ++Vertex)
+            {
+                for (int Axis = 0; Axis < 3; ++Axis)
+                {
+                    Vertices[Vertex][Axis] = Triangle.verts[Vertex][Axis];
+                }
+            }
+
+            for (int Axis = 0; Axis < 3; ++Axis)
+            {
+                Origin[Axis] = Vertices[0][Axis];
+                Up[Axis] = Surface.Up[Axis];
+            }
+
+            double Edges[3][3];
+
+            for (int Vertex = 0; Vertex < 3; ++Vertex)
+            {
+                for (int Axis = 0; Axis < 3; ++Axis)
+                {
+                    Edges[Vertex][Axis] = Vertices[(Vertex + 1) % 3][Axis] - Vertices[Vertex][Axis];
+                }
+            }
+
+            Cross(Edges[0], Edges[1], Normal);
+
+            const double NormalLength = std::sqrt(Dot(Normal, Normal));
+
+            if (!(NormalLength > 0.0) || !std::isfinite(NormalLength))
+            {
+                return;
+            }
+
+            for (int Axis = 0; Axis < 3; ++Axis)
+            {
+                Normal[Axis] /= NormalLength;
+            }
+
+            // In-plane normals of the edges, pointing inside, so a point's distance inside an edge is one dot product.
+            for (int Vertex = 0; Vertex < 3; ++Vertex)
+            {
+                Cross(Normal, Edges[Vertex], EdgeNormals[Vertex]);
+
+                const double Length = std::sqrt(Dot(EdgeNormals[Vertex], EdgeNormals[Vertex]));
+
+                if (!(Length > 0.0))
+                {
+                    return;
+                }
+
+                for (int Axis = 0; Axis < 3; ++Axis)
+                {
+                    EdgeNormals[Vertex][Axis] /= Length;
+                }
+            }
+
+            NormalUp = Dot(Normal, Up);
+
+            bValid = true;
+        }
+
+        static double Dot(const double* A, const double* B)
+        {
+            return A[0] * B[0] + A[1] * B[1] + A[2] * B[2];
+        }
+
+        static void Cross(const double* A, const double* B, double* Out)
+        {
+            Out[0] = A[1] * B[2] - A[2] * B[1];
+            Out[1] = A[2] * B[0] - A[0] * B[2];
+            Out[2] = A[0] * B[1] - A[1] * B[0];
+        }
+
+        // A point of the triangle plane lies inside the triangle by more than Margin.
+        bool IsInside(const double* Point) const
+        {
+            for (int Vertex = 0; Vertex < 3; ++Vertex)
+            {
+                const double Offset[3] = {Point[0] - Vertices[Vertex][0], Point[1] - Vertices[Vertex][1], Point[2] - Vertices[Vertex][2]};
+
+                if (!(Dot(EdgeNormals[Vertex], Offset) > Margin))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    };
+
+    // True when one of PhysX's own rules reports the voxel box around Center as touching the heightfield through this triangle,
+    // with more than Margin to spare: a box edge crossing the triangle, or a box corner within the skin under it.
+    inline bool ConfirmsSurfaceOverlap(const FSurfaceTriangle& Triangle, const physx::PxVec3& Center, const physx::PxVec3& HalfExtent)
+    {
+        if (!Triangle.bValid)
+        {
+            return false;
+        }
+
+        const double Margin = Triangle.Margin;
+
+        // Signed distance of every box corner to the triangle plane.
+        double Corners[8][3];
+        double Sides[8];
+
+        for (int Corner = 0; Corner < 8; ++Corner)
+        {
+            double Offset[3];
+
+            for (int Axis = 0; Axis < 3; ++Axis)
+            {
+                Corners[Corner][Axis] = double(Center[Axis]) + ((Corner >> Axis) & 1 ? 1.0 : -1.0) * HalfExtent[Axis];
+
+                Offset[Axis] = Corners[Corner][Axis] - Triangle.Origin[Axis];
+            }
+
+            Sides[Corner] = FSurfaceTriangle::Dot(Triangle.Normal, Offset);
+        }
+
+        // A box edge crosses the triangle. Each of the 12 edges joins two corners that differ along one axis.
+        for (int Corner = 0; Corner < 8; ++Corner)
+        {
+            for (int Axis = 0; Axis < 3; ++Axis)
+            {
+                const int Other = Corner | (1 << Axis);
+
+                const bool bCrosses = Other != Corner && ((Sides[Corner] > Margin && Sides[Other] < -Margin) || (Sides[Corner] < -Margin && Sides[Other] > Margin));
+
+                if (!bCrosses)
+                {
+                    continue;
+                }
+
+                const double Fraction = Sides[Corner] / (Sides[Corner] - Sides[Other]);
+
+                double Point[3];
+
+                for (int Index = 0; Index < 3; ++Index)
+                {
+                    Point[Index] = Corners[Corner][Index] + (Corners[Other][Index] - Corners[Corner][Index]) * Fraction;
+                }
+
+                if (Triangle.IsInside(Point))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // A box corner lies within the skin under the triangle, measured along Up as PhysX measures heights.
+        if (std::abs(Triangle.NormalUp) < 1e-3)
+        {
+            return false;
+        }
+
+        for (int Corner = 0; Corner < 8; ++Corner)
+        {
+            const double Height = Sides[Corner] / Triangle.NormalUp;
+
+            if (Height > -Margin || Height < -Triangle.Skin + Margin)
+            {
+                continue;
+            }
+
+            double Foot[3];
+
+            for (int Index = 0; Index < 3; ++Index)
+            {
+                Foot[Index] = Corners[Corner][Index] - Height * Triangle.Up[Index];
+            }
+
+            if (Triangle.IsInside(Foot))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Test one triangle of the current candidate against its footprint. For a heightfield triangle, set in Surface, a voxel
+    // the test does not rule out counts only when ConfirmsSurfaceOverlap holds; PhysX decides the others.
     template <bool bStats, typename FEnv>
-    void RasterizeTriangle(const VoxelTriangleOverlap::FTriangle& Triangle, const physx::PxVec3& HalfExtent, const FLattice& Lattice, FEnv& Env, FRasterStats& Stats)
+    void RasterizeTriangle(const VoxelTriangleOverlap::FTriangle& Triangle, const physx::PxVec3& HalfExtent, const FLattice& Lattice, FEnv& Env, FRasterStats& Stats, const FSurfaceTriangle* Surface = nullptr)
     {
         if (bStats)
         {
@@ -557,7 +767,7 @@ namespace VoxelSurfaceRaster
                 return;
             }
 
-            if (bCertain)
+            if (bCertain && !Surface)
             {
                 if (bStats)
                 {
@@ -583,7 +793,23 @@ namespace VoxelSurfaceRaster
 
             const VoxelTriangleOverlap::EResult Result = VoxelTriangleOverlap::Test(Triangle, Center);
 
-            if (Result == VoxelTriangleOverlap::EResult::Overlap)
+            if (Result == VoxelTriangleOverlap::EResult::Outside)
+            {
+                if (bStats)
+                {
+                    ++Stats.Outside;
+                }
+            }
+            else if (Surface && !ConfirmsSurfaceOverlap(*Surface, Center, HalfExtent))
+            {
+                if (bStats)
+                {
+                    ++Stats.Unconfirmed;
+                }
+
+                Env.Defer(X, Y, Z);
+            }
+            else if (Surface || Result == VoxelTriangleOverlap::EResult::Overlap)
             {
                 if (bStats)
                 {
@@ -592,7 +818,7 @@ namespace VoxelSurfaceRaster
 
                 Env.Hit(X, Y, Z);
             }
-            else if (Result == VoxelTriangleOverlap::EResult::Uncertain)
+            else
             {
                 if (bStats)
                 {
@@ -600,10 +826,6 @@ namespace VoxelSurfaceRaster
                 }
 
                 Env.Defer(X, Y, Z);
-            }
-            else if (bStats)
-            {
-                ++Stats.Outside;
             }
         });
     }
@@ -684,11 +906,15 @@ namespace VoxelSurfaceRaster
         return Box;
     }
 
-    // Rasterize one fetched mesh triangle of the current candidate, unless every voxel it can matter for is already closed.
+    // Rasterize one fetched triangle of the current candidate, unless every voxel it can matter for is already closed. Surface is
+    // set for heightfield triangles: their error band grows by the skin along its up direction, so boxes PhysX counts through the
+    // skin are never declared outside, and their overlaps need a box edge crossing.
     template <bool bStats, typename FEnv>
-    void RasterizeMeshTriangle(const physx::PxTriangle& Triangle, float PositionError, const physx::PxVec3& HalfExtent, const FLattice& Lattice, FEnv& Env, FRasterStats& Stats)
+    void RasterizeMeshTriangle(const physx::PxTriangle& Triangle, float PositionError, const physx::PxVec3& HalfExtent, const FLattice& Lattice, FEnv& Env, FRasterStats& Stats, const FSurface* Surface = nullptr)
     {
-        const FIndexBox Box = GetTriangleBox(Triangle, PositionError, HalfExtent, Lattice);
+        const float Band = Surface ? PositionError + Surface->Skin : PositionError;
+
+        const FIndexBox Box = GetTriangleBox(Triangle, Band, HalfExtent, Lattice);
 
         bool bOpen = false;
 
@@ -713,16 +939,50 @@ namespace VoxelSurfaceRaster
             return;
         }
 
-        const VoxelTriangleOverlap::FTriangle Prepared = VoxelTriangleOverlap::MakeTriangle(Triangle, HalfExtent, PositionError);
+        VoxelTriangleOverlap::FTriangle Prepared = VoxelTriangleOverlap::MakeTriangle(Triangle, HalfExtent, PositionError);
 
         if (Prepared.Degenerate)
         {
-            RasterizeDegenerate<bStats>(Triangle, PositionError, HalfExtent, Lattice, Env, Stats);
+            RasterizeDegenerate<bStats>(Triangle, Band, HalfExtent, Lattice, Env, Stats);
+
+            return;
         }
-        else
+
+        if (!Surface)
         {
             RasterizeTriangle<bStats>(Prepared, HalfExtent, Lattice, Env, Stats);
+
+            return;
         }
+
+        // A corner up to Skin under the surface lies in the triangle swept Skin down along Up, whose projection on each axis reaches
+        // Skin * (Direction . Up) further on one side only. Extending that side keeps such boxes from being declared outside. The
+        // extra error covers rounding in Up and in the shifted bounds.
+        for (physx::PxU32 Index = 0; Index < Prepared.NumAxes; ++Index)
+        {
+            VoxelTriangleOverlap::FAxis& Axis = Prepared.Axes[Index];
+
+            const float Shift = Surface->Skin * Axis.Direction.dot(Surface->Up);
+
+            if (Shift > 0.0f)
+            {
+                Axis.Minimum -= Shift;
+            }
+            else
+            {
+                Axis.Maximum -= Shift;
+            }
+
+            Axis.Error += 1e-4f * Surface->Skin + 4.0f * FLT_EPSILON * physx::PxMax(physx::PxAbs(Axis.Minimum), physx::PxAbs(Axis.Maximum));
+        }
+
+        const double VertexMagnitude = std::max(VoxelTriangleOverlap::MaxAbs(Triangle.verts[0]), std::max(VoxelTriangleOverlap::MaxAbs(Triangle.verts[1]), VoxelTriangleOverlap::MaxAbs(Triangle.verts[2])));
+
+        // The checks use exact voxel centers. As in the overlap test itself, the position error bounds how far our vertices and box
+        // corners are from those PhysX computes; it grows with the world positions, so it also covers their rounding.
+        const FSurfaceTriangle SurfaceTriangle(Triangle, *Surface, PositionError + 16.0 * FLT_EPSILON * (Lattice.Magnitude + VertexMagnitude + VoxelTriangleOverlap::MaxAbs(HalfExtent)));
+
+        RasterizeTriangle<bStats>(Prepared, HalfExtent, Lattice, Env, Stats, &SurfaceTriangle);
     }
 
     // Decide the deferred voxels of the current candidate that are still open with PhysX, then empty the set.

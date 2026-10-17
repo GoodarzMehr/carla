@@ -21,6 +21,7 @@
 #include <PxScene.h>
 #include <PxSceneLock.h>
 #include <geometry/PxGeometryQuery.h>
+#include <geometry/PxHeightField.h>
 #include <geometry/PxMeshQuery.h>
 #include <extensions/PxShapeExt.h>
 
@@ -50,6 +51,28 @@ namespace
         {
         }
     };
+
+    // Triangle meshes and heightfields go through the surface raster; other shapes are queried voxel by voxel.
+    bool HasTriangles(const FVoxelCandidate& Candidate)
+    {
+        const physx::PxGeometryType::Enum Type = Candidate.Geometry.getType();
+
+        return Type == physx::PxGeometryType::eTRIANGLEMESH || Type == physx::PxGeometryType::eHEIGHTFIELD;
+    }
+
+    int32 GetNumTriangles(const FVoxelCandidate& Candidate)
+    {
+        if (Candidate.Geometry.getType() == physx::PxGeometryType::eHEIGHTFIELD)
+        {
+            const physx::PxHeightField& HeightField = *Candidate.Geometry.heightField().heightField;
+
+            const int64 Cells = int64(FMath::Max(1u, HeightField.getNbRows()) - 1) * (FMath::Max(1u, HeightField.getNbColumns()) - 1);
+
+            return int32(FMath::Min<int64>(2 * Cells, MAX_int32));
+        }
+
+        return int32(Candidate.Geometry.triangleMesh().triangleMesh->getNbTriangles());
+    }
 
     // Match Engine's private object-query filter using public PhysX data.
     class FVoxelCandidateCollector final : public physx::PxQueryFilterCallback
@@ -336,6 +359,7 @@ namespace
         uint64 BrickTiles = 0;
         uint64 Candidates = 0;
         uint64 MeshCandidates = 0;
+        uint64 HeightFieldCandidates = 0;
         uint64 PrimitiveCandidates = 0;
         uint64 Regrowths = 0;
         uint64 Ties = 0;
@@ -357,6 +381,7 @@ namespace
             BrickTiles += Other.BrickTiles;
             Candidates += Other.Candidates;
             MeshCandidates += Other.MeshCandidates;
+            HeightFieldCandidates += Other.HeightFieldCandidates;
             PrimitiveCandidates += Other.PrimitiveCandidates;
             Regrowths += Other.Regrowths;
             Ties += Other.Ties;
@@ -544,10 +569,10 @@ namespace
 
         Lap(Profile.ZeroCycles);
 
-        // Meshes are culled by their triangle fetch below.
+        // Meshes and heightfields are culled by their triangle fetch below.
         Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
         {
-            return Candidate.Geometry.getType() != physx::PxGeometryType::eTRIANGLEMESH && !physx::PxGeometryQuery::overlap(TileBox.Geometry, TileBox.Pose, Candidate.Geometry.any(), Candidate.Pose);
+            return !HasTriangles(Candidate) && !physx::PxGeometryQuery::overlap(TileBox.Geometry, TileBox.Pose, Candidate.Geometry.any(), Candidate.Pose);
         });
 
         Collector.Candidates.StableSort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
@@ -614,7 +639,7 @@ namespace
         {
             Env.Candidate = &Candidate;
 
-            if (Candidate.Geometry.getType() != physx::PxGeometryType::eTRIANGLEMESH)
+            if (!HasTriangles(Candidate))
             {
                 if (bProfile)
                 {
@@ -630,23 +655,51 @@ namespace
                 continue;
             }
 
-            if (bProfile)
+            const bool bHeightField = Candidate.Geometry.getType() == physx::PxGeometryType::eHEIGHTFIELD;
+
+            if (bProfile && bHeightField)
+            {
+                ++Profile.HeightFieldCandidates;
+            }
+            else if (bProfile)
             {
                 ++Profile.MeshCandidates;
             }
 
-            const physx::PxTriangleMeshGeometry& Mesh = Candidate.Geometry.triangleMesh();
+            const physx::PxTransform MeshToTile = TileFrame.transformInv(Candidate.Pose);
+
+            // PhysX treats a thin layer under a heightfield as solid, so its fetch box grows by that skin.
+            VoxelSurfaceRaster::FSurface Surface;
+
+            if (bHeightField)
+            {
+                Surface.Up = MeshToTile.q.rotate(physx::PxVec3(0.0f, 1.0f, 0.0f));
+
+                Surface.Skin = physx::PxAbs(Candidate.Geometry.heightField().heightField->getThickness());
+            }
+
+            const physx::PxBoxGeometry CandidateFetchBox(FetchBox.halfExtents + physx::PxVec3(Surface.Skin));
+
+            // Every query reruns the midphase, so a full buffer is regrown to hold every triangle and queried once more.
+            const auto FetchIndices = [&](bool& bOverflow)
+            {
+                if (bHeightField)
+                {
+                    return physx::PxMeshQuery::findOverlapHeightField(CandidateFetchBox, TileFrame, Candidate.Geometry.heightField(), Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+                }
+
+                return physx::PxMeshQuery::findOverlapTriangleMesh(CandidateFetchBox, TileFrame, Candidate.Geometry.triangleMesh(), Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+            };
 
             bool bOverflow = false;
 
-            physx::PxU32 Count = physx::PxMeshQuery::findOverlapTriangleMesh(FetchBox, TileFrame, Mesh, Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+            physx::PxU32 Count = FetchIndices(bOverflow);
 
             if (bOverflow)
             {
-                // Paging with a start index reruns the midphase, so query once more with room for every triangle.
-                Indices.SetNumUninitialized(FMath::Max<int32>(2 * Indices.Num(), Mesh.triangleMesh->getNbTriangles()));
+                Indices.SetNumUninitialized(FMath::Max<int32>(2 * Indices.Num(), GetNumTriangles(Candidate)));
 
-                Count = physx::PxMeshQuery::findOverlapTriangleMesh(FetchBox, TileFrame, Mesh, Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+                Count = FetchIndices(bOverflow);
 
                 if (bProfile)
                 {
@@ -654,20 +707,27 @@ namespace
                 }
             }
 
-            const physx::PxTransform MeshToTile = TileFrame.transformInv(Candidate.Pose);
-
             Triangles.SetNumUninitialized(Count);
 
             for (physx::PxU32 Index = 0; Index < Count; ++Index)
             {
-                Triangles[Index].PositionError = VoxelTriangleOverlap::FetchTriangle(Mesh, Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Triangles[Index].Triangle);
+                FFetchedTriangle& Fetched = Triangles[Index];
+
+                if (bHeightField)
+                {
+                    Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(Candidate.Geometry.heightField(), Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Fetched.Triangle);
+                }
+                else
+                {
+                    Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(Candidate.Geometry.triangleMesh(), Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Fetched.Triangle);
+                }
             }
 
             Lap(Profile.FetchCycles);
 
             for (const FFetchedTriangle& Fetched : Triangles)
             {
-                VoxelSurfaceRaster::RasterizeMeshTriangle<bProfile>(Fetched.Triangle, Fetched.PositionError, Frame.VoxelHalfExtent, Lattice, Env, Profile.Raster);
+                VoxelSurfaceRaster::RasterizeMeshTriangle<bProfile>(Fetched.Triangle, Fetched.PositionError, Frame.VoxelHalfExtent, Lattice, Env, Profile.Raster, bHeightField ? &Surface : nullptr);
             }
 
             Lap(Profile.RasterCycles);
@@ -874,6 +934,7 @@ namespace
             ", processed tiles and bricks=", Profile.Tiles,
             ", candidates=", Profile.Candidates,
             ", meshes=", Profile.MeshCandidates,
+            ", heightfields=", Profile.HeightFieldCandidates,
             ", primitives=", Profile.PrimitiveCandidates,
             ", rasterized triangles=", Raster.Triangles,
             ", skipped closed triangles=", Raster.Skipped,
@@ -885,6 +946,7 @@ namespace
             ", certain=", Raster.Certain,
             ", gated=", Raster.Gated,
             ", overlap=", Raster.Overlaps,
+            ", heightfield voxels left to PhysX=", Raster.Unconfirmed,
             ", uncertain=", Raster.Uncertain,
             ", outside=", Raster.Outside,
             ", deferred queries=", Raster.DeferredQueries,
