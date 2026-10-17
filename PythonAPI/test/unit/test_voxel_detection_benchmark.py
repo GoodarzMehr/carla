@@ -27,7 +27,7 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
                       error=None, argument_error=False, ground=-0.5):
         # The blueprint exposes only current sensor attributes.
         attributes = {'range': 50.0, 'voxel_size': 0.5, 'lower_limit': -5.0,
-                      'upper_limit': 10.0, 'chunk_x': 4, 'chunk_y': 4, 'chunk_z': 8,
+                      'upper_limit': 10.0, 'tile_x': 32, 'tile_y': 32, 'tile_z': 128,
                       'draw_debug': False,
                       'show_calculation_time': False, 'use_complex_collision': True,
                       'ignore_self': False}
@@ -114,7 +114,7 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
         self.assertEqual(result['warmup'], 1)
         self.assertEqual(result['voxel_count'], 3)
         self.assertEqual(result['occupied_voxels'], 1.0)
-        self.assertEqual(result['chunks'], [4, 4, 8])
+        self.assertEqual(result['tiles'], [32, 32, 128])
         self.assertIs(result['attributes']['use_complex_collision'], True)
         self.assertIn('Capture latency:', output)
 
@@ -123,7 +123,7 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
             ['--preset', 'simbev', '--attribute', 'use_complex_collision=false'])
         self.assertEqual(result['attributes']['range'], 64.0)
         self.assertEqual(result['attributes']['voxel_size'], 0.1)
-        self.assertEqual(result['chunks'], [32, 32, 128])
+        self.assertEqual(result['tiles'], [32, 32, 128])
         self.assertIs(result['attributes']['use_complex_collision'], False)
 
     def test_empty_payload_and_future_frame_restore_settings_and_destroy_sensor(self):
@@ -144,7 +144,7 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
             benchmark.receive_frame(queue, 4, 0)
 
     def test_invalid_grid_is_rejected_before_changing_world_settings(self):
-        for attribute in ('voxel_size=0', 'chunk_z=0'):
+        for attribute in ('voxel_size=0', 'tile_z=0'):
             with self.subTest(attribute=attribute):
                 self.run_benchmark(['--attribute', attribute], argument_error=True)
 

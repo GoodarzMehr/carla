@@ -1,17 +1,17 @@
-// Standalone regression check against the actual PhysX geometry-query oracle.
+// Standalone check of the voxel sensor's surface raster against the actual PhysX geometry queries.
 // From the repository root, with UE4_ROOT pointing to UnrealEngine_4.26:
 //   px="$UE4_ROOT/Engine/Source/ThirdParty/PhysX3"
 //   libs="$px/Lib/Linux/x86_64-unknown-linux-gnu"
 //   g++ -std=c++14 -O2 -DNDEBUG -DPX_PHYSX_STATIC_LIB \
 //     -I"$px/PhysX_3.4/Include" -I"$px/PxShared/include" \
-//     Util/BuildTools/tests/test_voxel_triangle_overlap.cpp -Wl,--start-group \
+//     Util/BuildTools/tests/test_voxel_surface_raster.cpp -Wl,--start-group \
 //     "$libs/libPhysX3.a" "$libs/libPhysX3Common.a" "$libs/libPxFoundation.a" \
 //     "$libs/libPxPvdSDK.a" "$libs/libPhysX3Cooking.a" -Wl,--end-group \
-//     -pthread -ldl -o /tmp/test_voxel_triangle_overlap
-//   /tmp/test_voxel_triangle_overlap
+//     -pthread -ldl -o /tmp/test_voxel_surface_raster
+//   /tmp/test_voxel_surface_raster
 
-#include "../../../Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/VoxelTriangleOverlap.h"
 #include "../../../Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/VoxelSurfaceRaster.h"
+#include "../../../Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/VoxelTriangleOverlap.h"
 #include "PxPhysicsAPI.h"
 
 #include <algorithm>
@@ -82,46 +82,18 @@ static PxTriangleMesh* makeMesh(PxPhysics& physics, PxCooking& cooking,
     return result;
 }
 
-struct Cache
+static PxConvexMesh* makeConvex(PxPhysics& physics, PxCooking& cooking, const std::vector<PxVec3>& points)
 {
-    std::vector<VoxelTriangleOverlap::FTriangle> triangles;
-    bool fallback = false;
-};
-
-static Cache makeCache(const PxTriangleMeshGeometry& geometry, const PxTransform& meshPose,
-    const PxTransform& cachePose, const PxVec3& halfExtent)
-{
-    const PxBounds3 bounds = PxGeometryQuery::getWorldBounds(
-        PxBoxGeometry(halfExtent.multiply(PxVec3(4, 4, 8))), cachePose);
-    PxU32 indices[64];
-    bool overflow = false;
-    const PxU32 count = PxMeshQuery::findOverlapTriangleMesh(
-        PxBoxGeometry(bounds.getExtents() + PxVec3(.1f)), PxTransform(bounds.getCenter()),
-        geometry, meshPose, indices, 64, 0, overflow);
-    Cache cache;
-    cache.fallback = overflow || count == 0;
-    if (!cache.fallback)
-        for (PxU32 index = 0; index < count; ++index)
-            cache.triangles.push_back(VoxelTriangleOverlap::MakeTriangle(
-                geometry, meshPose, cachePose, indices[index], halfExtent));
-    return cache;
-}
-
-static bool cachedOverlap(const Cache& cache, const PxTransform& cachePose,
-    const PxBoxGeometry& box, const PxTransform& boxPose, const PxTriangleMeshGeometry& mesh,
-    const PxTransform& meshPose, unsigned& fallbacks)
-{
-    bool uncertain = cache.fallback;
-    const PxVec3 center = cachePose.transformInv(boxPose.p);
-    for (const auto& triangle : cache.triangles)
-    {
-        const auto result = VoxelTriangleOverlap::Test(triangle, center);
-        if (result == VoxelTriangleOverlap::EResult::Overlap) return true;
-        uncertain |= result == VoxelTriangleOverlap::EResult::Uncertain;
-    }
-    if (!uncertain) return false;
-    ++fallbacks;
-    return PxGeometryQuery::overlap(box, boxPose, mesh, meshPose);
+    PxConvexMeshDesc desc;
+    desc.points.count = PxU32(points.size());
+    desc.points.stride = sizeof(PxVec3);
+    desc.points.data = points.data();
+    desc.flags = PxConvexFlag::eCOMPUTE_CONVEX;
+    Buffer buffer;
+    if (!cooking.cookConvexMesh(desc, buffer)) throw std::runtime_error("Convex cooking failed");
+    PxConvexMesh* result = physics.createConvexMesh(buffer);
+    if (!result) throw std::runtime_error("Convex creation failed");
+    return result;
 }
 
 // One tile of a sensor grid: voxel (x, y, z) has local center origin + (index + .5) * voxel, scaled
@@ -208,13 +180,13 @@ static void buildTile(const Tile& tile, double padding, TileEnv& env)
     env.deferred.Reset(int32_t(env.world.size()));
 }
 
-struct RasterTotals
+struct Totals
 {
     unsigned tiles = 0, voxels = 0, hits = 0, certain = 0;
     VoxelSurfaceRaster::FRasterStats stats;
 };
 
-static bool compareTile(const TileEnv& env, const char* what, RasterTotals& totals)
+static bool compareTile(const TileEnv& env, const char* what, Totals& totals)
 {
     for (size_t i = 0; i < env.world.size(); ++i)
     {
@@ -230,10 +202,11 @@ static bool compareTile(const TileEnv& env, const char* what, RasterTotals& tota
     return true;
 }
 
-// Rasterize every triangle the sensor would fetch for this tile and compare with PhysX per voxel.
-// Also checks that each footprint holds every voxel where VoxelTriangleOverlap::Test is not Outside.
-static bool rasterMesh(const Tile& tile, const PxTriangleMeshGeometry& geometry, const PxTransform& meshPose,
-    double padding, RasterTotals& totals)
+// Rasterize every triangle the sensor would fetch for this tile and compare with PhysX per voxel. Also checks
+// that each footprint and early-out box holds every voxel where VoxelTriangleOverlap::Test is not Outside, and
+// that the test agrees with every voxel the footprint reports as certain.
+static bool checkMeshTile(const Tile& tile, const PxTriangleMeshGeometry& geometry, const PxTransform& meshPose,
+    double padding, Totals& totals)
 {
     TileEnv env;
     buildTile(tile, padding, env);
@@ -261,7 +234,6 @@ static bool rasterMesh(const Tile& tile, const PxTriangleMeshGeometry& geometry,
         const VoxelTriangleOverlap::FTriangle prepared = VoxelTriangleOverlap::MakeTriangle(triangle, halfExtent, error);
         if (!prepared.Degenerate)
         {
-            // The footprint and the early-out box must both hold every voxel where Test is not Outside.
             std::fill(visited.begin(), visited.end(), false);
             bool sound = true;
             VoxelSurfaceRaster::ForEachTriangleVoxel(prepared, env.lattice, halfExtent, [&](int x, int y, int z, bool certain)
@@ -269,7 +241,6 @@ static bool rasterMesh(const Tile& tile, const PxTriangleMeshGeometry& geometry,
                 const int voxel = env.index(x, y, z);
                 visited[voxel] = true;
                 PxVec3 center;
-                // Certain voxels skip the test, so the test and the gate must agree with them.
                 if (certain && (!env.GetCenter(x, y, z, center) || VoxelTriangleOverlap::Test(prepared, center) !=
                     VoxelTriangleOverlap::EResult::Overlap))
                 {
@@ -301,11 +272,10 @@ static bool rasterMesh(const Tile& tile, const PxTriangleMeshGeometry& geometry,
     return compareTile(env, "mesh", totals);
 }
 
-static bool rasterPrimitive(const Tile& tile, const PxGeometry& geometry, const PxTransform& pose,
-    double padding, RasterTotals& totals)
+static bool checkPrimitiveTile(const Tile& tile, const PxGeometry& geometry, const PxTransform& pose, Totals& totals)
 {
     TileEnv env;
-    buildTile(tile, padding, env);
+    buildTile(tile, 0.0, env);
     env.geometry = &geometry;
     env.pose = pose;
     env.bounds = PxGeometryQuery::getWorldBounds(geometry, pose);
@@ -315,7 +285,8 @@ static bool rasterPrimitive(const Tile& tile, const PxGeometry& geometry, const 
     return compareTile(env, "primitive", totals);
 }
 
-// The tile label rules against the definition and against the chunked per-voxel loop, on random candidate sets.
+// The label rules against their definition on random candidate sets: the unique highest-priority label among the
+// overlapping candidates, or a tie between two different labels of that priority.
 static bool checkLabelRules()
 {
     const unsigned char priorities[32] = {0,7,7,1,1,1,1,2,2,1,1,1,6,6,4,3,3,1,5,5,1,1,1,1,8,1,1,1,1,1,2,2};
@@ -329,7 +300,6 @@ static bool checkLabelRules()
             candidate = Candidate{(unsigned char)(1 + random() % 31), random() % 3 == 0};
         std::stable_sort(candidates.begin(), candidates.end(), [&](const Candidate& a, const Candidate& b)
             { return priorities[a.label] > priorities[b.label]; });
-        // Definition: the unique highest-priority label, or a tie between two of them.
         int best = 0, expected = 0;
         for (const Candidate& candidate : candidates)
             if (candidate.overlap) best = std::max(best, int(priorities[candidate.label]));
@@ -340,19 +310,10 @@ static bool checkLabelRules()
         for (const Candidate& candidate : candidates)
             if (!rules.IsClosed(state, candidate.label, priorities[candidate.label]) && candidate.overlap)
                 rules.Apply(state, candidate.label);
-        const int raster = state & VoxelSurfaceRaster::TieFlag ? -1 : state;
-        int label = 0, chunked = 0;
-        for (const Candidate& candidate : candidates)
+        const int actual = state & VoxelSurfaceRaster::TieFlag ? -1 : state;
+        if (actual != expected)
         {
-            if (priorities[candidate.label] < priorities[label]) break;
-            if (candidate.label == label || !candidate.overlap) continue;
-            if (label) { chunked = -1; break; }
-            label = candidate.label;
-        }
-        if (chunked == 0) chunked = label;
-        if (raster != expected || chunked != expected)
-        {
-            fprintf(stderr, "Label rules: trial=%d expected=%d raster=%d chunked=%d\n", trial, expected, raster, chunked);
+            fprintf(stderr, "Label rules: trial=%d expected=%d actual=%d\n", trial, expected, actual);
             return false;
         }
     }
@@ -391,9 +352,18 @@ static bool checkClip()
     return true;
 }
 
-// Degenerate triangles defer every voxel they may touch; non-finite ones defer the whole tile.
+// Degenerate triangles are never tested; the raster defers every voxel they may touch, or the whole tile when
+// their vertices are not finite.
 static bool checkDegenerate()
 {
+    for (const PxTriangle triangle : {PxTriangle(PxVec3(0), PxVec3(0), PxVec3(0)),
+        PxTriangle(PxVec3(-1, 0, 0), PxVec3(0), PxVec3(1, 0, 0))})
+        if (VoxelTriangleOverlap::Test(VoxelTriangleOverlap::MakeTriangle(triangle, PxVec3(5), .001f), PxVec3(0)) !=
+            VoxelTriangleOverlap::EResult::Uncertain)
+        {
+            fprintf(stderr, "Degenerate triangle was tested\n");
+            return false;
+        }
     const Tile tile{{8, 8, 8}, 10.f, PxVec3(1), PxTransform(PxVec3(3, -2, 1)), PxVec3(-40)};
     PxPlaneGeometry plane;
     for (const PxTriangle triangle : {PxTriangle(PxVec3(-20, 3, -2), PxVec3(0, 3, -2), PxVec3(20, 3, -2)),
@@ -422,15 +392,56 @@ static bool checkDegenerate()
     return true;
 }
 
-static bool checkRaster(PxPhysics& physics, const std::vector<PxTriangleMesh*>& meshes, const PxVec3& localOffset,
-    PxTriangleMesh* shifted, PxConvexMesh* convex)
+int main()
 {
-    if (!checkLabelRules() || !checkClip() || !checkDegenerate()) return false;
-    RasterTotals totals;
+    Allocator allocator;
+    Errors errors;
+    PxFoundation* foundation = PxCreateFoundation(PX_FOUNDATION_VERSION, allocator, errors);
+    if (!foundation) throw std::runtime_error("PhysX foundation initialization failed");
+    PxPhysics* physics = PxCreatePhysics(PX_PHYSICS_VERSION, *foundation, PxTolerancesScale(), false);
+    if (!physics) throw std::runtime_error("PhysX initialization failed");
+    PxCooking* cooking = PxCreateCooking(PX_PHYSICS_VERSION, *foundation,
+        PxCookingParams(physics->getTolerancesScale()));
+    if (!cooking) throw std::runtime_error("PhysX cooking initialization failed");
+
+    if (!checkLabelRules() || !checkClip() || !checkDegenerate()) return 1;
+
+    // Undulating terrain, a flat plane, a plane far from its mesh origin, and both again with the BVH34 midphase.
+    std::vector<PxVec3> vertices;
+    std::vector<PxU32> indices;
+    for (int y = 0; y <= 32; ++y)
+        for (int x = 0; x <= 32; ++x)
+            vertices.emplace_back((x - 16) * 10.f, (y - 16) * 10.f,
+                2.f * std::sin(float(x)) * std::cos(float(y)));
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+        {
+            const PxU32 a = PxU32(y * 33 + x);
+            indices.insert(indices.end(), {a, a + 1, a + 34, a, a + 34, a + 33});
+        }
+    const std::vector<PxVec3> square = {{-100,-100,0}, {100,-100,0}, {100,100,0}, {-100,100,0}};
+    const PxVec3 localOffset(100000,-80000,120000);
+    std::vector<PxVec3> shiftedSquare;
+    for (const PxVec3& corner : square) shiftedSquare.push_back(localOffset + corner);
+    PxTriangleMesh* terrain = makeMesh(*physics, *cooking, vertices, indices);
+    PxTriangleMesh* plane = makeMesh(*physics, *cooking, square, {0,1,2,0,2,3});
+    PxTriangleMesh* shifted = makeMesh(*physics, *cooking, shiftedSquare, {0,1,2,0,2,3});
+    PxCookingParams alternate = cooking->getParams();
+    alternate.midphaseDesc.setToDefault(PxMeshMidPhase::eBVH34);
+    cooking->setParams(alternate);
+    PxTriangleMesh* terrain34 = makeMesh(*physics, *cooking, vertices, indices);
+    PxTriangleMesh* plane34 = makeMesh(*physics, *cooking, square, {0,1,2,0,2,3});
+
     std::mt19937 random(4242);
     std::uniform_real_distribution<float> value(-1.f, 1.f);
+    std::vector<PxVec3> hull;
+    for (int index = 0; index < 24; ++index)
+        hull.push_back(PxVec3(value(random) * 30, value(random) * 20, value(random) * 25));
+    PxConvexMesh* convex = makeConvex(*physics, *cooking, hull);
+
+    Totals totals;
     const auto start = std::chrono::steady_clock::now();
-    for (PxTriangleMesh* mesh : meshes)
+    for (PxTriangleMesh* mesh : {terrain, plane, shifted, terrain34, plane34})
     for (const PxVec3 scale : {PxVec3(1), PxVec3(.6f,1.7f,.8f), PxVec3(-1,1.2f,.7f)})
     for (const PxVec3 offset : {PxVec3(0), PxVec3(100000,-80000,120000)})
     for (int rotation = 0; rotation < 3; ++rotation)
@@ -449,14 +460,16 @@ static bool checkRaster(PxPhysics& physics, const std::vector<PxTriangleMesh*>& 
         if (variant > 0) tile.sensor.p += PxVec3(value(random), value(random), value(random)) * 7.f;
         if (variant == 2) tile.scale = PxVec3(1.f, -1.f, 1.25f);
         if (variant == 3) { tile.voxel = 50.f; tile.size[0] = tile.size[1] = 8; tile.size[2] = 8; tile.origin = PxVec3(-200); }
+        // Padding only grows footprints, so it must not change the result.
         for (double padding : {0.0, 1.0})
-            if (!rasterMesh(tile, geometry, meshPose, padding, totals))
+            if (!checkMeshTile(tile, geometry, meshPose, padding, totals))
             {
                 fprintf(stderr, "  offset=%g scale=%g,%g,%g rotation=%d variant=%d padding=%g\n",
                     offset.x, scale.x, scale.y, scale.z, rotation, variant, padding);
-                return false;
+                return 2;
             }
     }
+
     const PxConvexMeshGeometry convexGeometry(convex, PxMeshScale(PxVec3(1.3f, .7f, 1.f), PxQuat(.4f, PxVec3(0,1,0))));
     const PxBoxGeometry boxGeometry(PxVec3(37, 12, 21));
     const PxSphereGeometry sphereGeometry(33);
@@ -471,144 +484,24 @@ static bool checkRaster(PxPhysics& physics, const std::vector<PxTriangleMesh*>& 
         Tile tile{{16, 16, 24}, 10.f, PxVec3(1), PxTransform(offset, PxQuat(.3f * variant, PxVec3(0,0,1))),
             PxVec3(-80, -80, -120)};
         if (variant == 2) tile.scale = PxVec3(1.f, -1.f, 1.25f);
-        if (!rasterPrimitive(tile, *geometry, pose, 0.0, totals))
+        if (!checkPrimitiveTile(tile, *geometry, pose, totals))
         {
             fprintf(stderr, "  geometry=%d offset=%g variant=%d\n", int(geometry->getType()), offset.x, variant);
-            return false;
+            return 3;
         }
     }
-    printf("PASS: raster matched PhysX on %u tiles (%u voxels, %u hits); visited=%llu tests=%llu uncertain=%llu "
-        "deferred=%llu primitive queries=%llu culled bricks=%llu degenerate=%llu skipped=%llu certain=%llu (%u checked); %.0f ms\n",
-        totals.tiles, totals.voxels, totals.hits, (unsigned long long)totals.stats.Visited,
+
+    printf("PASS: raster matched PhysX on %u tiles (%u voxels, %u hits) in %.0f ms\n", totals.tiles, totals.voxels,
+        totals.hits, std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count());
+    printf("  visited=%llu tests=%llu uncertain=%llu deferred=%llu certain=%llu (%u checked) skipped triangles=%llu\n",
+        (unsigned long long)totals.stats.Visited,
         (unsigned long long)(totals.stats.Overlaps + totals.stats.Uncertain + totals.stats.Outside),
         (unsigned long long)totals.stats.Uncertain, (unsigned long long)totals.stats.DeferredQueries,
-        (unsigned long long)totals.stats.PrimitiveQueries, (unsigned long long)totals.stats.CulledBricks,
-        (unsigned long long)totals.stats.Degenerate, (unsigned long long)totals.stats.Skipped,
-        (unsigned long long)totals.stats.Certain, totals.certain,
-        std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count());
-    return true;
-}
+        (unsigned long long)totals.stats.Certain, totals.certain, (unsigned long long)totals.stats.Skipped);
+    printf("  primitive queries=%llu culled bricks=%llu\n", (unsigned long long)totals.stats.PrimitiveQueries,
+        (unsigned long long)totals.stats.CulledBricks);
 
-int main()
-{
-    Allocator allocator;
-    Errors errors;
-    PxFoundation* foundation = PxCreateFoundation(PX_FOUNDATION_VERSION, allocator, errors);
-    if (!foundation) throw std::runtime_error("PhysX foundation initialization failed");
-    PxPhysics* physics = PxCreatePhysics(PX_PHYSICS_VERSION, *foundation, PxTolerancesScale(), false);
-    if (!physics) throw std::runtime_error("PhysX initialization failed");
-    PxCooking* cooking = PxCreateCooking(PX_PHYSICS_VERSION, *foundation,
-        PxCookingParams(physics->getTolerancesScale()));
-    if (!cooking) throw std::runtime_error("PhysX cooking initialization failed");
-
-    std::vector<PxVec3> vertices;
-    std::vector<PxU32> indices;
-    for (int y = 0; y <= 32; ++y)
-        for (int x = 0; x <= 32; ++x)
-            vertices.emplace_back((x - 16) * 10.f, (y - 16) * 10.f,
-                2.f * std::sin(float(x)) * std::cos(float(y)));
-    for (int y = 0; y < 32; ++y)
-        for (int x = 0; x < 32; ++x)
-        {
-            const PxU32 a = PxU32(y * 33 + x);
-            indices.insert(indices.end(), {a, a + 1, a + 34, a, a + 34, a + 33});
-        }
-    PxTriangleMesh* terrain = makeMesh(*physics, *cooking, vertices, indices);
-    PxTriangleMesh* plane = makeMesh(*physics, *cooking,
-        {{-100,-100,0}, {100,-100,0}, {100,100,0}, {-100,100,0}}, {0,1,2,0,2,3});
-    const PxVec3 localOffset(100000,-80000,120000);
-    PxTriangleMesh* shifted = makeMesh(*physics, *cooking,
-        {localOffset + PxVec3(-100,-100,0), localOffset + PxVec3(100,-100,0),
-         localOffset + PxVec3(100,100,0), localOffset + PxVec3(-100,100,0)}, {0,1,2,0,2,3});
-    PxCookingParams alternate = cooking->getParams();
-    alternate.midphaseDesc.setToDefault(PxMeshMidPhase::eBVH34);
-    cooking->setParams(alternate);
-    PxTriangleMesh* terrain34 = makeMesh(*physics, *cooking, vertices, indices);
-    PxTriangleMesh* plane34 = makeMesh(*physics, *cooking,
-        {{-100,-100,0}, {100,-100,0}, {100,100,0}, {-100,100,0}}, {0,1,2,0,2,3});
-    std::mt19937 random(9071);
-    std::uniform_real_distribution<float> value(-1.f, 1.f);
-    unsigned queries = 0, fallbacks = 0;
-    double preparationMs = 0, referenceMs = 0, cachedMs = 0;
-    double gridReferenceMs = 0, gridCachedMs = 0;
-    for (PxTriangleMesh* mesh : {terrain, plane, shifted, terrain34, plane34})
-    for (const PxVec3 scale : {PxVec3(1), PxVec3(.6f,1.7f,.8f), PxVec3(-1,1.2f,.7f)})
-    for (const PxVec3 offset : {PxVec3(0), PxVec3(100000,-80000,120000)})
-    for (int rotation = 0; rotation < 2; ++rotation)
-    {
-        const PxQuat meshRotation = rotation ? PxQuat(.35f, PxVec3(1,0,0)) : PxQuat(PxIdentity);
-        const PxQuat boxRotation = rotation ? PxQuat(.6457718f, PxVec3(0,0,1)) *
-            PxQuat(.1745329f, PxVec3(0,1,0)) : PxQuat(PxIdentity);
-        const PxTriangleMeshGeometry geometry(mesh, PxMeshScale(scale, PxQuat(.2f, PxVec3(0,0,1))));
-        const PxTransform meshPose(offset, meshRotation);
-        const PxVec3 meshCenter = mesh == shifted ? geometry.scale.transform(localOffset) : PxVec3(0);
-        const PxTransform cachePose(meshPose.transform(meshCenter), boxRotation);
-        const PxVec3 halfExtent(5);
-        const PxBoxGeometry box(halfExtent);
-        auto start = std::chrono::steady_clock::now();
-        const Cache cache = makeCache(geometry, meshPose, cachePose, halfExtent);
-        preparationMs += std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count();
-        std::vector<PxTransform> poses;
-        for (int x = 0; x < 4; ++x)
-            for (int y = 0; y < 4; ++y)
-                for (int z = 0; z < 8; ++z)
-                    poses.emplace_back(cachePose.transform(PxVec3((x-1.5f)*10, (y-1.5f)*10, (z-3.5f)*10)), boxRotation);
-        for (int index = 0; index < 2000; ++index)
-            poses.emplace_back(cachePose.transform(PxVec3(value(random)*15, value(random)*15,
-                value(random)*35)), boxRotation);
-        std::vector<bool> expected(poses.size());
-        std::vector<bool> actual(poses.size());
-        start = std::chrono::steady_clock::now();
-        for (size_t index = 0; index < poses.size(); ++index)
-        {
-            if (index == 128)
-                gridReferenceMs += std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count();
-            expected[index] = PxGeometryQuery::overlap(box, poses[index], geometry, meshPose);
-        }
-        referenceMs += std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count();
-        start = std::chrono::steady_clock::now();
-        for (size_t index = 0; index < poses.size(); ++index)
-        {
-            if (index == 128)
-                gridCachedMs += std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count();
-            actual[index] = cachedOverlap(cache, cachePose, box, poses[index], geometry, meshPose, fallbacks);
-        }
-        cachedMs += std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - start).count();
-        for (size_t index = 0; index < poses.size(); ++index)
-        {
-            if (actual[index] != expected[index])
-            {
-                fprintf(stderr, "Mismatch query=%u index=%zu offset=%g,%g,%g scale=%g,%g,%g\n",
-                    queries, index, offset.x, offset.y, offset.z, scale.x, scale.y, scale.z);
-                return 1;
-            }
-            ++queries;
-        }
-    }
-    // Degenerate inputs must defer to the geometry oracle, rather than claim a hit.
-    for (const PxTriangle triangle : {PxTriangle(PxVec3(0),PxVec3(0),PxVec3(0)),
-        PxTriangle(PxVec3(-1,0,0),PxVec3(0),PxVec3(1,0,0))})
-        if (VoxelTriangleOverlap::Test(VoxelTriangleOverlap::MakeTriangle(triangle, PxVec3(5), .001f),
-            PxVec3(0)) != VoxelTriangleOverlap::EResult::Uncertain) return 2;
-    std::vector<PxVec3> hull;
-    for (int index = 0; index < 24; ++index)
-        hull.push_back(PxVec3(value(random) * 30, value(random) * 20, value(random) * 25));
-    PxConvexMeshDesc hullDesc;
-    hullDesc.points.count = PxU32(hull.size());
-    hullDesc.points.stride = sizeof(PxVec3);
-    hullDesc.points.data = hull.data();
-    hullDesc.flags = PxConvexFlag::eCOMPUTE_CONVEX;
-    Buffer hullBuffer;
-    if (!cooking->cookConvexMesh(hullDesc, hullBuffer)) throw std::runtime_error("Convex cooking failed");
-    PxConvexMesh* convex = physics->createConvexMesh(hullBuffer);
-    if (!convex) throw std::runtime_error("Convex creation failed");
-    if (!checkRaster(*physics, {terrain, plane, shifted, terrain34, plane34}, localOffset, shifted, convex)) return 3;
     convex->release();
-    printf("PASS: %u oracle comparisons; %u whole-mesh fallbacks\n", queries, fallbacks);
-    printf("Synthetic timings only: prepare=%.3f ms, direct=%.3f ms, cached=%.3f ms\n",
-        preparationMs, referenceMs, cachedMs);
-    printf("Actual 128-voxel chunks, including preparation: direct=%.3f ms, cached=%.3f ms\n",
-        gridReferenceMs, gridCachedMs + preparationMs);
     terrain->release(); plane->release(); shifted->release(); terrain34->release(); plane34->release();
     cooking->release(); physics->release(); foundation->release();
 }

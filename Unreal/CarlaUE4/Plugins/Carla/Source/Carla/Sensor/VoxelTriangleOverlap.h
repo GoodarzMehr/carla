@@ -122,16 +122,6 @@ namespace VoxelTriangleOverlap
         return 64.0f * FLT_EPSILON * Magnitude;
     }
 
-    inline FTriangle MakeTriangle(const physx::PxTriangleMeshGeometry& Geometry,
-        const physx::PxTransform& MeshPose, const physx::PxTransform& CachePose,
-        physx::PxU32 Index, const physx::PxVec3& HalfExtent)
-    {
-        physx::PxTriangle Triangle;
-        const float PositionError = FetchTriangle(Geometry, MeshPose, CachePose,
-            CachePose.transformInv(MeshPose), Index, HalfExtent, Triangle);
-        return MakeTriangle(Triangle, HalfExtent, PositionError);
-    }
-
     inline EResult Test(const FTriangle& Triangle, const physx::PxVec3& Center)
     {
         if (Triangle.Degenerate || !Center.isFinite())

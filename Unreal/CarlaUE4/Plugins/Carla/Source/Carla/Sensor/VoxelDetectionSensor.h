@@ -116,13 +116,11 @@ private:
     bool DrawDebug = false;
     bool ShowCalculationTime = false;
     bool UseTraceComplex = true;
-    bool ValidateOutput = false;
-    bool UseSurfaceRaster = true;
+    bool bReportedUnsupported = false;
 
-    int32 ChunkX = 32;
-    int32 ChunkY = 32;
-    int32 ChunkZ = 128;
+    int32 TileX = 32;
+    int32 TileY = 32;
+    int32 TileZ = 128;
 
     int32 OracleStride = 0;
-    int32 FootprintPadding = 0;
 };

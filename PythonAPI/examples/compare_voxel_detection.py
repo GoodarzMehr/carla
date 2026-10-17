@@ -21,9 +21,9 @@ client advancing the world. The current map and actors are retained.
 Reported latency includes world.tick(), sensor processing and delivery.
 Python payload inspection is excluded. Use the same static scene for timing.
 Use --attribute show_calculation_time=true for sensor timings in the server log.
-The log separates frame wall phases from sampled worker timings for gathering,
-culling, triangle preparation, fine voxel tests, and priority ties. Worker timings
-are not frame latency.
+The log separates frame wall phases from worker timings summed over tiles for
+gathering, triangle fetches, surface rasterization, PhysX queries, and priority
+ties. Worker timings are not frame latency.
 
 The ground is projected below the spawn point and reported relative to the sensor;
 a warning is printed when it falls outside the voxel grid, because timings would
@@ -32,8 +32,8 @@ sits at that height in the sensor frame.
 
 --save-payloads writes every frame, warmup included, and --diff-saved compares a
 later run frame by frame. Use the same map, spawn point and attributes for both.
-Use --attribute validate_output=true or oracle_stride=N for checks inside the
-server; their results are in the server log.
+Use --attribute oracle_stride=N to compare every Nth voxel with a per-voxel engine
+query inside the server; the results are in the server log.
 """
 
 import argparse
@@ -105,7 +105,7 @@ def main():
     parser.add_argument('--preset', choices=('default', 'simbev'), default='default',
                         help='simbev: range 64 m, voxels 0.1 m, height -1..7 m, tiles 32x32x128')
     parser.add_argument('--json', action='store_true',
-                        help='print a JSON result on the final line for sweep_voxel_chunks.py')
+                        help='print a JSON result on the final line for sweep_voxel_tiles.py')
     parser.add_argument('--attribute', action='append', default=[], metavar='NAME=VALUE',
                         help='override a voxel blueprint attribute; repeat as needed')
     parser.add_argument('--spawn-point', type=int, default=0)
@@ -130,7 +130,7 @@ def main():
     if args.preset == 'simbev':
         attributes.update({'range': '64', 'voxel_size': '0.1',
                            'lower_limit': '-1', 'upper_limit': '7',
-                           'chunk_x': '32', 'chunk_y': '32', 'chunk_z': '128'})
+                           'tile_x': '32', 'tile_y': '32', 'tile_z': '128'})
     for item in args.attribute:
         name, separator, value = item.partition('=')
         if not separator or not name or not value:
@@ -148,7 +148,7 @@ def main():
     for name, value in attributes.items():
         blueprint.set_attribute(name, value)
     names = set(attributes) | {'range', 'voxel_size', 'lower_limit', 'upper_limit',
-                               'chunk_x', 'chunk_y', 'chunk_z',
+                               'tile_x', 'tile_y', 'tile_z',
                                'use_complex_collision', 'ignore_self'}
     converters = {
         carla.ActorAttributeType.Bool: 'as_bool',
@@ -160,13 +160,13 @@ def main():
     for name in sorted(names):
         attribute = blueprint.get_attribute(name)
         values[name] = getattr(attribute, converters[attribute.type])()
-    chunk_names = ('chunk_x', 'chunk_y', 'chunk_z')
-    chunks = [values[name] for name in chunk_names]
+    tile_names = ('tile_x', 'tile_y', 'tile_z')
+    tiles = [values[name] for name in tile_names]
     dimensions = [values[name] for name in ('range', 'voxel_size', 'lower_limit', 'upper_limit')]
     if not all(math.isfinite(value) for value in dimensions):
         parser.error('voxel dimensions must be finite')
-    if values['range'] <= 0 or values['voxel_size'] <= 0 or min(chunks) < 1:
-        parser.error('range, voxel-size, and chunks must be positive')
+    if values['range'] <= 0 or values['voxel_size'] <= 0 or min(tiles) < 1:
+        parser.error('range, voxel-size, and tiles must be positive')
     if values['upper_limit'] <= values['lower_limit']:
         parser.error('upper_limit must exceed lower_limit')
     width = math.ceil(2 * values['range'] / values['voxel_size'])
@@ -290,7 +290,7 @@ def main():
             'transform': str(transform),
             'attributes': values,
             'existing_voxel_sensors': existing,
-            'chunks': chunks,
+            'tiles': tiles,
             'frames': args.frames,
             'warmup': args.warmup,
             'voxel_count': voxel_count,

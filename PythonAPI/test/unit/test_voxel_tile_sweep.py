@@ -17,8 +17,8 @@ import unittest
 from unittest import mock
 
 
-SCRIPT = Path(__file__).resolve().parents[2] / 'examples' / 'sweep_voxel_chunks.py'
-SPEC = importlib.util.spec_from_file_location('voxel_chunk_sweep', SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[2] / 'examples' / 'sweep_voxel_tiles.py'
+SPEC = importlib.util.spec_from_file_location('voxel_tile_sweep', SCRIPT)
 sweep = importlib.util.module_from_spec(SPEC)
 with mock.patch.dict(sys.modules, {'carla': None}):
     SPEC.loader.exec_module(sweep)
@@ -27,12 +27,12 @@ with mock.patch.dict(sys.modules, {'carla': None}):
 def result_for(command, median=10.0):
     attributes = dict(command[index + 1].split('=', 1)
                       for index, value in enumerate(command) if value == '--attribute')
-    chunks = [int(attributes['chunk_' + axis]) for axis in 'xyz']
-    return {'chunks': chunks, 'attributes': attributes,
+    tiles = [int(attributes['tile_' + axis]) for axis in 'xyz']
+    return {'tiles': tiles, 'attributes': attributes,
             'capture_median_ms': median, 'transform': {'x': 0.0, 'yaw': 37.0}}
 
 
-class TestVoxelChunkSweep(unittest.TestCase):
+class TestVoxelTileSweep(unittest.TestCase):
     def run_sweep(self, arguments, child, error=None):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'results.csv'
@@ -59,35 +59,35 @@ class TestVoxelChunkSweep(unittest.TestCase):
 
     def test_sweep_covers_unique_axis_product_with_baseline_first(self):
         rows, calls, printed = self.run_sweep(
-            ['--chunk-x', '16', '32', '32', '--chunk-y', '16', '32',
-             '--chunk-z', '64', '128', '128', '--retest-top', '0'],
+            ['--tile-x', '16', '32', '32', '--tile-y', '16', '32',
+             '--tile-z', '64', '128', '128', '--retest-top', '0'],
             result_for)
-        triples = [tuple(result_for(command)['chunks']) for command in calls]
+        triples = [tuple(result_for(command)['tiles']) for command in calls]
         expected = {(x, y, z) for x in (16, 32) for y in (16, 32) for z in (64, 128)}
         self.assertEqual(triples[0], (32, 32, 128))
         self.assertEqual(len(triples), len(expected))
         self.assertEqual(set(triples), expected)
         self.assertEqual({(row['stage'], row['status']) for row in rows}, {('sweep', 'complete')})
-        self.assertIn('Best tested chunks: 32x32x128', printed)
+        self.assertIn('Best tested tiles: 32x32x128', printed)
 
     def test_ground_offset_is_forwarded_instead_of_height(self):
         _, calls, _ = self.run_sweep(
-            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8', '--retest-top', '0',
-             '--ground-offset', '-0.537', '--attribute', 'use_surface_raster=true'],
+            ['--tile-x', '4', '--tile-y', '4', '--tile-z', '8', '--retest-top', '0',
+             '--ground-offset', '-0.537', '--attribute', 'use_complex_collision=false'],
             result_for)
         command = calls[0]
         self.assertEqual(command[command.index('--ground-offset') + 1], '-0.537')
         self.assertNotIn('--height', command)
-        self.assertIn('use_surface_raster=true', command)
+        self.assertIn('use_complex_collision=false', command)
         _, calls, _ = self.run_sweep(
-            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8', '--retest-top', '0'], result_for)
+            ['--tile-x', '4', '--tile-y', '4', '--tile-z', '8', '--retest-top', '0'], result_for)
         self.assertEqual(calls[0][calls[0].index('--height') + 1], '2.0')
         self.assertNotIn('--ground-offset', calls[0])
 
     def test_retest_changes_winner(self):
         def child(command):
             result = result_for(command)
-            x = result['chunks'][0]
+            x = result['tiles'][0]
             frames = int(command[command.index('--frames') + 1])
             result['capture_median_ms'] = (
                 {2: 40.0, 4: 15.0}[x] if frames == 7 else
@@ -95,31 +95,31 @@ class TestVoxelChunkSweep(unittest.TestCase):
             return result
 
         rows, calls, printed = self.run_sweep(
-            ['--chunk-x', '2', '4', '8', '--chunk-y', '4', '--chunk-z', '8',
+            ['--tile-x', '2', '4', '8', '--tile-y', '4', '--tile-z', '8',
              '--retest-top', '2', '--retest-frames', '7'], child)
         self.assertEqual([row['stage'] for row in rows],
                          ['sweep'] * 3 + ['retest'] * 2)
-        self.assertEqual([result_for(command)['chunks'][0] for command in calls[3:5]], [2, 4])
-        self.assertEqual(result_for(calls[-1])['chunks'], [4, 4, 8])
+        self.assertEqual([result_for(command)['tiles'][0] for command in calls[3:5]], [2, 4])
+        self.assertEqual(result_for(calls[-1])['tiles'], [4, 4, 8])
         self.assertIn('4x4x8; median capture 15.00 ms (retest)', printed)
 
     def test_sweep_preserves_requested_collision_setting(self):
         rows, calls, printed = self.run_sweep(
-            ['--chunk-x', '4', '--chunk-y', '4', '--chunk-z', '8',
+            ['--tile-x', '4', '--tile-y', '4', '--tile-z', '8',
              '--retest-top', '0', '--attribute', 'use_complex_collision=false'], result_for)
         self.assertEqual(result_for(calls[0])['attributes']['use_complex_collision'], 'false')
         self.assertIn('"use_complex_collision": "false"', rows[0]['attributes'])
-        self.assertIn('Best tested chunks: 4x4x8', printed)
+        self.assertIn('Best tested tiles: 4x4x8', printed)
 
     def test_failed_trial_preserves_csv_results(self):
         def child(command):
             result = result_for(command)
-            if result['chunks'][0] == 2:
+            if result['tiles'][0] == 2:
                 raise RuntimeError('Sensor frame timed out')
             return result
 
         rows, calls, _ = self.run_sweep(
-            ['--chunk-x', '4', '2', '--chunk-y', '4', '--chunk-z', '8', '--retest-top', '0'],
+            ['--tile-x', '4', '2', '--tile-y', '4', '--tile-z', '8', '--retest-top', '0'],
             child, error='Sensor frame timed out')
         self.assertEqual(len(calls), 2)
         self.assertEqual([(row['stage'], row['status']) for row in rows],
@@ -130,9 +130,9 @@ class TestVoxelChunkSweep(unittest.TestCase):
         process = mock.MagicMock()
         process.__enter__.return_value = process
         process.returncode = 0
-        process.communicate.return_value = ('Trial complete\n{"chunks": [4, 4, 8]}\n', None)
+        process.communicate.return_value = ('Trial complete\n{"tiles": [4, 4, 8]}\n', None)
         with mock.patch.object(sweep.subprocess, 'Popen', return_value=process):
-            self.assertEqual(sweep.run_child(['benchmark']), {'chunks': [4, 4, 8]})
+            self.assertEqual(sweep.run_child(['benchmark']), {'tiles': [4, 4, 8]})
             process.communicate.side_effect = [KeyboardInterrupt, ('Cleanup complete', None)]
             with self.assertRaises(KeyboardInterrupt):
                 sweep.run_child(['benchmark'])

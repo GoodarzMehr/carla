@@ -6,20 +6,17 @@
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
-"""Find the fastest tested power-of-two voxel chunk dimensions.
+"""Find the fastest tested power-of-two voxel tile dimensions.
 
 Each trial runs compare_voxel_detection.py with one voxel sensor. Timings cover
 world.tick() and sensor delivery, with Python payload inspection excluded.
 The best three triples are measured again with more frames.
 Use a static scene with no other client advancing the world.
 
-    python3 sweep_voxel_chunks.py --dry-run
-    python3 sweep_voxel_chunks.py --port 18731 --output chunks.csv
-    python3 sweep_voxel_chunks.py --ground-offset -0.537
-    python3 sweep_voxel_chunks.py --attribute use_surface_raster=false \
-        --chunk-x 2 4 8 16 --chunk-y 2 4 8 16 --chunk-z 2 4 8
-
-With the surface raster (the default) the chunk sizes are tile sizes.
+    python3 sweep_voxel_tiles.py --dry-run
+    python3 sweep_voxel_tiles.py --port 18731 --output tiles.csv
+    python3 sweep_voxel_tiles.py --ground-offset -0.537
+    python3 sweep_voxel_tiles.py --tile-x 16 32 64 --tile-y 16 32 64 --tile-z 128
 
 Results are flushed to CSV after each child run. Ctrl+C stops the sweep and
 allows the active child to destroy its sensors and restore world settings.
@@ -44,7 +41,7 @@ def power_of_two(value):
     except ValueError:
         raise argparse.ArgumentTypeError('expected a positive integer power of two')
     if number < 1 or number > (1 << 30) or number & (number - 1):
-        raise argparse.ArgumentTypeError('expected a positive power of two fitting a 32-bit chunk dimension')
+        raise argparse.ArgumentTypeError('expected a positive power of two fitting a 32-bit tile dimension')
     return number
 
 
@@ -70,9 +67,9 @@ def run_child(command):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--chunk-x', nargs='+', type=power_of_two, default=[8, 16, 32, 64, 128])
-    parser.add_argument('--chunk-y', nargs='+', type=power_of_two, default=[8, 16, 32, 64, 128])
-    parser.add_argument('--chunk-z', nargs='+', type=power_of_two, default=[32, 64, 128])
+    parser.add_argument('--tile-x', nargs='+', type=power_of_two, default=[8, 16, 32, 64, 128])
+    parser.add_argument('--tile-y', nargs='+', type=power_of_two, default=[8, 16, 32, 64, 128])
+    parser.add_argument('--tile-z', nargs='+', type=power_of_two, default=[32, 64, 128])
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=2000)
     parser.add_argument('--timeout', type=float, default=120.0)
@@ -93,7 +90,7 @@ def main():
     parser.add_argument('--retest-top', type=int, default=3,
                         help='retest this many sweep finalists; 0 disables retesting')
     parser.add_argument('--retest-frames', type=int, default=10)
-    parser.add_argument('--output', type=Path, default=Path('voxel_chunk_sweep.csv'))
+    parser.add_argument('--output', type=Path, default=Path('voxel_tile_sweep.csv'))
     parser.add_argument('--dry-run', action='store_true', help='print the plan without connecting')
     args = parser.parse_args()
     if args.frames < 1 or args.warmup < 0 or args.retest_top < 0 or args.retest_frames < 1:
@@ -101,7 +98,7 @@ def main():
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('timeout must be finite and positive')
 
-    controlled = {'chunk_x', 'chunk_y', 'chunk_z', 'sensor_tick',
+    controlled = {'tile_x', 'tile_y', 'tile_z', 'sensor_tick',
                   'draw_debug', 'show_calculation_time'}
     for item in args.attribute:
         name, separator, value = item.partition('=')
@@ -110,7 +107,7 @@ def main():
         if name in controlled:
             parser.error('%s is controlled by this sweep' % name)
 
-    axes = [list(dict.fromkeys(axis)) for axis in (args.chunk_x, args.chunk_y, args.chunk_z)]
+    axes = [list(dict.fromkeys(axis)) for axis in (args.tile_x, args.tile_y, args.tile_z)]
     triples = list(itertools.product(*axes))
     random.Random(args.seed).shuffle(triples)
     baseline = (32, 32, 128)
@@ -130,10 +127,10 @@ def main():
     for attribute in args.attribute + ['draw_debug=false', 'show_calculation_time=false']:
         forwarded.extend(['--attribute', attribute])
 
-    def command_for(chunks, frames, warmup):
+    def command_for(tiles, frames, warmup):
         command = [sys.executable, str(helper)] + forwarded + [
             '--frames', str(frames), '--warmup', str(warmup)]
-        for name, value in zip(('chunk_x', 'chunk_y', 'chunk_z'), chunks):
+        for name, value in zip(('tile_x', 'tile_y', 'tile_z'), tiles):
             command.extend(['--attribute', '%s=%d' % (name, value)])
         return command
 
@@ -144,7 +141,7 @@ def main():
         print('CSV: %s (no file written)' % args.output)
         return 0
 
-    fields = ['stage', 'status', 'chunk_x', 'chunk_y', 'chunk_z', 'preset', 'map',
+    fields = ['stage', 'status', 'tile_x', 'tile_y', 'tile_z', 'preset', 'map',
               'transform', 'attributes', 'existing_voxel_sensors',
               'frames', 'warmup', 'voxel_count',
               'occupied_voxels', 'capture_median_ms', 'capture_min_ms', 'capture_max_ms',
@@ -156,16 +153,16 @@ def main():
         completed = 0
         total_runs = len(triples) + retest_count
 
-        def trial(stage, chunks, frames, warmup):
+        def trial(stage, tiles, frames, warmup):
             nonlocal completed
             print('[%d/%d] %s %dx%dx%d, %d frames' %
-                  (completed + 1, total_runs, stage, *chunks, frames), flush=True)
-            row = dict(zip(('chunk_x', 'chunk_y', 'chunk_z'), chunks))
+                  (completed + 1, total_runs, stage, *tiles, frames), flush=True)
+            row = dict(zip(('tile_x', 'tile_y', 'tile_z'), tiles))
             row.update(stage=stage, preset=args.preset, frames=frames, warmup=warmup)
             try:
-                result = run_child(command_for(chunks, frames, warmup))
-                if result['chunks'] != list(chunks):
-                    raise RuntimeError('Benchmark used unexpected chunks: %s' % result['chunks'])
+                result = run_child(command_for(tiles, frames, warmup))
+                if result['tiles'] != list(tiles):
+                    raise RuntimeError('Benchmark used unexpected tiles: %s' % result['tiles'])
                 if not math.isfinite(result['capture_median_ms']):
                     raise RuntimeError('Benchmark returned a nonfinite capture time')
                 if result.get('existing_voxel_sensors'):
@@ -186,15 +183,15 @@ def main():
             print('  median %.2f ms' % result['capture_median_ms'], flush=True)
             return result
 
-        results = [trial('sweep', chunks, args.frames, args.warmup) for chunks in triples]
+        results = [trial('sweep', tiles, args.frames, args.warmup) for tiles in triples]
         finalists = sorted(results, key=lambda row: row['capture_median_ms'])[:retest_count]
-        retests = [trial('retest', result['chunks'], args.retest_frames, args.warmup)
+        retests = [trial('retest', result['tiles'], args.retest_frames, args.warmup)
                    for result in finalists]
         winner = min(retests or results, key=lambda row: row['capture_median_ms'])
 
-    print('Best tested chunks: %dx%dx%d; median capture %.2f ms (%s)' %
-          (*winner['chunks'], winner['capture_median_ms'], 'retest' if retests else 'sweep'))
-    attributes = dict(zip(('chunk_x', 'chunk_y', 'chunk_z'), map(str, winner['chunks'])))
+    print('Best tested tiles: %dx%dx%d; median capture %.2f ms (%s)' %
+          (*winner['tiles'], winner['capture_median_ms'], 'retest' if retests else 'sweep'))
+    attributes = dict(zip(('tile_x', 'tile_y', 'tile_z'), map(str, winner['tiles'])))
     print('SimBEV attributes: ' + json.dumps(attributes))
     print('Results: %s' % args.output)
     return 0
