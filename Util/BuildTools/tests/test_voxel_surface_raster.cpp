@@ -273,9 +273,10 @@ static bool checkMeshTile(const Tile& tile, const PxTriangleMeshGeometry& geomet
     return compareTile(env, "mesh", totals);
 }
 
-// Heightfield of rows x columns samples with random heights, optional spikes and holes, cooked like a landscape.
+// Heightfield of rows x columns samples with random heights, optional spikes and holes, cooked like a landscape
+// (Unreal leaves the thickness at its default of -1).
 static PxHeightField* makeHeightField(PxPhysics& physics, PxCooking& cooking, int rows, int columns,
-    int roughness, int spikes, int holes, std::mt19937& random)
+    int roughness, int spikes, int holes, float thickness, std::mt19937& random)
 {
     std::vector<PxHeightFieldSample> samples(size_t(rows * columns));
     std::uniform_int_distribution<int> height(-roughness, roughness);
@@ -300,6 +301,7 @@ static PxHeightField* makeHeightField(PxPhysics& physics, PxCooking& cooking, in
     desc.samples.data = samples.data();
     desc.samples.stride = sizeof(PxHeightFieldSample);
     desc.flags = PxHeightFieldFlag::eNO_BOUNDARY_EDGES;
+    desc.thickness = thickness;
     PxHeightField* result = cooking.createHeightField(desc, physics.getPhysicsInsertionCallback());
     if (!result) throw std::runtime_error("Heightfield creation failed");
     return result;
@@ -318,9 +320,7 @@ static bool checkHeightFieldTile(const Tile& tile, const PxHeightFieldGeometry& 
     env.bounds = PxGeometryQuery::getWorldBounds(geometry, pose);
     const PxVec3 halfExtent(tile.voxel * .5f);
     const PxTransform hfToTile = env.tileFrame.transformInv(pose);
-    VoxelSurfaceRaster::FSurface surface;
-    surface.Up = hfToTile.q.rotate(PxVec3(0, 1, 0));
-    surface.Skin = std::abs(geometry.heightField->getThickness());
+    const VoxelSurfaceRaster::FSurface surface = VoxelSurfaceRaster::MakeSurface(hfToTile.q, geometry.heightField->getThickness());
     PxVec3 fetchExtent;
     for (int axis = 0; axis < 3; ++axis)
         fetchExtent[axis] = float(std::max(std::abs(env.lattice.Center(axis, 0)),
@@ -569,10 +569,11 @@ int main()
     VoxelSurfaceRaster::FRasterStats surfaceStats[3];
     const PxQuat heightUp(PxHalfPi, PxVec3(1, 0, 0));
     for (int kind = 0; kind < 4; ++kind)
+    for (const float thickness : {-1.f, 1.f, -16.f, 16.f})
     {
         const int roughness = kind == 0 ? 200 : 1500;
         PxHeightField* heightField = makeHeightField(*physics, *cooking, 13, 13, roughness,
-            kind >= 2 ? 12 : 0, kind == 3 ? 20 : 0, random);
+            kind >= 2 ? 12 : 0, kind == 3 ? 20 : 0, thickness, random);
         for (const float quad : {50.f, 100.f})
         for (int place = 0; place < 3; ++place)
         for (int variant = 0; variant < 4; ++variant)
@@ -590,7 +591,8 @@ int main()
             if (variant == 2) { tile.voxel = 50.f; tile.size[0] = tile.size[1] = 8; tile.size[2] = 8; tile.origin = PxVec3(-200); }
             if (!checkHeightFieldTile(tile, geometry, pose, totals, surfaceStats[place]))
             {
-                fprintf(stderr, "  terrain kind=%d quad=%g offset=%g variant=%d\n", kind, quad, offset.x, variant);
+                fprintf(stderr, "  terrain kind=%d thickness=%g quad=%g offset=%g variant=%d\n", kind, thickness, quad, offset.x,
+                    variant);
                 return 4;
             }
             ++heightFieldTiles;

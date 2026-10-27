@@ -181,6 +181,9 @@ namespace
         FCollisionObjectQueryParams ObjectParams;
         FTransform SensorTransform;
         FQuat VoxelRotation;
+        // Voxel query boxes keep this extent whatever the sensor's scale, while centers follow the full sensor transform. A
+        // scaled sensor therefore spaces boxes of BoxSize by its scale, as the per-voxel engine query does. The API spawns
+        // sensors with unit scale, which gives a contiguous grid; only a scaled parent actor changes it.
         FVector BoxExtent;
         FCollisionShape VoxelShape;
         FPhysicsShapeAdapter VoxelAdapter;
@@ -394,13 +397,21 @@ namespace
         }
     };
 
-    // Tiles are whole multiples of a brick, so bricks align with the tile grid.
-    FIntVector GetTileSize(int32 TileX, int32 TileY, int32 TileZ)
+    // Tiles are whole multiples of a brick, so bricks align with the tile grid. A tile larger than the grid covers it just
+    // the same, so requested sizes are clamped to the grid first, and the rounding runs in 64 bits so it cannot overflow.
+    FIntVector GetTileSize(const FIntVector& Requested, const FIntVector& GridSize)
     {
+        const auto Round = [](int32 Tile, int32 Grid, int32 Brick)
+        {
+            const int64 Clamped = FMath::Clamp<int64>(Tile, 1, FMath::Max(1, Grid));
+
+            return int32(FMath::Min<int64>(FMath::DivideAndRoundUp<int64>(Clamped, Brick) * Brick, MAX_int32 / Brick * Brick));
+        };
+
         return FIntVector(
-            FMath::DivideAndRoundUp(FMath::Max(1, TileX), BrickSize.X) * BrickSize.X,
-            FMath::DivideAndRoundUp(FMath::Max(1, TileY), BrickSize.Y) * BrickSize.Y,
-            FMath::DivideAndRoundUp(FMath::Max(1, TileZ), BrickSize.Z) * BrickSize.Z
+            Round(Requested.X, GridSize.X, BrickSize.X),
+            Round(Requested.Y, GridSize.Y, BrickSize.Y),
+            Round(Requested.Z, GridSize.Z, BrickSize.Z)
         );
     }
 
@@ -555,7 +566,8 @@ namespace
             return !HasTriangles(Candidate) && !physx::PxGeometryQuery::overlap(TileBox.Geometry, TileBox.Pose, Candidate.Geometry.any(), Candidate.Pose);
         });
 
-        Collector.Candidates.StableSort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
+        // Equal priorities need no order: the same label is closed to itself, and different labels tie and go to the engine query.
+        Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
         {
             return A.Priority > B.Priority;
         });
@@ -648,14 +660,12 @@ namespace
 
             const physx::PxTransform MeshToTile = TileFrame.transformInv(Candidate.Pose);
 
-            // PhysX treats a thin layer under a heightfield as solid, so its fetch box grows by that skin.
+            // PhysX treats a thin layer next to a heightfield as solid, so its fetch box grows by that skin.
             VoxelSurfaceRaster::FSurface Surface;
 
             if (bHeightField)
             {
-                Surface.Up = MeshToTile.q.rotate(physx::PxVec3(0.0f, 1.0f, 0.0f));
-
-                Surface.Skin = physx::PxAbs(Candidate.Geometry.heightField().heightField->getThickness());
+                Surface = VoxelSurfaceRaster::MakeSurface(MeshToTile.q, Candidate.Geometry.heightField().heightField->getThickness());
             }
 
             const physx::PxBoxGeometry CandidateFetchBox(FetchBox.halfExtents + physx::PxVec3(Surface.Skin));
@@ -741,9 +751,10 @@ namespace
     // Label every voxel tile by tile and return the number of tiles.
     int32 RunTiles(const FVoxelFrame& Frame, const FIntVector& TileSize, uint8* Labels, bool bShowCalculationTime, TArray<FVoxelProfile>& OutProfiles)
     {
-        const int32 TilesX = FMath::DivideAndRoundUp(Frame.GridSizeX, TileSize.X);
-        const int32 TilesY = FMath::DivideAndRoundUp(Frame.GridSizeY, TileSize.Y);
-        const int32 TilesZ = FMath::DivideAndRoundUp(Frame.GridSizeZ, TileSize.Z);
+        // In 64 bits, since a grid size plus a tile size can exceed an int32. Each count is at most its grid size.
+        const int32 TilesX = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeX, TileSize.X));
+        const int32 TilesY = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeY, TileSize.Y));
+        const int32 TilesZ = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeZ, TileSize.Z));
 
         const int32 TotalTiles = TilesX * TilesY * TilesZ;
 
@@ -806,7 +817,8 @@ namespace
 
         const int32 Offset = FCarlaEngine::GetFrameCounter() % Stride;
 
-        const int32 NumSamples = TotalVoxels > Offset ? FMath::DivideAndRoundUp(TotalVoxels - Offset, Stride) : 0;
+        // Counts and batch ends are computed in 64 bits, since a count plus the stride or batch size can exceed an int32.
+        const int32 NumSamples = TotalVoxels > Offset ? int32(FMath::DivideAndRoundUp<int64>(TotalVoxels - Offset, Stride)) : 0;
 
         constexpr int32 BatchSize = 4096;
         constexpr int32 MaxExamples = 8;
@@ -819,7 +831,7 @@ namespace
             int32 NumExamples = 0;
         };
 
-        const int32 NumBatches = FMath::DivideAndRoundUp(NumSamples, BatchSize);
+        const int32 NumBatches = int32(FMath::DivideAndRoundUp<int64>(NumSamples, BatchSize));
 
         TArray<FBatchResult> Batches;
 
@@ -831,7 +843,7 @@ namespace
 
             FBatchResult& Batch = Batches[BatchIndex];
 
-            const int32 End = FMath::Min((BatchIndex + 1) * BatchSize, NumSamples);
+            const int32 End = int32(FMath::Min<int64>(int64(BatchIndex + 1) * BatchSize, NumSamples));
 
             for (int32 Sample = BatchIndex * BatchSize; Sample < End; ++Sample)
             {
@@ -1075,30 +1087,39 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     // Zero disables the comparison with the per-voxel engine query.
     OracleStride = FMath::Max(0, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("oracle_stride", Description.Variations, 0));
 
-    // Pre-calculate grid dimensions.
-    GridSizeX = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
-    GridSizeY = FMath::CeilToInt(2.0f * BoxRange / BoxSize);
-    GridSizeZ = FMath::CeilToInt((Top - Bottom) / BoxSize);
+    // Voxels along one axis, or zero unless the count is positive and at most 2^31. The count is checked before its integer
+    // conversion, so infinite, NaN and huge counts cannot overflow.
+    const auto GetGridSize = [](float Length, float Size)
+    {
+        const float Count = Length / Size;
 
-    // Voxels are indexed with 32-bit integers and sent as one buffer, so larger grids would overflow. Send empty frames instead.
-    const int64 NumVoxels = int64(GridSizeX) * GridSizeY * GridSizeZ;
+        return (Count > 0.0f && Count <= float(MAX_int32)) ? int64(FMath::CeilToDouble(Count)) : int64(0);
+    };
 
-    if (GridSizeX <= 0 || GridSizeY <= 0 || GridSizeZ <= 0 || NumVoxels > MAX_int32)
+    const int64 SizeX = GetGridSize(2.0f * BoxRange, BoxSize);
+    const int64 SizeY = GetGridSize(2.0f * BoxRange, BoxSize);
+    const int64 SizeZ = GetGridSize(Top - Bottom, BoxSize);
+
+    // Voxels are indexed with 32-bit integers and sent as one buffer, so larger grids would overflow. Each size is at most
+    // 2^31, so SizeX * SizeY fits an int64, and dividing the limit avoids the last multiplication. Send empty frames instead.
+    const bool bValidGrid = SizeX > 0 && SizeY > 0 && SizeZ > 0 && SizeX * SizeY <= MAX_int32 / SizeZ;
+
+    GridSizeX = bValidGrid ? int32(SizeX) : 0;
+    GridSizeY = bValidGrid ? int32(SizeY) : 0;
+    GridSizeZ = bValidGrid ? int32(SizeZ) : 0;
+
+    if (!bValidGrid)
     {
         UE_LOG(
             LogCarla,
             Error,
-            TEXT("VoxelDetectionSensor: a %d x %d x %d grid (%lld voxels) is not supported; the limit is %d voxels. Increase voxel_size or reduce the range or height."),
-            GridSizeX,
-            GridSizeY,
-            GridSizeZ,
-            NumVoxels,
+            TEXT("VoxelDetectionSensor: range %g m, limits %g to %g m and voxel size %g m do not give a grid of 1 to %d voxels. Increase voxel_size or reduce the range or height."),
+            BoxRange / M_TO_CM,
+            Bottom / M_TO_CM,
+            Top / M_TO_CM,
+            BoxSize / M_TO_CM,
             MAX_int32
         );
-
-        GridSizeX = 0;
-        GridSizeY = 0;
-        GridSizeZ = 0;
     }
 
     UE_LOG(
@@ -1110,18 +1131,6 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
         GridSizeZ,
         GridSizeX * GridSizeY * GridSizeZ
     );
-}
-
-void AVoxelDetectionSensor::SetOwner(AActor *NewOwner)
-{
-    Super::SetOwner(NewOwner);
-}
-
-FVector AVoxelDetectionSensor::VoxelToWorld(int32 X, int32 Y, int32 Z) const
-{
-    FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
-
-    return GetTransform().TransformPosition(LocalPos);
 }
 
 void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime)
@@ -1166,7 +1175,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         UE_ARRAY_COUNT(SemanticPriority)
     );
 
-    const FIntVector TileSize = GetTileSize(TileX, TileY, TileZ);
+    const FIntVector TileSize = GetTileSize(FIntVector(TileX, TileY, TileZ), FIntVector(GridSizeX, GridSizeY, GridSizeZ));
 
     const double ParallelStart = FPlatformTime::Seconds();
 
@@ -1217,7 +1226,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
                 const int32 Y = Remainder / GridSizeZ;
                 const int32 Z = Remainder % GridSizeZ;
 
-                FVector Pos = VoxelToWorld(X, Y, Z);
+                FVector Pos = Frame.GetWorldPosition(X, Y, Z);
 
                 FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
 

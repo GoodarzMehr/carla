@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
-// de Barcelona (UAB). This work is licensed under the terms of the MIT license.
-
 #pragma once
 
 // Triangle-major labeling of one tile of voxels. Each triangle visits only the voxels where
@@ -541,6 +538,20 @@ namespace VoxelSurfaceRaster
         physx::PxVec3 Up = physx::PxVec3(0.0f, 0.0f, 1.0f);
         float Skin = 0.0f;
     };
+
+    // The skin of a heightfield whose height axis is rotated into the tile frame by HeightFieldToTile. PhysX counts a layer of
+    // |Thickness| below the surface for a negative thickness, as Unreal leaves it, and above it for a positive one, so Up points
+    // away from that layer.
+    inline FSurface MakeSurface(const physx::PxQuat& HeightFieldToTile, float Thickness)
+    {
+        FSurface Surface;
+
+        Surface.Up = HeightFieldToTile.rotate(physx::PxVec3(0.0f, Thickness > 0.0f ? -1.0f : 1.0f, 0.0f));
+
+        Surface.Skin = physx::PxAbs(Thickness);
+
+        return Surface;
+    }
 
     // One heightfield triangle in the tile frame, prepared for ConfirmsSurfaceOverlap. Margin bounds how far its vertices and the
     // voxel corners may be from what PhysX computes.

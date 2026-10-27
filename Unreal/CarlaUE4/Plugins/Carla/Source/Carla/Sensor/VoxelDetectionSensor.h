@@ -19,11 +19,7 @@ public:
 
     void Set(const FActorDescription &ActorDescription) override;
 
-    void SetOwner(AActor *NewOwner) override;
-
     void PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime) override;
-
-    FVector VoxelToWorld(int32 X, int32 Y, int32 Z) const;
 
     static TMap<int32, FLinearColor> ColorMap;
 
