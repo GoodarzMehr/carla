@@ -44,9 +44,7 @@ namespace
             physx::PxTransform Target;
 
             if ((Flags & physx::PxRigidBodyFlag::eKINEMATIC) && (Flags & physx::PxRigidBodyFlag::eUSE_KINEMATIC_TARGET_FOR_SCENE_QUERIES) && Dynamic->getKinematicTarget(Target))
-            {
                 return Target * Shape.getLocalPose();
-            }
         }
 
         return physx::PxShapeExt::getGlobalPose(Shape, Actor);
@@ -117,14 +115,10 @@ namespace
             const ECollisionChannel Channel = GetCollisionChannelAndExtraFilter(Filter.word3, ShapeMask);
 
             if (!(Filter.word3 & Complexity) || !(Objects.GetQueryBitfield() & (1u << Channel)) || (Objects.IgnoreMask & ShapeMask) || Params.bIgnoreTouches || Params.GetIgnoredActors().Contains(Filter.word0))
-            {
                 return physx::PxQueryHitType::eNONE;
-            }
 
             if (Params.GetIgnoredComponents().Num() && Params.GetIgnoredComponents().Contains(Shape->getSimulationFilterData().word2))
-            {
                 return physx::PxQueryHitType::eNONE;
-            }
 
             UPrimitiveComponent* Component = nullptr;
 
@@ -135,18 +129,14 @@ namespace
                 Component = Body->OwnerComponent.Get();
             }
             else if (const FCustomPhysXPayload* Payload = FPhysxUserData::Get<FCustomPhysXPayload>(Shape->userData))
-            {
                 Component = Payload->GetOwningComponent().Get();
-            }
 
             if (Component)
             {
                 const int32 Label = Component->CustomDepthStencilValue;
 
                 if (Label > 0 && Label < NumLabels && Priorities[Label] > 0)
-                {
                     Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label]);
-                }
             }
 
             // Continue gathering candidates without running narrow-phase tests.
@@ -341,9 +331,7 @@ namespace
                     const int32 CandidateLabel = Component->CustomDepthStencilValue;
 
                     if (CandidateLabel >= 0 && CandidateLabel < NumLabels && Priorities[CandidateLabel] > Priorities[Label])
-                    {
                         Label = uint8(CandidateLabel);
-                    }
                 }
             }
 
@@ -448,9 +436,7 @@ namespace
             const physx::PxVec3 Position = GetWorldPosition(X, Y, Z);
 
             if (!Candidate->Bounds.intersects(physx::PxBounds3::centerExtents(Position, Frame.VoxelWorldExtent)))
-            {
                 return false;
-            }
 
             Center = TileFrame.transformInv(Position);
 
@@ -462,9 +448,7 @@ namespace
             const int32 FlatIndex = GetFlatIndex(X, Y, Z);
 
             if (Rules.Apply(Labels[FlatIndex], Candidate->Label))
-            {
                 Ties.Add(FlatIndex);
-            }
         }
 
         void Defer(int32 X, int32 Y, int32 Z)
@@ -573,9 +557,7 @@ namespace
         });
 
         if (bProfile)
-        {
             Profile.Candidates += Collector.Candidates.Num();
-        }
 
         Lap(Profile.CullCycles);
 
@@ -634,9 +616,7 @@ namespace
             if (!HasTriangles(Candidate))
             {
                 if (bProfile)
-                {
                     ++Profile.PrimitiveCandidates;
-                }
 
                 const VoxelSurfaceRaster::FIndexBox Box = VoxelSurfaceRaster::GetBoundsBox(Candidate.Bounds, Frame.VoxelWorldExtent, TileFrame, Lattice);
 
@@ -650,13 +630,9 @@ namespace
             const bool bHeightField = Candidate.Geometry.getType() == physx::PxGeometryType::eHEIGHTFIELD;
 
             if (bProfile && bHeightField)
-            {
                 ++Profile.HeightFieldCandidates;
-            }
             else if (bProfile)
-            {
                 ++Profile.MeshCandidates;
-            }
 
             const physx::PxTransform MeshToTile = TileFrame.transformInv(Candidate.Pose);
 
@@ -664,9 +640,7 @@ namespace
             VoxelSurfaceRaster::FSurface Surface;
 
             if (bHeightField)
-            {
                 Surface = VoxelSurfaceRaster::MakeSurface(MeshToTile.q, Candidate.Geometry.heightField().heightField->getThickness());
-            }
 
             const physx::PxBoxGeometry CandidateFetchBox(FetchBox.halfExtents + physx::PxVec3(Surface.Skin));
 
@@ -674,9 +648,7 @@ namespace
             const auto FetchIndices = [&](bool& bOverflow)
             {
                 if (bHeightField)
-                {
                     return physx::PxMeshQuery::findOverlapHeightField(CandidateFetchBox, TileFrame, Candidate.Geometry.heightField(), Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
-                }
 
                 return physx::PxMeshQuery::findOverlapTriangleMesh(CandidateFetchBox, TileFrame, Candidate.Geometry.triangleMesh(), Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
             };
@@ -692,9 +664,7 @@ namespace
                 Count = FetchIndices(bOverflow);
 
                 if (bProfile)
-                {
                     ++Profile.Regrowths;
-                }
             }
 
             Triangles.SetNumUninitialized(Count);
@@ -704,13 +674,9 @@ namespace
                 FFetchedTriangle& Fetched = Triangles[Index];
 
                 if (bHeightField)
-                {
                     Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(Candidate.Geometry.heightField(), Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Fetched.Triangle);
-                }
                 else
-                {
                     Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(Candidate.Geometry.triangleMesh(), Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Fetched.Triangle);
-                }
             }
 
             Lap(Profile.FetchCycles);
@@ -739,9 +705,7 @@ namespace
         }
 
         if (bProfile)
-        {
             Profile.Ties += Ties.Num();
-        }
 
         Lap(Profile.TieCycles);
 
@@ -767,9 +731,7 @@ namespace
         OutProfiles.Reset();
 
         if (bShowCalculationTime)
-        {
             OutProfiles.SetNum(NumBatches);
-        }
 
         ParallelFor(NumBatches, [&](int32 Batch)
         {
@@ -792,19 +754,13 @@ namespace
                 const FIntVector Tile(TX, TY, TZ);
 
                 if (bShowCalculationTime)
-                {
                     ProcessTile<true>(Frame, Rules, TileSize, Tile, Labels, Profile);
-                }
                 else
-                {
                     ProcessTile<false>(Frame, Rules, TileSize, Tile, Labels, Profile);
-                }
             }
 
             if (bShowCalculationTime)
-            {
                 OutProfiles[Batch] = Profile;
-            }
         }, EParallelForFlags::Unbalanced);
 
         return TotalTiles;
@@ -1157,9 +1113,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     QueryParams.bReturnPhysicalMaterial = false;
 
     if (SelfIgnore && GetOwner())
-    {
         QueryParams.AddIgnoredActor(GetOwner());
-    }
 
     const FVoxelFrame Frame(
         World,
@@ -1184,9 +1138,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     int32 TotalTiles = 0;
 
     if (Frame.IsSupported())
-    {
         TotalTiles = RunTiles(Frame, TileSize, Labels, ShowCalculationTime, Profiles);
-    }
     else
     {
         // A collapsed or non-finite sensor transform, or a voxel size of almost zero, has no meaningful grid.
@@ -1203,9 +1155,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     const double ParallelEnd = FPlatformTime::Seconds();
 
     if (OracleStride > 0)
-    {
         CheckAgainstOracle(Frame, Labels, OracleStride);
-    }
 
     const double OracleEnd = FPlatformTime::Seconds();
 
