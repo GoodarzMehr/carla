@@ -26,7 +26,8 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
     def run_benchmark(self, arguments=(), payload=None, frame_offset=0,
                       error=None, argument_error=False, ground=-0.5):
         # The blueprint exposes only current sensor attributes.
-        attributes = {'range': 50.0, 'voxel_size': 0.5, 'lower_limit': -5.0,
+        attributes = {'front_limit': 50.0, 'back_limit': -50.0, 'left_limit': -50.0,
+                      'right_limit': 50.0, 'voxel_size': 0.5, 'lower_limit': -5.0,
                       'upper_limit': 10.0, 'tile_x': 32, 'tile_y': 32, 'tile_z': 128,
                       'draw_debug': False,
                       'show_calculation_time': False, 'use_complex_collision': True,
@@ -121,7 +122,8 @@ class TestVoxelDetectionBenchmark(unittest.TestCase):
     def test_simbev_preset_and_attribute_override_remain_typed(self):
         _, result, _ = self.run_benchmark(
             ['--preset', 'simbev', '--attribute', 'use_complex_collision=false'])
-        self.assertEqual(result['attributes']['range'], 64.0)
+        self.assertEqual(result['attributes']['front_limit'], 64.0)
+        self.assertEqual(result['attributes']['left_limit'], -64.0)
         self.assertEqual(result['attributes']['voxel_size'], 0.1)
         self.assertEqual(result['tiles'], [32, 32, 128])
         self.assertIs(result['attributes']['use_complex_collision'], False)

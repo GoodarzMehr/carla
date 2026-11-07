@@ -1,40 +1,48 @@
 ﻿#include "Carla.h"
-#include "Carla/Game/CarlaEpisode.h"
 #include "Carla/Game/CarlaEngine.h"
-#include "Carla/Sensor/VoxelDetectionSensor.h"
+#include "Carla/Game/CarlaEpisode.h"
 #include "Carla/Sensor/VoxelSurfaceRaster.h"
+#include "Carla/Sensor/VoxelDetectionSensor.h"
 #include "Carla/Sensor/VoxelTriangleOverlap.h"
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 
 #include "DrawDebugHelpers.h"
-#include "CollisionQueryParams.h"
 #include "CustomPhysXPayload.h"
-#include "Physics/PhysicsFiltering.h"
-#include "PhysicsInterfaceUtilsCore.h"
-#include "PhysicsEngine/BodyInstance.h"
+#include "CollisionQueryParams.h"
 #include "PhysXInterfaceWrapper.h"
+#include "PhysicsInterfaceUtilsCore.h"
+
+#include "Physics/PhysicsFiltering.h"
+#include "PhysicsEngine/BodyInstance.h"
 
 #include "Engine/World.h"
 #include "Runtime/Core/Public/Async/ParallelFor.h"
 
-#include <PxRigidDynamic.h>
 #include <PxScene.h>
 #include <PxSceneLock.h>
-#include <geometry/PxGeometryQuery.h>
-#include <geometry/PxHeightField.h>
+#include <PxRigidDynamic.h>
+
 #include <geometry/PxMeshQuery.h>
+#include <geometry/PxHeightField.h>
+#include <geometry/PxGeometryQuery.h>
+
 #include <extensions/PxShapeExt.h>
 
-// Voxels are labeled tile by tile. Each tile gathers its candidate shapes with one scene query, then every
-// triangle of a candidate mesh visits only the voxels near its surface (see VoxelSurfaceRaster.h). Labels
-// accumulate in the output buffer, so candidates are applied from the highest priority down.
+// Voxels are labeled tile by tile. Each tile gathers its candidate shapes
+// with one scene query, then every triangle of a candidate mesh visits only
+// the voxels near its surface (see VoxelSurfaceRaster.h). Labels accumulate
+// in the output buffer, so candidates are applied from the highest priority
+// down.
 namespace
 {
-    // Shapes without triangles are queried brick by brick, and tiles are whole multiples of a brick.
+    // Shapes without triangles are queried brick by brick, and tiles are
+    // whole multiples of a brick.
     const FIntVector BrickSize(4, 4, 8);
 
-    // Pose of a shape as PhysX scene queries see it. Unreal moves kinematic bodies by setting a target, and queries treat
-    // that target as the current pose, while the simulated pose only reaches it at the next physics step.
+    // Pose of a shape as PhysX scene queries see it. Unreal moves kinematic
+    // bodies by setting a target, and queries treat that target as the
+    // current pose, while the simulated pose only reaches it at the next
+    // physics step.
     physx::PxTransform GetQueryPose(const physx::PxShape& Shape, const physx::PxRigidActor& Actor)
     {
         if (const physx::PxRigidDynamic* Dynamic = Actor.is<physx::PxRigidDynamic>())
@@ -43,7 +51,11 @@ namespace
 
             physx::PxTransform Target;
 
-            if ((Flags & physx::PxRigidBodyFlag::eKINEMATIC) && (Flags & physx::PxRigidBodyFlag::eUSE_KINEMATIC_TARGET_FOR_SCENE_QUERIES) && Dynamic->getKinematicTarget(Target))
+            if (
+                (Flags & physx::PxRigidBodyFlag::eKINEMATIC) &&
+                (Flags & physx::PxRigidBodyFlag::eUSE_KINEMATIC_TARGET_FOR_SCENE_QUERIES) &&
+                Dynamic->getKinematicTarget(Target)
+            )
                 return Target * Shape.getLocalPose();
         }
 
@@ -58,7 +70,12 @@ namespace
         uint8 Label;
         uint8 Priority;
 
-        FVoxelCandidate(const physx::PxShape& Shape, const physx::PxRigidActor& Actor, uint8 InLabel, uint8 InPriority)
+        FVoxelCandidate(
+            const physx::PxShape& Shape,
+            const physx::PxRigidActor& Actor,
+            uint8 InLabel,
+            uint8 InPriority
+        )
             : Geometry(Shape.getGeometry())
             , Pose(GetQueryPose(Shape, Actor))
             , Bounds(physx::PxGeometryQuery::getWorldBounds(Geometry.any(), Pose))
@@ -68,7 +85,8 @@ namespace
         }
     };
 
-    // Triangle meshes and heightfields go through the surface raster; other shapes are queried voxel by voxel.
+    // Triangle meshes and heightfields go through the surface raster; other
+    // shapes are queried voxel by voxel.
     bool HasTriangles(const FVoxelCandidate& Candidate)
     {
         const physx::PxGeometryType::Enum Type = Candidate.Geometry.getType();
@@ -82,9 +100,10 @@ namespace
         {
             const physx::PxHeightField& HeightField = *Candidate.Geometry.heightField().heightField;
 
-            const int64 Cells = int64(FMath::Max(1u, HeightField.getNbRows()) - 1) * (FMath::Max(1u, HeightField.getNbColumns()) - 1);
+            const int64 Rows = int64(FMath::Max(1u, HeightField.getNbRows()) - 1);
+            const int64 Columns = int64(FMath::Max(1u, HeightField.getNbColumns()) - 1);
 
-            return int32(FMath::Min<int64>(2 * Cells, MAX_int32));
+            return int32(FMath::Min<int64>(2 * Rows * Columns, MAX_int32));
         }
 
         return int32(Candidate.Geometry.triangleMesh().triangleMesh->getNbTriangles());
@@ -96,7 +115,12 @@ namespace
     public:
         TArray<FVoxelCandidate, TInlineAllocator<16>> Candidates;
 
-        FVoxelCandidateCollector(const FCollisionQueryParams& InParams, const FCollisionObjectQueryParams& InObjects, const uint8* InPriorities, int32 InNumLabels)
+        FVoxelCandidateCollector(
+            const FCollisionQueryParams& InParams,
+            const FCollisionObjectQueryParams& InObjects,
+            const uint8* InPriorities,
+            int32 InNumLabels
+        )
             : Params(InParams)
             , Objects(InObjects)
             , Priorities(InPriorities)
@@ -104,7 +128,12 @@ namespace
         {
         }
 
-        physx::PxQueryHitType::Enum preFilter(const physx::PxFilterData&, const physx::PxShape* Shape, const physx::PxRigidActor* Actor, physx::PxHitFlags&) override
+        physx::PxQueryHitType::Enum preFilter(
+            const physx::PxFilterData&,
+            const physx::PxShape* Shape,
+            const physx::PxRigidActor* Actor,
+            physx::PxHitFlags&
+        ) override
         {
             const physx::PxFilterData Filter = Shape->getQueryFilterData();
 
@@ -114,10 +143,19 @@ namespace
 
             const ECollisionChannel Channel = GetCollisionChannelAndExtraFilter(Filter.word3, ShapeMask);
 
-            if (!(Filter.word3 & Complexity) || !(Objects.GetQueryBitfield() & (1u << Channel)) || (Objects.IgnoreMask & ShapeMask) || Params.bIgnoreTouches || Params.GetIgnoredActors().Contains(Filter.word0))
+            if (
+                !(Filter.word3 & Complexity) ||
+                !(Objects.GetQueryBitfield() & (1u << Channel)) ||
+                (Objects.IgnoreMask & ShapeMask) ||
+                Params.bIgnoreTouches ||
+                Params.GetIgnoredActors().Contains(Filter.word0)
+            )
                 return physx::PxQueryHitType::eNONE;
 
-            if (Params.GetIgnoredComponents().Num() && Params.GetIgnoredComponents().Contains(Shape->getSimulationFilterData().word2))
+            if (
+                Params.GetIgnoredComponents().Num() &&
+                Params.GetIgnoredComponents().Contains(Shape->getSimulationFilterData().word2)
+            )
                 return physx::PxQueryHitType::eNONE;
 
             UPrimitiveComponent* Component = nullptr;
@@ -139,7 +177,8 @@ namespace
                     Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label]);
             }
 
-            // Continue gathering candidates without running narrow-phase tests.
+            // Continue gathering candidates without running narrow-phase
+            // tests.
             return physx::PxQueryHitType::eNONE;
         }
 
@@ -171,9 +210,11 @@ namespace
         FCollisionObjectQueryParams ObjectParams;
         FTransform SensorTransform;
         FQuat VoxelRotation;
-        // Voxel query boxes keep this extent whatever the sensor's scale, while centers follow the full sensor transform. A
-        // scaled sensor therefore spaces boxes of BoxSize by its scale, as the per-voxel engine query does. The API spawns
-        // sensors with unit scale, which gives a contiguous grid; only a scaled parent actor changes it.
+        // Voxel query boxes keep this extent whatever the sensor's scale,
+        // while centers follow the full sensor transform. A scaled sensor
+        // therefore spaces boxes of BoxSize by its scale, as the per-voxel
+        // engine query does. The API spawns sensors with unit scale, which
+        // gives a contiguous grid; only a scaled parent actor changes it.
         FVector BoxExtent;
         FCollisionShape VoxelShape;
         FPhysicsShapeAdapter VoxelAdapter;
@@ -187,8 +228,9 @@ namespace
         FVector SensorScale;
         double CenterError = 0.0;
         float BoxSize;
-        float BoxRange;
-        float Bottom;
+        // Outer corner of voxel (0, 0, 0) in the sensor frame: the back,
+        // left and lower limits.
+        FVector Origin;
         int32 GridSizeX;
         int32 GridSizeY;
         int32 GridSizeZ;
@@ -200,13 +242,13 @@ namespace
             const FTransform& InSensorTransform,
             const FCollisionQueryParams& InQueryParams,
             float InBoxSize,
-            float InBoxRange,
-            float InBottom,
+            const FVector& InOrigin,
             int32 InGridSizeX,
             int32 InGridSizeY,
             int32 InGridSizeZ,
             const uint8* InPriorities,
-            int32 InNumLabels)
+            int32 InNumLabels
+        )
             : World(InWorld)
             , Scene(InWorld->GetPhysicsScene()->GetPxScene())
             , QueryParams(InQueryParams)
@@ -217,8 +259,7 @@ namespace
             , VoxelShape(FCollisionShape::MakeBox(BoxExtent))
             , VoxelAdapter(VoxelRotation, VoxelShape)
             , BoxSize(InBoxSize)
-            , BoxRange(InBoxRange)
-            , Bottom(InBottom)
+            , Origin(InOrigin)
             , GridSizeX(InGridSizeX)
             , GridSizeY(InGridSizeY)
             , GridSizeZ(InGridSizeZ)
@@ -232,14 +273,21 @@ namespace
             ObjectParams.RemoveObjectTypesToQuery(ECC_PhysicsBody);
             ObjectParams.RemoveObjectTypesToQuery(ECC_Destructible);
 
-            // Engine turns nearly empty boxes into spheres.
-            bBoxVoxels = VoxelAdapter.GetGeometry().getType() == physx::PxGeometryType::eBOX;
+            const physx::PxGeometry& VoxelGeometry = VoxelAdapter.GetGeometry();
 
-            VoxelHalfExtent = bBoxVoxels ? static_cast<const physx::PxBoxGeometry&>(VoxelAdapter.GetGeometry()).halfExtents : physx::PxVec3(0.0f);
+            // Engine turns nearly empty boxes into spheres.
+            bBoxVoxels = VoxelGeometry.getType() == physx::PxGeometryType::eBOX;
+
+            if (bBoxVoxels)
+                VoxelHalfExtent = static_cast<const physx::PxBoxGeometry&>(VoxelGeometry).halfExtents;
+            else
+                VoxelHalfExtent = physx::PxVec3(0.0f);
 
             VoxelQuat = U2PQuat(VoxelAdapter.GetGeomOrientation());
 
-            VoxelWorldExtent = physx::PxGeometryQuery::getWorldBounds(VoxelAdapter.GetGeometry(), physx::PxTransform(physx::PxVec3(0.0f), VoxelQuat)).getExtents();
+            const physx::PxTransform VoxelPose(physx::PxVec3(0.0f), VoxelQuat);
+
+            VoxelWorldExtent = physx::PxGeometryQuery::getWorldBounds(VoxelGeometry, VoxelPose).getExtents();
 
             AbsAxisX = SensorTransform.TransformVector(FVector(1.0f, 0.0f, 0.0f)).GetAbs();
             AbsAxisY = SensorTransform.TransformVector(FVector(0.0f, 1.0f, 0.0f)).GetAbs();
@@ -247,27 +295,43 @@ namespace
 
             SensorScale = SensorTransform.GetScale3D();
 
-            // Bound on the rounding of one voxel center, from the world position through the tile frame.
-            const float LocalMagnitude = BoxRange + FMath::Max(FMath::Abs(Bottom), FMath::Abs(Bottom + GridSizeZ * BoxSize)) + BoxSize;
+            // Bound on the rounding of one voxel center, from the world
+            // position through the tile frame. Every center lies between the
+            // grid's corners in the sensor frame.
+            const FVector GridEnd = Origin + FVector(FIntVector(GridSizeX, GridSizeY, GridSizeZ)) * BoxSize;
 
-            CenterError = 32.0 * FLT_EPSILON * (SensorTransform.GetLocation().GetAbsMax() + 2.0 * SensorScale.GetAbsMax() * LocalMagnitude + 1.0);
+            const FVector LocalExtent = Origin.GetAbs().ComponentMax(GridEnd.GetAbs());
+
+            const float LocalMagnitude = LocalExtent.X + LocalExtent.Y + LocalExtent.Z;
+
+            CenterError = 32.0 * FLT_EPSILON * (
+                SensorTransform.GetLocation().GetAbsMax() +
+                2.0 * SensorScale.GetAbsMax() * LocalMagnitude +
+                1.0
+            );
         }
 
-        // The tiles need box voxels, a finite sensor transform and a sensor scale they can invert.
+        // The tiles need box voxels, a finite sensor transform and a sensor
+        // scale they can invert.
         bool IsSupported() const
         {
-            return bBoxVoxels && !SensorTransform.ContainsNaN() && VoxelQuat.isFinite() && SensorScale.GetAbsMin() > 1e-3f && FMath::IsFinite(CenterError);
+            return bBoxVoxels &&
+                   !SensorTransform.ContainsNaN() &&
+                   VoxelQuat.isFinite() &&
+                   SensorScale.GetAbsMin() > 1e-3f &&
+                   FMath::IsFinite(CenterError);
         }
 
         // Center of voxel (X, Y, Z) in world space.
         FVector GetWorldPosition(int32 X, int32 Y, int32 Z) const
         {
-            const FVector LocalPos(-BoxRange + (X + 0.5f) * BoxSize, -BoxRange + (Y + 0.5f) * BoxSize, Bottom + (Z + 0.5f) * BoxSize);
+            const FVector LocalPos = Origin + FVector(X + 0.5f, Y + 0.5f, Z + 0.5f) * BoxSize;
 
             return SensorTransform.TransformPosition(LocalPos);
         }
 
-        // Exclusive end voxel of block Index in a grid of blocks of the given size, clamped to the voxel grid.
+        // Exclusive end voxel of block Index in a grid of blocks of the given
+        // size, clamped to the voxel grid.
         FIntVector GetBlockEnd(const FIntVector& Size, const FIntVector& Index) const
         {
             return FIntVector(
@@ -277,38 +341,56 @@ namespace
             );
         }
 
-        // Axis-aligned world box that encloses every voxel query between Begin and End.
+        // Axis-aligned world box that encloses every voxel query between
+        // Begin and End.
         FQueryBox MakeQueryBox(const FIntVector& Begin, const FIntVector& End) const
         {
-            const FVector LocalMin(-BoxRange + Begin.X * BoxSize, -BoxRange + Begin.Y * BoxSize, Bottom + Begin.Z * BoxSize);
-            const FVector LocalMax(-BoxRange + End.X * BoxSize, -BoxRange + End.Y * BoxSize, Bottom + End.Z * BoxSize);
+            const FVector LocalMin = Origin + FVector(Begin) * BoxSize;
+            const FVector LocalMax = Origin + FVector(End) * BoxSize;
 
             const FVector LocalHalfExtent = (LocalMax - LocalMin) * 0.5f;
 
             const FVector Center = SensorTransform.TransformPosition((LocalMin + LocalMax) * 0.5f);
 
-            // Enclose voxel centers and query extents, including sensor scale.
+            // Enclose voxel centers and query extents, including sensor
+            // scale.
             const FVector CenterHalfExtent = LocalHalfExtent - BoxExtent;
 
-            const FVector WorldExtent = AbsAxisX * CenterHalfExtent.X + AbsAxisY * CenterHalfExtent.Y + AbsAxisZ * CenterHalfExtent.Z + P2UVector(VoxelWorldExtent) + FVector(0.1f);
+            const FVector WorldExtent = AbsAxisX * CenterHalfExtent.X +
+                                        AbsAxisY * CenterHalfExtent.Y +
+                                        AbsAxisZ * CenterHalfExtent.Z +
+                                        P2UVector(VoxelWorldExtent) +
+                                        FVector(0.1f);
 
             return FQueryBox{physx::PxBoxGeometry(U2PVector(WorldExtent)), physx::PxTransform(U2PVector(Center))};
         }
 
-        // Approximate centers of the voxels [Begin, Begin + Size) in the tile frame.
-        VoxelSurfaceRaster::FLattice MakeLattice(const FIntVector& Begin, const FIntVector& Size, const physx::PxTransform& TileFrame) const
+        // Approximate centers of the voxels [Begin, Begin + Size) in the tile
+        // frame.
+        VoxelSurfaceRaster::FLattice MakeLattice(
+            const FIntVector& Begin,
+            const FIntVector& Size,
+            const physx::PxTransform& TileFrame
+        ) const
         {
             const int32 LatticeSize[3] = {Size.X, Size.Y, Size.Z};
 
-            const double Step[3] = {double(SensorScale.X) * BoxSize, double(SensorScale.Y) * BoxSize, double(SensorScale.Z) * BoxSize};
+            const double Step[3] = {
+                double(SensorScale.X) * BoxSize,
+                double(SensorScale.Y) * BoxSize,
+                double(SensorScale.Z) * BoxSize
+            };
 
-            return VoxelSurfaceRaster::MakeLattice(LatticeSize, Step, CenterError, 0.0, [&](int32 X, int32 Y, int32 Z)
+            const auto GetCenter = [&](int32 X, int32 Y, int32 Z)
             {
                 return TileFrame.transformInv(U2PVector(GetWorldPosition(Begin.X + X, Begin.Y + Y, Begin.Z + Z)));
-            });
+            };
+
+            return VoxelSurfaceRaster::MakeLattice(LatticeSize, Step, CenterError, 0.0, GetCenter);
         }
 
-        // Label of one voxel from a per-voxel engine query; PhysX hit order breaks equal-priority ties.
+        // Label of one voxel from a per-voxel engine query; PhysX hit order
+        // breaks equal-priority ties.
         uint8 QueryVoxelLabel(const FVector& WorldPos) const
         {
             TArray<FOverlapResult> Overlaps;
@@ -330,7 +412,9 @@ namespace
                 {
                     const int32 CandidateLabel = Component->CustomDepthStencilValue;
 
-                    if (CandidateLabel >= 0 && CandidateLabel < NumLabels && Priorities[CandidateLabel] > Priorities[Label])
+                    const bool bKnown = CandidateLabel >= 0 && CandidateLabel < NumLabels;
+
+                    if (bKnown && Priorities[CandidateLabel] > Priorities[Label])
                         Label = uint8(CandidateLabel);
                 }
             }
@@ -385,15 +469,19 @@ namespace
         }
     };
 
-    // Tiles are whole multiples of a brick, so bricks align with the tile grid. A tile larger than the grid covers it just
-    // the same, so requested sizes are clamped to the grid first, and the rounding runs in 64 bits so it cannot overflow.
+    // Tiles are whole multiples of a brick, so bricks align with the tile
+    // grid. A tile larger than the grid covers it just the same, so requested
+    // sizes are clamped to the grid first, and the rounding runs in 64 bits
+    // so it cannot overflow.
     FIntVector GetTileSize(const FIntVector& Requested, const FIntVector& GridSize)
     {
         const auto Round = [](int32 Tile, int32 Grid, int32 Brick)
         {
             const int64 Clamped = FMath::Clamp<int64>(Tile, 1, FMath::Max(1, Grid));
 
-            return int32(FMath::Min<int64>(FMath::DivideAndRoundUp<int64>(Clamped, Brick) * Brick, MAX_int32 / Brick * Brick));
+            const int64 Rounded = FMath::DivideAndRoundUp<int64>(Clamped, Brick) * Brick;
+
+            return int32(FMath::Min<int64>(Rounded, MAX_int32 / Brick * Brick));
         };
 
         return FIntVector(
@@ -403,7 +491,8 @@ namespace
         );
     }
 
-    // Connects the surface raster to the output labels and to the PhysX queries of the current candidate.
+    // Connects the surface raster to the output labels and to the PhysX
+    // queries of the current candidate.
     struct FTileEnv
     {
         const FVoxelFrame& Frame;
@@ -460,7 +549,12 @@ namespace
         {
             const physx::PxTransform VoxelPose(GetWorldPosition(X, Y, Z), Frame.VoxelQuat);
 
-            return physx::PxGeometryQuery::overlap(Frame.VoxelAdapter.GetGeometry(), VoxelPose, Candidate->Geometry.any(), Candidate->Pose);
+            return physx::PxGeometryQuery::overlap(
+                Frame.VoxelAdapter.GetGeometry(),
+                VoxelPose,
+                Candidate->Geometry.any(),
+                Candidate->Pose
+            );
         }
 
         bool OverlapsBrick(const int32* BrickBegin, const int32* BrickEnd) const
@@ -470,13 +564,26 @@ namespace
                 FIntVector(Begin.X + BrickEnd[0], Begin.Y + BrickEnd[1], Begin.Z + BrickEnd[2])
             );
 
-            return physx::PxGeometryQuery::overlap(Box.Geometry, Box.Pose, Candidate->Geometry.any(), Candidate->Pose);
+            return physx::PxGeometryQuery::overlap(
+                Box.Geometry,
+                Box.Pose,
+                Candidate->Geometry.any(),
+                Candidate->Pose
+            );
         }
     };
 
-    // Label every voxel of one tile. Separate instantiations keep profiling clocks out of normal frames.
+    // Label every voxel of one tile. Separate instantiations keep profiling
+    // clocks out of normal frames.
     template <bool bProfile>
-    void ProcessTile(const FVoxelFrame& Frame, const VoxelSurfaceRaster::FLabelRules& Rules, const FIntVector& TileSize, const FIntVector& Tile, uint8* Labels, FVoxelProfile& Profile)
+    void ProcessTile(
+        const FVoxelFrame& Frame,
+        const VoxelSurfaceRaster::FLabelRules& Rules,
+        const FIntVector& TileSize,
+        const FIntVector& Tile,
+        uint8* Labels,
+        FVoxelProfile& Profile
+    )
     {
         const uint64 TileStart = bProfile ? FPlatformTime::Cycles64() : 0;
 
@@ -522,11 +629,14 @@ namespace
         {
             TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
 
-            // PhysX requires touch storage even though the prefilter returns eNONE.
+            // PhysX requires touch storage even though the prefilter returns
+            // eNONE.
             physx::PxOverlapHit UnusedHit;
             physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
 
-            const physx::PxQueryFilterData Filter(PhysXInterface::StaticDynamicQueryFlags(Frame.QueryParams) | physx::PxQueryFlag::ePREFILTER);
+            const physx::PxQueryFlags Flags = PhysXInterface::StaticDynamicQueryFlags(Frame.QueryParams);
+
+            const physx::PxQueryFilterData Filter(Flags | physx::PxQueryFlag::ePREFILTER);
 
             Frame.Scene->overlap(TileBox.Geometry, TileBox.Pose, UnusedHits, Filter, &Collector);
         }
@@ -538,7 +648,9 @@ namespace
         {
             for (int32 Y = Begin.Y; Y < End.Y; ++Y)
             {
-                FMemory::Memzero(Labels + X * Frame.GridSizeY * Frame.GridSizeZ + Y * Frame.GridSizeZ + Begin.Z, Size.Z);
+                const int32 RowStart = X * Frame.GridSizeY * Frame.GridSizeZ + Y * Frame.GridSizeZ + Begin.Z;
+
+                FMemory::Memzero(Labels + RowStart, Size.Z);
             }
         }
 
@@ -547,10 +659,19 @@ namespace
         // Meshes and heightfields are culled by their triangle fetch below.
         Collector.Candidates.RemoveAll([&](const FVoxelCandidate& Candidate)
         {
-            return !HasTriangles(Candidate) && !physx::PxGeometryQuery::overlap(TileBox.Geometry, TileBox.Pose, Candidate.Geometry.any(), Candidate.Pose);
+            if (HasTriangles(Candidate))
+                return false;
+
+            return !physx::PxGeometryQuery::overlap(
+                TileBox.Geometry,
+                TileBox.Pose,
+                Candidate.Geometry.any(),
+                Candidate.Pose
+            );
         });
 
-        // Equal priorities need no order: the same label is closed to itself, and different labels tie and go to the engine query.
+        // Equal priorities need no order: the same label is closed to itself,
+        // and different labels tie and go to the engine query.
         Collector.Candidates.Sort([](const FVoxelCandidate& A, const FVoxelCandidate& B)
         {
             return A.Priority > B.Priority;
@@ -565,7 +686,8 @@ namespace
 
         const VoxelSurfaceRaster::FLattice Lattice = Frame.MakeLattice(Begin, Size, TileFrame);
 
-        // An invalid lattice only comes from a non-finite transform, which leaves nothing to label.
+        // An invalid lattice only comes from a non-finite transform, which
+        // leaves nothing to label.
         if (Collector.Candidates.Num() == 0 || !Lattice.IsValid())
         {
             Finish();
@@ -573,12 +695,16 @@ namespace
             return;
         }
 
-        // Sensor-aligned box around every voxel query box of the tile, with the same 0.1 cm margin as the query boxes.
+        // Sensor-aligned box around every voxel query box of the tile, with
+        // the same 0.1 cm margin as the query boxes.
         physx::PxVec3 FetchExtent;
 
         for (int32 Axis = 0; Axis < 3; ++Axis)
         {
-            const double Extent = FMath::Max(FMath::Abs(Lattice.Center(Axis, 0)), FMath::Abs(Lattice.Center(Axis, Lattice.Size[Axis] - 1)));
+            const double Extent = FMath::Max(
+                FMath::Abs(Lattice.Center(Axis, 0)),
+                FMath::Abs(Lattice.Center(Axis, Lattice.Size[Axis] - 1))
+            );
 
             FetchExtent[Axis] = float(Extent + Lattice.Margin) + Frame.VoxelHalfExtent[Axis] + 0.1f;
         }
@@ -587,7 +713,8 @@ namespace
 
         const int32 BrickDimensions[3] = {BrickSize.X, BrickSize.Y, BrickSize.Z};
 
-        // Separating axes are only built for triangles that can still change a label.
+        // Separating axes are only built for triangles that can still change
+        // a label.
         struct FFetchedTriangle
         {
             physx::PxTriangle Triangle;
@@ -608,7 +735,8 @@ namespace
 
         FTileEnv Env{Frame, Rules, Lattice, TileFrame, Begin, Labels, Deferred, Ties, nullptr};
 
-        // Candidates go in descending priority, so a voxel closes as soon as no later candidate can change its label.
+        // Candidates go in descending priority, so a voxel closes as soon as
+        // no later candidate can change its label.
         for (const FVoxelCandidate& Candidate : Collector.Candidates)
         {
             Env.Candidate = &Candidate;
@@ -618,7 +746,12 @@ namespace
                 if (bProfile)
                     ++Profile.PrimitiveCandidates;
 
-                const VoxelSurfaceRaster::FIndexBox Box = VoxelSurfaceRaster::GetBoundsBox(Candidate.Bounds, Frame.VoxelWorldExtent, TileFrame, Lattice);
+                const VoxelSurfaceRaster::FIndexBox Box = VoxelSurfaceRaster::GetBoundsBox(
+                    Candidate.Bounds,
+                    Frame.VoxelWorldExtent,
+                    TileFrame,
+                    Lattice
+                );
 
                 VoxelSurfaceRaster::RasterizeBounds<bProfile>(Box, BrickDimensions, Lattice, Env, Profile.Raster);
 
@@ -636,21 +769,47 @@ namespace
 
             const physx::PxTransform MeshToTile = TileFrame.transformInv(Candidate.Pose);
 
-            // PhysX treats a thin layer next to a heightfield as solid, so its fetch box grows by that skin.
+            // PhysX treats a thin layer next to a heightfield as solid, so
+            // its fetch box grows by that skin.
             VoxelSurfaceRaster::FSurface Surface;
 
             if (bHeightField)
-                Surface = VoxelSurfaceRaster::MakeSurface(MeshToTile.q, Candidate.Geometry.heightField().heightField->getThickness());
+            {
+                const float Thickness = Candidate.Geometry.heightField().heightField->getThickness();
+
+                Surface = VoxelSurfaceRaster::MakeSurface(MeshToTile.q, Thickness);
+            }
 
             const physx::PxBoxGeometry CandidateFetchBox(FetchBox.halfExtents + physx::PxVec3(Surface.Skin));
 
-            // Every query reruns the midphase, so a full buffer is regrown to hold every triangle and queried once more.
+            // Every query reruns the midphase, so a full buffer is regrown to
+            // hold every triangle and queried once more.
             const auto FetchIndices = [&](bool& bOverflow)
             {
                 if (bHeightField)
-                    return physx::PxMeshQuery::findOverlapHeightField(CandidateFetchBox, TileFrame, Candidate.Geometry.heightField(), Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+                {
+                    return physx::PxMeshQuery::findOverlapHeightField(
+                        CandidateFetchBox,
+                        TileFrame,
+                        Candidate.Geometry.heightField(),
+                        Candidate.Pose,
+                        Indices.GetData(),
+                        physx::PxU32(Indices.Num()),
+                        0,
+                        bOverflow
+                    );
+                }
 
-                return physx::PxMeshQuery::findOverlapTriangleMesh(CandidateFetchBox, TileFrame, Candidate.Geometry.triangleMesh(), Candidate.Pose, Indices.GetData(), physx::PxU32(Indices.Num()), 0, bOverflow);
+                return physx::PxMeshQuery::findOverlapTriangleMesh(
+                    CandidateFetchBox,
+                    TileFrame,
+                    Candidate.Geometry.triangleMesh(),
+                    Candidate.Pose,
+                    Indices.GetData(),
+                    physx::PxU32(Indices.Num()),
+                    0,
+                    bOverflow
+                );
             };
 
             bool bOverflow = false;
@@ -674,16 +833,44 @@ namespace
                 FFetchedTriangle& Fetched = Triangles[Index];
 
                 if (bHeightField)
-                    Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(Candidate.Geometry.heightField(), Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Fetched.Triangle);
+                {
+                    Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(
+                        Candidate.Geometry.heightField(),
+                        Candidate.Pose,
+                        TileFrame,
+                        MeshToTile,
+                        Indices[Index],
+                        Frame.VoxelHalfExtent,
+                        Fetched.Triangle
+                    );
+                }
                 else
-                    Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(Candidate.Geometry.triangleMesh(), Candidate.Pose, TileFrame, MeshToTile, Indices[Index], Frame.VoxelHalfExtent, Fetched.Triangle);
+                {
+                    Fetched.PositionError = VoxelTriangleOverlap::FetchTriangle(
+                        Candidate.Geometry.triangleMesh(),
+                        Candidate.Pose,
+                        TileFrame,
+                        MeshToTile,
+                        Indices[Index],
+                        Frame.VoxelHalfExtent,
+                        Fetched.Triangle
+                    );
+                }
             }
 
             Lap(Profile.FetchCycles);
 
             for (const FFetchedTriangle& Fetched : Triangles)
             {
-                VoxelSurfaceRaster::RasterizeMeshTriangle<bProfile>(Fetched.Triangle, Fetched.PositionError, Frame.VoxelHalfExtent, Lattice, Env, Profile.Raster, bHeightField ? &Surface : nullptr);
+                VoxelSurfaceRaster::RasterizeMeshTriangle<bProfile>(
+                    Fetched.Triangle,
+                    Fetched.PositionError,
+                    Frame.VoxelHalfExtent,
+                    Lattice,
+                    Env,
+                    Profile.Raster,
+                    bHeightField ? &Surface : nullptr
+                );
             }
 
             Lap(Profile.RasterCycles);
@@ -693,7 +880,8 @@ namespace
             Lap(Profile.DeferredCycles);
         }
 
-        // Two different labels share the highest priority; the per-voxel query keeps PhysX hit order.
+        // Two different labels share the highest priority; the per-voxel
+        // query keeps PhysX hit order.
         for (const int32 FlatIndex : Ties)
         {
             const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
@@ -713,9 +901,16 @@ namespace
     }
 
     // Label every voxel tile by tile and return the number of tiles.
-    int32 RunTiles(const FVoxelFrame& Frame, const FIntVector& TileSize, uint8* Labels, bool bShowCalculationTime, TArray<FVoxelProfile>& OutProfiles)
+    int32 RunTiles(
+        const FVoxelFrame& Frame,
+        const FIntVector& TileSize,
+        uint8* Labels,
+        bool bShowCalculationTime,
+        TArray<FVoxelProfile>& OutProfiles
+    )
     {
-        // In 64 bits, since a grid size plus a tile size can exceed an int32. Each count is at most its grid size.
+        // In 64 bits, since a grid size plus a tile size can exceed an int32.
+        // Each count is at most its grid size.
         const int32 TilesX = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeX, TileSize.X));
         const int32 TilesY = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeY, TileSize.Y));
         const int32 TilesZ = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeZ, TileSize.Z));
@@ -724,8 +919,8 @@ namespace
 
         const VoxelSurfaceRaster::FLabelRules Rules(Frame.Priorities, Frame.NumLabels);
 
-        // Tile costs vary a lot, so batches hold a single tile unless tiles are tiny. PhysX read locks share a mutex,
-        // so each batch takes one.
+        // Tile costs vary a lot, so batches hold a single tile unless tiles
+        // are tiny. PhysX read locks share a mutex, so each batch takes one.
         const int32 NumBatches = FMath::Min(TotalTiles, 64 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
 
         OutProfiles.Reset();
@@ -766,15 +961,19 @@ namespace
         return TotalTiles;
     }
 
-    // Compare every Stride-th voxel with the per-voxel engine query. The offset rotates so Stride frames cover the grid.
+    // Compare every Stride-th voxel with the per-voxel engine query. The
+    // offset rotates so Stride frames cover the grid.
     void CheckAgainstOracle(const FVoxelFrame& Frame, const uint8* Labels, int32 Stride)
     {
         const int32 TotalVoxels = Frame.GridSizeX * Frame.GridSizeY * Frame.GridSizeZ;
 
         const int32 Offset = FCarlaEngine::GetFrameCounter() % Stride;
 
-        // Counts and batch ends are computed in 64 bits, since a count plus the stride or batch size can exceed an int32.
-        const int32 NumSamples = TotalVoxels > Offset ? int32(FMath::DivideAndRoundUp<int64>(TotalVoxels - Offset, Stride)) : 0;
+        // Counts and batch ends are computed in 64 bits, since a count plus
+        // the stride or batch size can exceed an int32.
+        const int64 Remaining = FMath::Max<int64>(int64(TotalVoxels) - Offset, 0);
+
+        const int32 NumSamples = int32(FMath::DivideAndRoundUp<int64>(Remaining, Stride));
 
         constexpr int32 BatchSize = 4096;
         constexpr int32 MaxExamples = 8;
@@ -834,7 +1033,10 @@ namespace
             Mismatches += Batch.Mismatches;
         }
 
-        carla::log_warning("Voxel oracle check: ", Mismatches, " mismatched voxels of ", NumSamples, " sampled (stride ", Stride, ", offset ", Offset, ")");
+        carla::log_warning("Voxel oracle check: ", Mismatches,
+            " mismatched voxels of ", NumSamples,
+            " sampled (stride ", Stride,
+            ", offset ", Offset, ")");
 
         int32 Logged = 0;
 
@@ -849,7 +1051,9 @@ namespace
                 const int32 Y = Remainder / Frame.GridSizeZ;
                 const int32 Z = Remainder % Frame.GridSizeZ;
 
-                carla::log_warning("  voxel (", X, ", ", Y, ", ", Z, "): output=", int32(Labels[FlatIndex]), ", per-voxel query=", int32(Batch.OracleLabels[Example]));
+                carla::log_warning("  voxel (", X, ", ", Y, ", ", Z, ")",
+                    ": output=", int32(Labels[FlatIndex]),
+                    ", per-voxel query=", int32(Batch.OracleLabels[Example]));
             }
         }
     }
@@ -917,13 +1121,36 @@ AVoxelDetectionSensor::AVoxelDetectionSensor(const FObjectInitializer &ObjectIni
 
 FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 {
-    auto Definition = UActorBlueprintFunctionLibrary::MakeGenericSensorDefinition(TEXT("other"), TEXT("voxel_detection"));
+    auto Definition = UActorBlueprintFunctionLibrary::MakeGenericSensorDefinition(
+        TEXT("other"),
+        TEXT("voxel_detection")
+    );
 
-    FActorVariation Range;
-    Range.Id = TEXT("range");
-    Range.Type = EActorAttributeType::Float;
-    Range.RecommendedValues = { TEXT("50.0") };
-    Range.bRestrictToRecommended = false;
+    // Grid limits in meters in the sensor frame, where X points forward, Y
+    // right and Z up.
+    FActorVariation Front;
+    Front.Id = TEXT("front_limit");
+    Front.Type = EActorAttributeType::Float;
+    Front.RecommendedValues = { TEXT("50.0") };
+    Front.bRestrictToRecommended = false;
+
+    FActorVariation Back;
+    Back.Id = TEXT("back_limit");
+    Back.Type = EActorAttributeType::Float;
+    Back.RecommendedValues = { TEXT("-50.0") };
+    Back.bRestrictToRecommended = false;
+
+    FActorVariation Left;
+    Left.Id = TEXT("left_limit");
+    Left.Type = EActorAttributeType::Float;
+    Left.RecommendedValues = { TEXT("-50.0") };
+    Left.bRestrictToRecommended = false;
+
+    FActorVariation Right;
+    Right.Id = TEXT("right_limit");
+    Right.Type = EActorAttributeType::Float;
+    Right.RecommendedValues = { TEXT("50.0") };
+    Right.bRestrictToRecommended = false;
 
     FActorVariation Top;
     Top.Id = TEXT("upper_limit");
@@ -993,7 +1220,10 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
 
     Definition.Variations.Append(
         {
-            Range,
+            Front,
+            Back,
+            Left,
+            Right,
             Top,
             Bottom,
             VoxelSize,
@@ -1017,34 +1247,57 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
 
     constexpr float M_TO_CM = 100.0f;
 
-    BoxRange = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("range", Description.Variations, 50.0f);
+    const auto GetFloat = [&](const FString& Id, float Default)
+    {
+        return UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat(Id, Description.Variations, Default);
+    };
 
-    Top = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("upper_limit", Description.Variations, 10.0f);
+    const auto GetInt = [&](const FString& Id, int32 Default)
+    {
+        return UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt(Id, Description.Variations, Default);
+    };
 
-    Bottom = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("lower_limit", Description.Variations, -5.0f);
+    const auto GetBool = [&](const FString& Id, bool Default)
+    {
+        return UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool(Id, Description.Variations, Default);
+    };
 
-    BoxSize = M_TO_CM * UActorBlueprintFunctionLibrary::RetrieveActorAttributeToFloat("voxel_size", Description.Variations, 0.5f);
+    Front = M_TO_CM * GetFloat("front_limit", 50.0f);
 
-    SelfIgnore = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("ignore_self", Description.Variations, false);
+    Back = M_TO_CM * GetFloat("back_limit", -50.0f);
 
-    DrawDebug = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("draw_debug", Description.Variations, false);
+    Left = M_TO_CM * GetFloat("left_limit", -50.0f);
 
-    ShowCalculationTime = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("show_calculation_time", Description.Variations, false);
+    Right = M_TO_CM * GetFloat("right_limit", 50.0f);
 
-    UseTraceComplex = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToBool("use_complex_collision", Description.Variations, true);
+    Top = M_TO_CM * GetFloat("upper_limit", 10.0f);
 
-    // Voxels are processed in tiles of this size, rounded up to whole 4 x 4 x 8 bricks.
-    TileX = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("tile_x", Description.Variations, 32);
+    Bottom = M_TO_CM * GetFloat("lower_limit", -5.0f);
 
-    TileY = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("tile_y", Description.Variations, 32);
+    BoxSize = M_TO_CM * GetFloat("voxel_size", 0.5f);
 
-    TileZ = UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("tile_z", Description.Variations, 128);
+    SelfIgnore = GetBool("ignore_self", false);
+
+    DrawDebug = GetBool("draw_debug", false);
+
+    ShowCalculationTime = GetBool("show_calculation_time", false);
+
+    UseTraceComplex = GetBool("use_complex_collision", true);
+
+    // Voxels are processed in tiles of this size, rounded up to whole
+    // 4 x 4 x 8 bricks.
+    TileX = GetInt("tile_x", 32);
+
+    TileY = GetInt("tile_y", 32);
+
+    TileZ = GetInt("tile_z", 128);
 
     // Zero disables the comparison with the per-voxel engine query.
-    OracleStride = FMath::Max(0, UActorBlueprintFunctionLibrary::RetrieveActorAttributeToInt("oracle_stride", Description.Variations, 0));
+    OracleStride = FMath::Max(0, GetInt("oracle_stride", 0));
 
-    // Voxels along one axis, or zero unless the count is positive and at most 2^31. The count is checked before its integer
-    // conversion, so infinite, NaN and huge counts cannot overflow.
+    // Voxels along one axis, or zero unless the count is positive and at
+    // most 2^31. The count is checked before its integer conversion, so
+    // infinite, NaN and huge counts cannot overflow.
     const auto GetGridSize = [](float Length, float Size)
     {
         const float Count = Length / Size;
@@ -1052,12 +1305,14 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
         return (Count > 0.0f && Count <= float(MAX_int32)) ? int64(FMath::CeilToDouble(Count)) : int64(0);
     };
 
-    const int64 SizeX = GetGridSize(2.0f * BoxRange, BoxSize);
-    const int64 SizeY = GetGridSize(2.0f * BoxRange, BoxSize);
+    const int64 SizeX = GetGridSize(Front - Back, BoxSize);
+    const int64 SizeY = GetGridSize(Right - Left, BoxSize);
     const int64 SizeZ = GetGridSize(Top - Bottom, BoxSize);
 
-    // Voxels are indexed with 32-bit integers and sent as one buffer, so larger grids would overflow. Each size is at most
-    // 2^31, so SizeX * SizeY fits an int64, and dividing the limit avoids the last multiplication. Send empty frames instead.
+    // Voxels are indexed with 32-bit integers and sent as one buffer, so
+    // larger grids would overflow. Each size is at most 2^31, so
+    // SizeX * SizeY fits an int64, and dividing the limit avoids the last
+    // multiplication. Send empty frames instead.
     const bool bValidGrid = SizeX > 0 && SizeY > 0 && SizeZ > 0 && SizeX * SizeY <= MAX_int32 / SizeZ;
 
     GridSizeX = bValidGrid ? int32(SizeX) : 0;
@@ -1069,8 +1324,13 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
         UE_LOG(
             LogCarla,
             Error,
-            TEXT("VoxelDetectionSensor: range %g m, limits %g to %g m and voxel size %g m do not give a grid of 1 to %d voxels. Increase voxel_size or reduce the range or height."),
-            BoxRange / M_TO_CM,
+            TEXT("VoxelDetectionSensor: limits x %g to %g m, y %g to %g m, z %g to %g m and voxel size %g m ")
+            TEXT("do not give a grid of 1 to %d voxels. Each front, right and upper limit must exceed ")
+            TEXT("its opposite limit; otherwise increase voxel_size or bring the limits closer."),
+            Back / M_TO_CM,
+            Front / M_TO_CM,
+            Left / M_TO_CM,
+            Right / M_TO_CM,
             Bottom / M_TO_CM,
             Top / M_TO_CM,
             BoxSize / M_TO_CM,
@@ -1097,7 +1357,8 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const int32 TotalVoxels = GridSizeX * GridSizeY * GridSizeZ;
 
-    // Labels go straight into a pooled stream buffer. The pool keeps one or two allocations of this size per sensor.
+    // Labels go straight into a pooled stream buffer. The pool keeps one or
+    // two allocations of this size per sensor.
     auto DataStream = GetDataStream(*this);
 
     carla::Buffer Voxels = DataStream.PopBufferFromPool();
@@ -1120,8 +1381,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         GetTransform(),
         QueryParams,
         BoxSize,
-        BoxRange,
-        Bottom,
+        FVector(Back, Left, Bottom),
         GridSizeX,
         GridSizeY,
         GridSizeZ,
@@ -1129,7 +1389,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         UE_ARRAY_COUNT(SemanticPriority)
     );
 
-    const FIntVector TileSize = GetTileSize(FIntVector(TileX, TileY, TileZ), FIntVector(GridSizeX, GridSizeY, GridSizeZ));
+    const FIntVector GridSize(GridSizeX, GridSizeY, GridSizeZ);
+
+    const FIntVector TileSize = GetTileSize(FIntVector(TileX, TileY, TileZ), GridSize);
 
     const double ParallelStart = FPlatformTime::Seconds();
 
@@ -1141,12 +1403,17 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         TotalTiles = RunTiles(Frame, TileSize, Labels, ShowCalculationTime, Profiles);
     else
     {
-        // A collapsed or non-finite sensor transform, or a voxel size of almost zero, has no meaningful grid.
+        // A collapsed or non-finite sensor transform, or a voxel size of
+        // almost zero, has no meaningful grid.
         FMemory::Memzero(Labels, TotalVoxels);
 
         if (!bReportedUnsupported)
         {
-            UE_LOG(LogCarla, Warning, TEXT("VoxelDetectionSensor: unsupported sensor scale, transform or voxel size; sending empty grids."));
+            UE_LOG(
+                LogCarla,
+                Warning,
+                TEXT("VoxelDetectionSensor: unsupported sensor scale, transform or voxel size; sending empty grids.")
+            );
 
             bReportedUnsupported = true;
         }
@@ -1180,14 +1447,25 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
                 FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
 
-                DrawDebugBox(World, Pos, Frame.BoxExtent, ActorQuat, Color.ToFColor(true), false, DeltaTime * 1.1f, 0, 2.0f);
+                DrawDebugBox(
+                    World,
+                    Pos,
+                    Frame.BoxExtent,
+                    ActorQuat,
+                    Color.ToFColor(true),
+                    false,
+                    DeltaTime * 1.1f,
+                    0,
+                    2.0f
+                );
             }
         }
     }
 
     const double SendStart = FPlatformTime::Seconds();
 
-    // Send data. This is what SerializeAndSend does after serializing, without copying the voxels.
+    // Send data. This is what SerializeAndSend does after serializing,
+    // without copying the voxels.
     DataStream.Send(*this, carla::BufferView::CreateFrom(std::move(Voxels)));
 
     const double EndTime = FPlatformTime::Seconds();

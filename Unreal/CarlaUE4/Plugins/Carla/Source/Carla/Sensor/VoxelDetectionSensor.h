@@ -100,9 +100,15 @@ private:
     };
 
     float BoxSize = 50.0f;
+
+    // Grid limits in the sensor frame, in centimeters: X points forward, Y
+    // right and Z up.
+    float Front = 5000.0f;
+    float Back = -5000.0f;
+    float Left = -5000.0f;
+    float Right = 5000.0f;
     float Top = 1000.0f;
     float Bottom = -100.0f;
-    float BoxRange = 5000.0f;
 
     int32 GridSizeX = 0;
     int32 GridSizeY = 0;

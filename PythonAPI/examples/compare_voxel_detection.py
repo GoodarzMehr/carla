@@ -103,7 +103,7 @@ def main():
     parser.add_argument('--frames', type=int, default=10)
     parser.add_argument('--warmup', type=int, default=2)
     parser.add_argument('--preset', choices=('default', 'simbev'), default='default',
-                        help='simbev: range 64 m, voxels 0.1 m, height -1..7 m, tiles 32x32x128')
+                        help='simbev: x and y -64..64 m, height -1..7 m, voxels 0.1 m, tiles 32x32x128')
     parser.add_argument('--json', action='store_true',
                         help='print a JSON result on the final line for sweep_voxel_tiles.py')
     parser.add_argument('--attribute', action='append', default=[], metavar='NAME=VALUE',
@@ -128,8 +128,9 @@ def main():
         parser.error('frames and timeout must be positive; warmup must be nonnegative')
     attributes = {'draw_debug': 'false', 'show_calculation_time': 'false'}
     if args.preset == 'simbev':
-        attributes.update({'range': '64', 'voxel_size': '0.1',
-                           'lower_limit': '-1', 'upper_limit': '7',
+        attributes.update({'front_limit': '64', 'back_limit': '-64',
+                           'left_limit': '-64', 'right_limit': '64',
+                           'lower_limit': '-1', 'upper_limit': '7', 'voxel_size': '0.1',
                            'tile_x': '32', 'tile_y': '32', 'tile_z': '128'})
     for item in args.attribute:
         name, separator, value = item.partition('=')
@@ -147,7 +148,9 @@ def main():
     blueprint = world.get_blueprint_library().find('sensor.other.voxel_detection')
     for name, value in attributes.items():
         blueprint.set_attribute(name, value)
-    names = set(attributes) | {'range', 'voxel_size', 'lower_limit', 'upper_limit',
+    limits = (('back_limit', 'front_limit'), ('left_limit', 'right_limit'),
+              ('lower_limit', 'upper_limit'))
+    names = set(attributes) | {name for pair in limits for name in pair} | {'voxel_size',
                                'tile_x', 'tile_y', 'tile_z',
                                'use_complex_collision', 'ignore_self'}
     converters = {
@@ -162,16 +165,16 @@ def main():
         values[name] = getattr(attribute, converters[attribute.type])()
     tile_names = ('tile_x', 'tile_y', 'tile_z')
     tiles = [values[name] for name in tile_names]
-    dimensions = [values[name] for name in ('range', 'voxel_size', 'lower_limit', 'upper_limit')]
+    dimensions = [values[name] for pair in limits for name in pair] + [values['voxel_size']]
     if not all(math.isfinite(value) for value in dimensions):
         parser.error('voxel dimensions must be finite')
-    if values['range'] <= 0 or values['voxel_size'] <= 0 or min(tiles) < 1:
-        parser.error('range, voxel-size, and tiles must be positive')
-    if values['upper_limit'] <= values['lower_limit']:
-        parser.error('upper_limit must exceed lower_limit')
-    width = math.ceil(2 * values['range'] / values['voxel_size'])
-    height = math.ceil((values['upper_limit'] - values['lower_limit']) / values['voxel_size'])
-    if width * width * height > 2147483647:
+    if values['voxel_size'] <= 0 or min(tiles) < 1:
+        parser.error('voxel-size and tiles must be positive')
+    for low, high in limits:
+        if values[high] <= values[low]:
+            parser.error('%s must exceed %s' % (high, low))
+    sizes = [math.ceil((values[high] - values[low]) / values['voxel_size']) for low, high in limits]
+    if sizes[0] * sizes[1] * sizes[2] > 2147483647:
         parser.error('voxel grid exceeds the sensor\'s 32-bit index capacity')
     if args.diff_saved and not args.diff_saved.is_dir():
         parser.error('diff-saved directory %s does not exist' % args.diff_saved)
@@ -261,8 +264,8 @@ def main():
                 if mismatches:
                     print('Frame %d: %d voxels differ from %s' % (index, mismatches, saved_path))
                     for flat, saved_label, label in examples:
-                        x, rest = divmod(flat, width * height)
-                        y, z = divmod(rest, height)
+                        x, rest = divmod(flat, sizes[1] * sizes[2])
+                        y, z = divmod(rest, sizes[2])
                         print('  voxel (%d, %d, %d): saved %d, now %d' % (x, y, z, saved_label, label))
             if index >= args.warmup:
                 latencies.append(elapsed)
