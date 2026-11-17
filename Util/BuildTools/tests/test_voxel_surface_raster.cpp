@@ -123,6 +123,13 @@ struct TileEnv
     std::vector<unsigned char> state;
     VoxelSurfaceRaster::FVoxelSet deferred;
 
+    void setCandidate(const PxGeometry& candidate, const PxTransform& candidatePose, const PxBounds3& candidateBounds)
+    {
+        geometry = &candidate;
+        pose = candidatePose;
+        bounds = candidateBounds;
+    }
+
     int index(int x, int y, int z) const { return lattice.GetIndex(x, y, z); }
     bool IsOpen(int x, int y, int z) const { return !state[index(x, y, z)]; }
     bool GetCenter(int x, int y, int z, PxVec3& center) const
@@ -187,6 +194,104 @@ struct Totals
     VoxelSurfaceRaster::FRasterStats stats;
 };
 
+// The axes as they were built one at a time before the SSE2 version, which must reproduce them bit for bit, and
+// the test of a center against them.
+struct ReferenceAxis { PxVec3 direction; float minimum, maximum, error; };
+
+static bool referenceAxes(const PxTriangle& triangle, const PxVec3& halfExtent, float positionError,
+    std::vector<ReferenceAxis>& axes)
+{
+    const PxVec3* v = triangle.verts;
+    const PxVec3 edges[] = {v[1] - v[0], v[2] - v[1], v[0] - v[2]};
+    bool degenerate = false;
+    const auto add = [&](const PxVec3& direction)
+    {
+        const float length = PxAbs(direction.x) + PxAbs(direction.y) + PxAbs(direction.z);
+        if (length == 0.f) return;
+        if (!PxIsFinite(length)) { degenerate = true; return; }
+        ReferenceAxis axis;
+        axis.direction = direction / length;
+        const float p0 = axis.direction.dot(v[0]), p1 = axis.direction.dot(v[1]), p2 = axis.direction.dot(v[2]);
+        const float radius = halfExtent.dot(axis.direction.abs());
+        axis.minimum = PxMin(p0, PxMin(p1, p2)) - radius;
+        axis.maximum = PxMax(p0, PxMax(p1, p2)) + radius;
+        const float magnitude = PxMax(PxAbs(axis.minimum), PxAbs(axis.maximum));
+        axis.error = positionError + 64.f * FLT_EPSILON * (magnitude + positionError);
+        if (!PxIsFinite(axis.minimum) || !PxIsFinite(axis.maximum) || !PxIsFinite(axis.error)) degenerate = true;
+        axes.push_back(axis);
+    };
+    add(PxVec3(1, 0, 0)); add(PxVec3(0, 1, 0)); add(PxVec3(0, 0, 1));
+    add(edges[0].cross(edges[1]));
+    for (const PxVec3& edge : edges)
+    {
+        add(PxVec3(0, edge.z, -edge.y)); add(PxVec3(-edge.z, 0, edge.x)); add(PxVec3(edge.y, -edge.x, 0));
+    }
+    return !degenerate;
+}
+
+static VoxelTriangleOverlap::EResult referenceTest(const std::vector<ReferenceAxis>& axes, const PxVec3& center)
+{
+    bool uncertain = false;
+    for (const ReferenceAxis& axis : axes)
+    {
+        const float projection = axis.direction.dot(center);
+        const float distance = PxMax(axis.minimum - projection, projection - axis.maximum);
+        if (distance > axis.error) return VoxelTriangleOverlap::EResult::Outside;
+        if (distance >= -axis.error) uncertain = true;
+    }
+    return uncertain ? VoxelTriangleOverlap::EResult::Uncertain : VoxelTriangleOverlap::EResult::Overlap;
+}
+
+static unsigned long long axesChecked = 0, centersChecked = 0;
+
+// A triangle that passed MakeTriangle's own checks must carry the reference axes and padding that passes every test.
+static bool checkAxes(const PxTriangle& triangle, const PxVec3& halfExtent, float positionError,
+    const VoxelTriangleOverlap::FTriangle& prepared, const TileEnv& env)
+{
+    if (prepared.Degenerate) return true;
+    std::vector<ReferenceAxis> axes;
+    if (!referenceAxes(triangle, halfExtent, positionError, axes) || axes.size() != prepared.NumAxes)
+    {
+        fprintf(stderr, "Axes: reference degenerate or %zu axes, built %u\n", axes.size(), prepared.NumAxes);
+        return false;
+    }
+    for (PxU32 axis = 0; axis < prepared.NumAxes; ++axis)
+    {
+        const ReferenceAxis& reference = axes[axis];
+        const float built[6] = {prepared.DirectionX[axis], prepared.DirectionY[axis], prepared.DirectionZ[axis],
+            prepared.Minimum[axis], prepared.Maximum[axis], prepared.Error[axis]};
+        const float expected[6] = {reference.direction.x, reference.direction.y, reference.direction.z,
+            reference.minimum, reference.maximum, reference.error};
+        // -0 and 0 are the same axis.
+        for (int value = 0; value < 6; ++value)
+            if (built[value] != expected[value])
+            {
+                fprintf(stderr, "Axes: axis %u value %d built %.9g expected %.9g\n", axis, value, built[value],
+                    expected[value]);
+                return false;
+            }
+    }
+    for (PxU32 lane = prepared.NumAxes; lane < PxU32(VoxelTriangleOverlap::FTriangle::NumLanes); ++lane)
+        if (prepared.DirectionX[lane] != 0 || prepared.DirectionY[lane] != 0 || prepared.DirectionZ[lane] != 0 ||
+            prepared.Minimum[lane] != -FLT_MAX || prepared.Maximum[lane] != FLT_MAX || prepared.Error[lane] != 0)
+        {
+            fprintf(stderr, "Axes: lane %u is not padding\n", lane);
+            return false;
+        }
+    ++axesChecked;
+    for (size_t voxel = 0; voxel < env.world.size(); voxel += 7)
+    {
+        const PxVec3 center = env.tileFrame.transformInv(env.world[voxel]);
+        if (VoxelTriangleOverlap::Test(prepared, center) != referenceTest(axes, center))
+        {
+            fprintf(stderr, "Test differs from the reference at voxel %zu\n", voxel);
+            return false;
+        }
+        ++centersChecked;
+    }
+    return true;
+}
+
 static bool compareTile(const TileEnv& env, const char* what, Totals& totals)
 {
     for (size_t i = 0; i < env.world.size(); ++i)
@@ -205,16 +310,15 @@ static bool compareTile(const TileEnv& env, const char* what, Totals& totals)
 
 // Rasterize every triangle the sensor would fetch for this tile and compare with PhysX per voxel. Also checks
 // that each footprint and early-out box holds every voxel where VoxelTriangleOverlap::Test is not Outside, and
-// that the test agrees with every voxel the footprint reports as certain.
+// that the test agrees with every voxel the footprint reports as certain. Voxels counted from their lattice
+// centers skip the bounds gate, which the comparison with PhysX applies to every voxel.
 static bool checkMeshTile(const Tile& tile, const PxTriangleMeshGeometry& geometry, const PxTransform& meshPose,
     double padding, Totals& totals)
 {
     TileEnv env;
     buildTile(tile, padding, env);
     if (!env.lattice.IsValid()) { fprintf(stderr, "Invalid lattice\n"); return false; }
-    env.geometry = &geometry;
-    env.pose = meshPose;
-    env.bounds = PxGeometryQuery::getWorldBounds(geometry, meshPose);
+    env.setCandidate(geometry, meshPose, PxGeometryQuery::getWorldBounds(geometry, meshPose));
     const PxVec3 halfExtent(tile.voxel * .5f);
     PxVec3 fetchExtent;
     for (int axis = 0; axis < 3; ++axis)
@@ -233,6 +337,7 @@ static bool checkMeshTile(const Tile& tile, const PxTriangleMeshGeometry& geomet
         const float error = VoxelTriangleOverlap::FetchTriangle(geometry, meshPose, env.tileFrame, meshToTile,
             indices[i], halfExtent, triangle);
         const VoxelTriangleOverlap::FTriangle prepared = VoxelTriangleOverlap::MakeTriangle(triangle, halfExtent, error);
+        if (!checkAxes(triangle, halfExtent, error, prepared, env)) return false;
         if (!prepared.Degenerate)
         {
             std::fill(visited.begin(), visited.end(), false);
@@ -315,9 +420,7 @@ static bool checkHeightFieldTile(const Tile& tile, const PxHeightFieldGeometry& 
     TileEnv env;
     buildTile(tile, 0.0, env);
     if (!env.lattice.IsValid()) { fprintf(stderr, "Invalid lattice\n"); return false; }
-    env.geometry = &geometry;
-    env.pose = pose;
-    env.bounds = PxGeometryQuery::getWorldBounds(geometry, pose);
+    env.setCandidate(geometry, pose, PxGeometryQuery::getWorldBounds(geometry, pose));
     const PxVec3 halfExtent(tile.voxel * .5f);
     const PxTransform hfToTile = env.tileFrame.transformInv(pose);
     const VoxelSurfaceRaster::FSurface surface = VoxelSurfaceRaster::MakeSurface(hfToTile.q, geometry.heightField->getThickness());
@@ -344,48 +447,64 @@ static bool checkHeightFieldTile(const Tile& tile, const PxHeightFieldGeometry& 
     return compareTile(env, "heightfield", totals);
 }
 
-static bool checkPrimitiveTile(const Tile& tile, const PxGeometry& geometry, const PxTransform& pose, Totals& totals)
+static bool checkBoundsTile(const Tile& tile, const PxGeometry& geometry, const PxTransform& pose, Totals& totals)
 {
     TileEnv env;
     buildTile(tile, 0.0, env);
-    env.geometry = &geometry;
-    env.pose = pose;
-    env.bounds = PxGeometryQuery::getWorldBounds(geometry, pose);
+    env.setCandidate(geometry, pose, PxGeometryQuery::getWorldBounds(geometry, pose));
     const int32_t brick[3] = {4, 4, 8};
     VoxelSurfaceRaster::RasterizeBounds<true>(VoxelSurfaceRaster::GetBoundsBox(env.bounds, env.worldExtent,
         env.tileFrame, env.lattice), brick, env.lattice, env, totals.stats);
-    return compareTile(env, "primitive", totals);
+    return compareTile(env, "bounds", totals);
 }
 
 // The label rules against their definition on random candidate sets: the unique highest-priority label among the
-// overlapping candidates, or a tie between two different labels of that priority.
+// overlapping candidates, or a tie between two different labels of that priority. Labels that tell instances apart
+// also tie between two instances, and otherwise keep the instance of the candidate that set them.
 static bool checkLabelRules()
 {
     const unsigned char priorities[32] = {0,7,7,1,1,1,1,2,2,1,1,1,6,6,4,3,3,1,5,5,1,1,1,1,8,1,1,1,1,1,2,2};
     const VoxelSurfaceRaster::FLabelRules rules(priorities, 32);
+    const auto instanced = [](int label) { return label == 7 || label == 8 || (label >= 12 && label <= 19); };
     std::mt19937 random(311);
-    struct Candidate { unsigned char label; bool overlap; };
-    for (int trial = 0; trial < 200000; ++trial)
+    struct Candidate { unsigned char label; unsigned short instance; bool overlap; };
+    for (int trial = 0; trial < 400000; ++trial)
     {
         std::vector<Candidate> candidates(1 + random() % 6);
         for (Candidate& candidate : candidates)
-            candidate = Candidate{(unsigned char)(1 + random() % 31), random() % 3 == 0};
+        {
+            // Few labels, so candidates often share one.
+            const unsigned char label = (unsigned char)(trial % 2 ? 1 + random() % 31 : 12 + random() % 3);
+            candidate = Candidate{label, (unsigned short)(instanced(label) ? random() % 3 : 0), random() % 3 == 0};
+        }
         std::stable_sort(candidates.begin(), candidates.end(), [&](const Candidate& a, const Candidate& b)
             { return priorities[a.label] > priorities[b.label]; });
-        int best = 0, expected = 0;
+        int best = 0, expected = 0, expectedInstance = 0;
         for (const Candidate& candidate : candidates)
             if (candidate.overlap) best = std::max(best, int(priorities[candidate.label]));
         for (const Candidate& candidate : candidates)
             if (candidate.overlap && priorities[candidate.label] == best)
-                expected = expected == 0 || expected == candidate.label ? candidate.label : -1;
+            {
+                const bool same = expected == candidate.label && expectedInstance == candidate.instance;
+                expected = expected == 0 || same ? candidate.label : -1;
+                expectedInstance = candidate.instance;
+            }
         unsigned char state = 0;
+        unsigned short instance = 0xFFFF;
         for (const Candidate& candidate : candidates)
-            if (!rules.IsClosed(state, candidate.label, priorities[candidate.label]) && candidate.overlap)
-                rules.Apply(state, candidate.label);
-        const int actual = state & VoxelSurfaceRaster::TieFlag ? -1 : state;
-        if (actual != expected)
         {
-            fprintf(stderr, "Label rules: trial=%d expected=%d actual=%d\n", trial, expected, actual);
+            const unsigned char priority = priorities[candidate.label];
+            const bool closed = instanced(candidate.label) ?
+                rules.IsClosed(state, candidate.label, priority, candidate.instance, [&]() { return instance; }) :
+                rules.IsClosed(state, candidate.label, priority);
+            if (!closed && candidate.overlap && !rules.Apply(state, candidate.label) && instanced(candidate.label))
+                instance = candidate.instance;
+        }
+        const int actual = state & VoxelSurfaceRaster::TieFlag ? -1 : state;
+        if (actual != expected || (actual > 0 && instanced(actual) && instance != expectedInstance))
+        {
+            fprintf(stderr, "Label rules: trial=%d expected=%d/%d actual=%d/%d\n", trial, expected, expectedInstance,
+                actual, int(instance));
             return false;
         }
     }
@@ -443,8 +562,7 @@ static bool checkDegenerate()
     {
         TileEnv env;
         buildTile(tile, 0, env);
-        env.geometry = &plane;
-        env.bounds = PxBounds3(PxVec3(-1e6f), PxVec3(1e6f));
+        env.setCandidate(plane, PxTransform(PxIdentity), PxBounds3(PxVec3(-1e6f), PxVec3(1e6f)));
         VoxelSurfaceRaster::FRasterStats stats;
         VoxelSurfaceRaster::RasterizeDegenerate<false>(triangle, .001f, PxVec3(5), env.lattice, env, stats);
         std::vector<bool> deferred(env.world.size());
@@ -540,6 +658,13 @@ int main()
                     offset.x, scale.x, scale.y, scale.z, rotation, variant, padding);
                 return 2;
             }
+        // Dense pedestrian meshes also use this exact brick/voxel query path.
+        if (!checkBoundsTile(tile, geometry, meshPose, totals))
+        {
+            fprintf(stderr, "  mesh bounds: offset=%g scale=%g,%g,%g rotation=%d variant=%d\n",
+                offset.x, scale.x, scale.y, scale.z, rotation, variant);
+            return 2;
+        }
     }
 
     const PxConvexMeshGeometry convexGeometry(convex, PxMeshScale(PxVec3(1.3f, .7f, 1.f), PxQuat(.4f, PxVec3(0,1,0))));
@@ -556,7 +681,7 @@ int main()
         Tile tile{{16, 16, 24}, 10.f, PxVec3(1), PxTransform(offset, PxQuat(.3f * variant, PxVec3(0,0,1))),
             PxVec3(-80, -80, -120)};
         if (variant == 2) tile.scale = PxVec3(1.f, -1.f, 1.25f);
-        if (!checkPrimitiveTile(tile, *geometry, pose, totals))
+        if (!checkBoundsTile(tile, *geometry, pose, totals))
         {
             fprintf(stderr, "  geometry=%d offset=%g variant=%d\n", int(geometry->getType()), offset.x, variant);
             return 3;
@@ -608,7 +733,10 @@ int main()
         (unsigned long long)(totals.stats.Overlaps + totals.stats.Uncertain + totals.stats.Outside),
         (unsigned long long)totals.stats.Uncertain, (unsigned long long)totals.stats.DeferredQueries,
         (unsigned long long)totals.stats.Certain, totals.certain, (unsigned long long)totals.stats.Skipped);
-    printf("  primitive queries=%llu culled bricks=%llu\n", (unsigned long long)totals.stats.PrimitiveQueries,
+    printf("  triangles=%llu, %llu through the box path\n",
+        (unsigned long long)totals.stats.Triangles, (unsigned long long)totals.stats.BoxTriangles);
+    printf("  axes of %llu triangles and %llu tests matched the scalar reference\n", axesChecked, centersChecked);
+    printf("  voxel queries=%llu culled bricks=%llu\n", (unsigned long long)totals.stats.PrimitiveQueries,
         (unsigned long long)totals.stats.CulledBricks);
     printf("  heightfield tiles=%u (%u columns)\n", heightFieldTiles, heightFieldColumns);
     const char* places[3] = {"origin", "150 m out", "1.7 km out"};

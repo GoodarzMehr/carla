@@ -1,9 +1,13 @@
 ﻿#include "Carla.h"
+
+#include "Carla/Game/Tagger.h"
 #include "Carla/Game/CarlaEngine.h"
 #include "Carla/Game/CarlaEpisode.h"
+
 #include "Carla/Sensor/VoxelSurfaceRaster.h"
 #include "Carla/Sensor/VoxelDetectionSensor.h"
 #include "Carla/Sensor/VoxelTriangleOverlap.h"
+
 #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
 
 #include "DrawDebugHelpers.h"
@@ -13,9 +17,11 @@
 #include "PhysicsInterfaceUtilsCore.h"
 
 #include "Physics/PhysicsFiltering.h"
+
 #include "PhysicsEngine/BodyInstance.h"
 
 #include "Engine/World.h"
+
 #include "Runtime/Core/Public/Async/ParallelFor.h"
 
 #include <PxScene.h>
@@ -29,15 +35,44 @@
 #include <extensions/PxShapeExt.h>
 
 // Voxels are labeled tile by tile. Each tile gathers its candidate shapes
-// with one scene query, then every triangle of a candidate mesh visits only
-// the voxels near its surface (see VoxelSurfaceRaster.h). Labels accumulate
+// with one scene query, then uses exact voxel queries or visits the voxels
+// near each triangle's surface (see VoxelSurfaceRaster.h). Labels accumulate
 // in the output buffer, so candidates are applied from the highest priority
-// down.
+// down. Labels that tell instances apart also record which actor a voxel
+// belongs to.
 namespace
 {
+    // A voxel of such a label and the identifier of its actor, as they are
+    // sent after the labels.
+    struct FVoxelInstance
+    {
+        uint32 Index;
+        uint32 Instance;
+    };
+
+    struct FVoxelResult
+    {
+        uint8 Label = 0;
+        uint16 Instance = 0;
+    };
+
+    // Low 16 bits of the CARLA actor ID, or the Unreal unique ID for an
+    // unregistered actor, matching the tagger's normal runtime assignment.
+    uint16 GetInstance(const UPrimitiveComponent& Component, const UCarlaEpisode& Episode)
+    {
+        AActor* Owner = Component.GetOwner();
+
+        if (!Owner)
+            return 0;
+
+        const FCarlaActor* CarlaActor = Episode.FindCarlaActor(Owner);
+
+        return uint16(CarlaActor ? CarlaActor->GetActorId() : Owner->GetUniqueID());
+    }
+
     // Shapes without triangles are queried brick by brick, and tiles are
     // whole multiples of a brick.
-    const FIntVector BrickSize(4, 4, 8);
+    const FIntVector BrickSize(4, 4, 4);
 
     // Pose of a shape as PhysX scene queries see it. Unreal moves kinematic
     // bodies by setting a target, and queries treat that target as the
@@ -69,23 +104,29 @@ namespace
         physx::PxBounds3 Bounds;
         uint8 Label;
         uint8 Priority;
+        uint16 Instance;
+        bool bInstanced;
 
         FVoxelCandidate(
             const physx::PxShape& Shape,
             const physx::PxRigidActor& Actor,
             uint8 InLabel,
-            uint8 InPriority
+            uint8 InPriority,
+            uint16 InInstance,
+            bool bInInstanced
         )
             : Geometry(Shape.getGeometry())
             , Pose(GetQueryPose(Shape, Actor))
             , Bounds(physx::PxGeometryQuery::getWorldBounds(Geometry.any(), Pose))
             , Label(InLabel)
             , Priority(InPriority)
+            , Instance(InInstance)
+            , bInstanced(bInInstanced)
         {
         }
     };
 
-    // Triangle meshes and heightfields go through the surface raster; other
+    // Triangle meshes and heightfields can use the surface raster; other
     // shapes are queried voxel by voxel.
     bool HasTriangles(const FVoxelCandidate& Candidate)
     {
@@ -119,12 +160,16 @@ namespace
             const FCollisionQueryParams& InParams,
             const FCollisionObjectQueryParams& InObjects,
             const uint8* InPriorities,
-            int32 InNumLabels
+            int32 InNumLabels,
+            uint32 InInstancedLabels,
+            const UCarlaEpisode& InEpisode
         )
             : Params(InParams)
             , Objects(InObjects)
             , Priorities(InPriorities)
             , NumLabels(InNumLabels)
+            , InstancedLabels(InInstancedLabels)
+            , Episode(InEpisode)
         {
         }
 
@@ -174,7 +219,13 @@ namespace
                 const int32 Label = Component->CustomDepthStencilValue;
 
                 if (Label > 0 && Label < NumLabels && Priorities[Label] > 0)
-                    Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label]);
+                {
+                    const bool bInstanced = (InstancedLabels >> Label) & 1;
+
+                    const uint16 Instance = bInstanced ? GetInstance(*Component, Episode) : 0;
+
+                    Candidates.Emplace(*Shape, *Actor, uint8(Label), Priorities[Label], Instance, bInstanced);
+                }
             }
 
             // Continue gathering candidates without running narrow-phase
@@ -192,6 +243,8 @@ namespace
         const FCollisionObjectQueryParams& Objects;
         const uint8* Priorities;
         int32 NumLabels;
+        uint32 InstancedLabels;
+        const UCarlaEpisode& Episode;
     };
 
     // World-space box for PhysX queries.
@@ -236,6 +289,10 @@ namespace
         int32 GridSizeZ;
         const uint8* Priorities;
         int32 NumLabels;
+        // One bit for each label that tells instances apart; none when the
+        // sensor does not report instances.
+        uint32 InstancedLabels;
+        const UCarlaEpisode& Episode;
 
         FVoxelFrame(
             UWorld* InWorld,
@@ -247,7 +304,9 @@ namespace
             int32 InGridSizeY,
             int32 InGridSizeZ,
             const uint8* InPriorities,
-            int32 InNumLabels
+            int32 InNumLabels,
+            uint32 InInstancedLabels,
+            const UCarlaEpisode& InEpisode
         )
             : World(InWorld)
             , Scene(InWorld->GetPhysicsScene()->GetPxScene())
@@ -265,6 +324,8 @@ namespace
             , GridSizeZ(InGridSizeZ)
             , Priorities(InPriorities)
             , NumLabels(InNumLabels)
+            , InstancedLabels(InInstancedLabels)
+            , Episode(InEpisode)
         {
             ObjectParams.RemoveObjectTypesToQuery(ECC_Vehicle);
             ObjectParams.RemoveObjectTypesToQuery(ECC_Pawn);
@@ -389,13 +450,20 @@ namespace
             return VoxelSurfaceRaster::MakeLattice(LatticeSize, Step, CenterError, 0.0, GetCenter);
         }
 
-        // Label of one voxel from a per-voxel engine query; PhysX hit order
-        // breaks equal-priority ties.
-        uint8 QueryVoxelLabel(const FVector& WorldPos) const
+        bool IsInstanced(uint8 Label) const
+        {
+            return (InstancedLabels >> Label) & 1;
+        }
+
+        // Label of one voxel from a per-voxel engine query, with its instance
+        // if the label has them; PhysX hit order breaks equal-priority ties.
+        FVoxelResult QueryVoxel(const FVector& WorldPos) const
         {
             TArray<FOverlapResult> Overlaps;
 
-            uint8 Label = 0;
+            FVoxelResult Result;
+
+            const UPrimitiveComponent* Winner = nullptr;
 
             World->ParallelOverlapMultiByObjectType(
                 Overlaps,
@@ -414,12 +482,19 @@ namespace
 
                     const bool bKnown = CandidateLabel >= 0 && CandidateLabel < NumLabels;
 
-                    if (bKnown && Priorities[CandidateLabel] > Priorities[Label])
-                        Label = uint8(CandidateLabel);
+                    if (bKnown && Priorities[CandidateLabel] > Priorities[Result.Label])
+                    {
+                        Result.Label = uint8(CandidateLabel);
+
+                        Winner = Component;
+                    }
                 }
             }
 
-            return Label;
+            if (Winner && IsInstanced(Result.Label))
+                Result.Instance = GetInstance(*Winner, Episode);
+
+            return Result;
         }
     };
 
@@ -432,7 +507,7 @@ namespace
         uint64 FetchCycles = 0;
         uint64 RasterCycles = 0;
         uint64 DeferredCycles = 0;
-        uint64 PrimitiveCycles = 0;
+        uint64 VoxelQueryCycles = 0;
         uint64 TieCycles = 0;
         uint64 TotalCycles = 0;
         uint64 SlowestCycles = 0;
@@ -443,6 +518,7 @@ namespace
         uint64 PrimitiveCandidates = 0;
         uint64 Regrowths = 0;
         uint64 Ties = 0;
+        uint64 Instances = 0;
         VoxelSurfaceRaster::FRasterStats Raster;
 
         void Add(const FVoxelProfile& Other)
@@ -453,7 +529,7 @@ namespace
             FetchCycles += Other.FetchCycles;
             RasterCycles += Other.RasterCycles;
             DeferredCycles += Other.DeferredCycles;
-            PrimitiveCycles += Other.PrimitiveCycles;
+            VoxelQueryCycles += Other.VoxelQueryCycles;
             TieCycles += Other.TieCycles;
             TotalCycles += Other.TotalCycles;
             SlowestCycles = FMath::Max(SlowestCycles, Other.SlowestCycles);
@@ -464,6 +540,7 @@ namespace
             PrimitiveCandidates += Other.PrimitiveCandidates;
             Regrowths += Other.Regrowths;
             Ties += Other.Ties;
+            Instances += Other.Instances;
 
             Raster.Add(Other.Raster);
         }
@@ -503,6 +580,10 @@ namespace
         uint8* Labels;
         VoxelSurfaceRaster::FVoxelSet& Deferred;
         TArray<int32>& Ties;
+        // Instance of every tile voxel that holds a label with instances;
+        // the other voxels are not initialized.
+        uint16* Instances;
+        TArray<FVoxelInstance>& Marked;
         const FVoxelCandidate* Candidate;
 
         int32 GetFlatIndex(int32 X, int32 Y, int32 Z) const
@@ -517,7 +598,23 @@ namespace
 
         bool IsOpen(int32 X, int32 Y, int32 Z) const
         {
-            return !Rules.IsClosed(Labels[GetFlatIndex(X, Y, Z)], Candidate->Label, Candidate->Priority);
+            const uint8 State = Labels[GetFlatIndex(X, Y, Z)];
+
+            if (!Candidate->bInstanced)
+                return !Rules.IsClosed(State, Candidate->Label, Candidate->Priority);
+
+            const auto GetVoxelInstance = [&]()
+            {
+                return Instances[Lattice.GetIndex(X, Y, Z)];
+            };
+
+            return !Rules.IsClosed(
+                State,
+                Candidate->Label,
+                Candidate->Priority,
+                Candidate->Instance,
+                GetVoxelInstance
+            );
         }
 
         bool GetCenter(int32 X, int32 Y, int32 Z, physx::PxVec3& Center) const
@@ -538,6 +635,12 @@ namespace
 
             if (Rules.Apply(Labels[FlatIndex], Candidate->Label))
                 Ties.Add(FlatIndex);
+            else if (Candidate->bInstanced)
+            {
+                Instances[Lattice.GetIndex(X, Y, Z)] = Candidate->Instance;
+
+                Marked.Add(FVoxelInstance{uint32(FlatIndex), Candidate->Instance});
+            }
         }
 
         void Defer(int32 X, int32 Y, int32 Z)
@@ -573,8 +676,9 @@ namespace
         }
     };
 
-    // Label every voxel of one tile. Separate instantiations keep profiling
-    // clocks out of normal frames.
+    // Label every voxel of one tile and append its voxels with an instance
+    // to OutInstances. Separate instantiations keep profiling clocks out of
+    // normal frames.
     template <bool bProfile>
     void ProcessTile(
         const FVoxelFrame& Frame,
@@ -582,6 +686,7 @@ namespace
         const FIntVector& TileSize,
         const FIntVector& Tile,
         uint8* Labels,
+        TArray<FVoxelInstance>& OutInstances,
         FVoxelProfile& Profile
     )
     {
@@ -624,7 +729,14 @@ namespace
 
         const FQueryBox TileBox = Frame.MakeQueryBox(Begin, End);
 
-        FVoxelCandidateCollector Collector(Frame.QueryParams, Frame.ObjectParams, Frame.Priorities, Frame.NumLabels);
+        FVoxelCandidateCollector Collector(
+            Frame.QueryParams,
+            Frame.ObjectParams,
+            Frame.Priorities,
+            Frame.NumLabels,
+            Frame.InstancedLabels,
+            Frame.Episode
+        );
 
         {
             TRACE_CPUPROFILER_EVENT_SCOPE(VoxelGatherCandidates);
@@ -733,7 +845,32 @@ namespace
 
         TArray<int32> Ties;
 
-        FTileEnv Env{Frame, Rules, Lattice, TileFrame, Begin, Labels, Deferred, Ties, nullptr};
+        // A voxel only reads its instance after a candidate wrote it.
+        TArray<uint16> Instances;
+
+        const bool bInstances = Collector.Candidates.ContainsByPredicate([](const FVoxelCandidate& Candidate)
+        {
+            return Candidate.bInstanced;
+        });
+
+        if (bInstances)
+            Instances.SetNumUninitialized(Lattice.GetNumVoxels());
+
+        const int32 FirstInstance = OutInstances.Num();
+
+        FTileEnv Env{
+            Frame,
+            Rules,
+            Lattice,
+            TileFrame,
+            Begin,
+            Labels,
+            Deferred,
+            Ties,
+            Instances.GetData(),
+            OutInstances,
+            nullptr
+        };
 
         // Candidates go in descending priority, so a voxel closes as soon as
         // no later candidate can change its label.
@@ -741,10 +878,22 @@ namespace
         {
             Env.Candidate = &Candidate;
 
-            if (!HasTriangles(Candidate))
+            // Walker meshes favor exact voxel queries above the measured
+            // crossover near 2.0 cm; finer grids keep the surface raster.
+            const bool bQueryPedestrian =
+                Candidate.Label == uint8(carla::rpc::CityObjectLabel::Pedestrians) &&
+                Candidate.Geometry.getType() == physx::PxGeometryType::eTRIANGLEMESH &&
+                Frame.BoxSize >= 2.0f;
+
+            if (!HasTriangles(Candidate) || bQueryPedestrian)
             {
                 if (bProfile)
-                    ++Profile.PrimitiveCandidates;
+                {
+                    if (bQueryPedestrian)
+                        ++Profile.MeshCandidates;
+                    else
+                        ++Profile.PrimitiveCandidates;
+                }
 
                 const VoxelSurfaceRaster::FIndexBox Box = VoxelSurfaceRaster::GetBoundsBox(
                     Candidate.Bounds,
@@ -755,7 +904,7 @@ namespace
 
                 VoxelSurfaceRaster::RasterizeBounds<bProfile>(Box, BrickDimensions, Lattice, Env, Profile.Raster);
 
-                Lap(Profile.PrimitiveCycles);
+                Lap(Profile.VoxelQueryCycles);
 
                 continue;
             }
@@ -880,8 +1029,15 @@ namespace
             Lap(Profile.DeferredCycles);
         }
 
-        // Two different labels share the highest priority; the per-voxel
-        // query keeps PhysX hit order.
+        // A tie replaces what the first candidate of its voxel recorded.
+        for (int32 Index = OutInstances.Num() - 1; Index >= FirstInstance; --Index)
+        {
+            if (Labels[OutInstances[Index].Index] & VoxelSurfaceRaster::TieFlag)
+                OutInstances.RemoveAtSwap(Index, 1, false);
+        }
+
+        // Two different labels share the highest priority, or two instances
+        // of one label; the per-voxel query keeps PhysX hit order.
         for (const int32 FlatIndex : Ties)
         {
             const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
@@ -889,23 +1045,34 @@ namespace
             const int32 Y = Remainder / Frame.GridSizeZ;
             const int32 Z = Remainder % Frame.GridSizeZ;
 
-            Labels[FlatIndex] = Frame.QueryVoxelLabel(Frame.GetWorldPosition(X, Y, Z));
+            const FVoxelResult Result = Frame.QueryVoxel(Frame.GetWorldPosition(X, Y, Z));
+
+            Labels[FlatIndex] = Result.Label;
+
+            if (Frame.IsInstanced(Result.Label))
+                OutInstances.Add(FVoxelInstance{uint32(FlatIndex), Result.Instance});
         }
 
         if (bProfile)
+        {
             Profile.Ties += Ties.Num();
+
+            Profile.Instances += OutInstances.Num() - FirstInstance;
+        }
 
         Lap(Profile.TieCycles);
 
         Finish();
     }
 
-    // Label every voxel tile by tile and return the number of tiles.
+    // Label every voxel tile by tile and return the number of tiles. The
+    // voxels with an instance come back in one list per batch.
     int32 RunTiles(
         const FVoxelFrame& Frame,
         const FIntVector& TileSize,
         uint8* Labels,
         bool bShowCalculationTime,
+        TArray<TArray<FVoxelInstance>>& OutInstances,
         TArray<FVoxelProfile>& OutProfiles
     )
     {
@@ -928,6 +1095,10 @@ namespace
         if (bShowCalculationTime)
             OutProfiles.SetNum(NumBatches);
 
+        OutInstances.Reset();
+
+        OutInstances.SetNum(NumBatches);
+
         ParallelFor(NumBatches, [&](int32 Batch)
         {
             TRACE_CPUPROFILER_EVENT_SCOPE(VoxelProcessTiles);
@@ -949,9 +1120,9 @@ namespace
                 const FIntVector Tile(TX, TY, TZ);
 
                 if (bShowCalculationTime)
-                    ProcessTile<true>(Frame, Rules, TileSize, Tile, Labels, Profile);
+                    ProcessTile<true>(Frame, Rules, TileSize, Tile, Labels, OutInstances[Batch], Profile);
                 else
-                    ProcessTile<false>(Frame, Rules, TileSize, Tile, Labels, Profile);
+                    ProcessTile<false>(Frame, Rules, TileSize, Tile, Labels, OutInstances[Batch], Profile);
             }
 
             if (bShowCalculationTime)
@@ -962,10 +1133,30 @@ namespace
     }
 
     // Compare every Stride-th voxel with the per-voxel engine query. The
-    // offset rotates so Stride frames cover the grid.
-    void CheckAgainstOracle(const FVoxelFrame& Frame, const uint8* Labels, int32 Stride)
+    // offset rotates so Stride frames cover the grid. A voxel has to match in
+    // its label, in whether it has an instance, and in that instance.
+    void CheckAgainstOracle(
+        const FVoxelFrame& Frame,
+        const uint8* Labels,
+        const TArray<TArray<FVoxelInstance>>& Instances,
+        int32 Stride
+    )
     {
         const int32 TotalVoxels = Frame.GridSizeX * Frame.GridSizeY * Frame.GridSizeZ;
+
+        TMap<uint32, uint32> InstanceOf;
+
+        int32 NumInstances = 0;
+
+        for (const TArray<FVoxelInstance>& Batch : Instances)
+        {
+            NumInstances += Batch.Num();
+
+            for (const FVoxelInstance& Voxel : Batch)
+            {
+                InstanceOf.Add(Voxel.Index, Voxel.Instance);
+            }
+        }
 
         const int32 Offset = FCarlaEngine::GetFrameCounter() % Stride;
 
@@ -982,7 +1173,7 @@ namespace
         {
             uint64 Mismatches = 0;
             int32 Examples[MaxExamples] = {};
-            uint8 OracleLabels[MaxExamples] = {};
+            FVoxelResult Oracles[MaxExamples] = {};
             int32 NumExamples = 0;
         };
 
@@ -1009,16 +1200,22 @@ namespace
                 const int32 Y = Remainder / Frame.GridSizeZ;
                 const int32 Z = Remainder % Frame.GridSizeZ;
 
-                const uint8 Oracle = Frame.QueryVoxelLabel(Frame.GetWorldPosition(X, Y, Z));
+                const FVoxelResult Oracle = Frame.QueryVoxel(Frame.GetWorldPosition(X, Y, Z));
 
-                if (Oracle != Labels[FlatIndex])
+                const uint32* Instance = InstanceOf.Find(uint32(FlatIndex));
+
+                const bool bSameInstance = Frame.IsInstanced(Oracle.Label) ?
+                    Instance && *Instance == Oracle.Instance :
+                    !Instance;
+
+                if (Oracle.Label != Labels[FlatIndex] || !bSameInstance)
                 {
                     ++Batch.Mismatches;
 
                     if (Batch.NumExamples < MaxExamples)
                     {
                         Batch.Examples[Batch.NumExamples] = FlatIndex;
-                        Batch.OracleLabels[Batch.NumExamples] = Oracle;
+                        Batch.Oracles[Batch.NumExamples] = Oracle;
 
                         ++Batch.NumExamples;
                     }
@@ -1036,7 +1233,10 @@ namespace
         carla::log_warning("Voxel oracle check: ", Mismatches,
             " mismatched voxels of ", NumSamples,
             " sampled (stride ", Stride,
-            ", offset ", Offset, ")");
+            ", offset ", Offset,
+            "), ", NumInstances,
+            " voxels with an instance, ", NumInstances - InstanceOf.Num(),
+            " of them listed twice");
 
         int32 Logged = 0;
 
@@ -1051,11 +1251,30 @@ namespace
                 const int32 Y = Remainder / Frame.GridSizeZ;
                 const int32 Z = Remainder % Frame.GridSizeZ;
 
+                const uint32* Instance = InstanceOf.Find(uint32(FlatIndex));
+
                 carla::log_warning("  voxel (", X, ", ", Y, ", ", Z, ")",
                     ": output=", int32(Labels[FlatIndex]),
-                    ", per-voxel query=", int32(Batch.OracleLabels[Example]));
+                    ", instance=", Instance ? int64(*Instance) : int64(-1),
+                    ", per-voxel query=", int32(Batch.Oracles[Example].Label),
+                    ", instance=", int32(Batch.Oracles[Example].Instance));
             }
         }
+    }
+
+    // One bit for each label the tagger counts as a thing: the labels whose
+    // actors the instance segmentation camera tells apart.
+    uint32 GetInstancedLabels(int32 NumLabels)
+    {
+        uint32 Labels = 0;
+
+        for (int32 Label = 0; Label < NumLabels; ++Label)
+        {
+            if (ATagger::IsThing(static_cast<carla::rpc::CityObjectLabel>(Label)))
+                Labels |= 1u << Label;
+        }
+
+        return Labels;
     }
 
     void LogProfile(const TArray<FVoxelProfile>& Profiles, int32 TotalTiles)
@@ -1076,7 +1295,7 @@ namespace
             ", fetch=", FPlatformTime::ToMilliseconds64(Profile.FetchCycles),
             ", raster=", FPlatformTime::ToMilliseconds64(Profile.RasterCycles),
             ", deferred PhysX=", FPlatformTime::ToMilliseconds64(Profile.DeferredCycles),
-            ", primitive PhysX=", FPlatformTime::ToMilliseconds64(Profile.PrimitiveCycles),
+            ", voxel PhysX=", FPlatformTime::ToMilliseconds64(Profile.VoxelQueryCycles),
             ", ties=", FPlatformTime::ToMilliseconds64(Profile.TieCycles),
             ", total=", FPlatformTime::ToMilliseconds64(Profile.TotalCycles),
             ", slowest tile=", FPlatformTime::ToMilliseconds64(Profile.SlowestCycles));
@@ -1088,6 +1307,7 @@ namespace
             ", heightfields=", Profile.HeightFieldCandidates,
             ", primitives=", Profile.PrimitiveCandidates,
             ", rasterized triangles=", Raster.Triangles,
+            ", box triangles=", Raster.BoxTriangles,
             ", skipped closed triangles=", Raster.Skipped,
             ", degenerate=", Raster.Degenerate,
             ", index regrowths=", Profile.Regrowths);
@@ -1104,9 +1324,10 @@ namespace
             ", deferred hits=", Raster.DeferredHits,
             ", bricks=", Raster.Bricks,
             ", culled bricks=", Raster.CulledBricks,
-            ", primitive queries=", Raster.PrimitiveQueries,
-            ", primitive hits=", Raster.PrimitiveHits,
-            ", ties=", Profile.Ties);
+            ", voxel queries=", Raster.PrimitiveQueries,
+            ", voxel hits=", Raster.PrimitiveHits,
+            ", ties=", Profile.Ties,
+            ", instances=", Profile.Instances);
     }
 }
 
@@ -1212,6 +1433,12 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     TileZ.RecommendedValues = { TEXT("128") };
     TileZ.bRestrictToRecommended = false;
 
+    FActorVariation InstanceIds;
+    InstanceIds.Id = TEXT("instance_ids");
+    InstanceIds.Type = EActorAttributeType::Bool;
+    InstanceIds.RecommendedValues = { TEXT("False") };
+    InstanceIds.bRestrictToRecommended = false;
+
     FActorVariation OracleStride;
     OracleStride.Id = TEXT("oracle_stride");
     OracleStride.Type = EActorAttributeType::Int;
@@ -1234,6 +1461,7 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
             TileX,
             TileY,
             TileZ,
+            InstanceIds,
             OracleStride,
         }
     );
@@ -1291,6 +1519,8 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     TileY = GetInt("tile_y", 32);
 
     TileZ = GetInt("tile_z", 128);
+
+    InstanceIds = GetBool("instance_ids", false);
 
     // Zero disables the comparison with the per-voxel engine query.
     OracleStride = FMath::Max(0, GetInt("oracle_stride", 0));
@@ -1357,15 +1587,21 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const int32 TotalVoxels = GridSizeX * GridSizeY * GridSizeZ;
 
-    // Labels go straight into a pooled stream buffer. The pool keeps one or
-    // two allocations of this size per sensor.
+    // Labels go straight into a pooled stream buffer, with room after them
+    // for the voxels that have an instance. The pool keeps one or two
+    // allocations of this size per sensor.
     auto DataStream = GetDataStream(*this);
 
     carla::Buffer Voxels = DataStream.PopBufferFromPool();
 
-    Voxels.reset(static_cast<carla::Buffer::size_type>(TotalVoxels));
+    const auto GetBufferSize = [&](int64 NumInstances)
+    {
+        return carla::Buffer::size_type(TotalVoxels + NumInstances * sizeof(FVoxelInstance));
+    };
 
-    uint8* const Labels = Voxels.data();
+    Voxels.reset(GetBufferSize(InstanceIds ? InstanceReserve : 0));
+
+    uint8* Labels = Voxels.data();
 
     // Set up collision query.
     FCollisionQueryParams QueryParams(FName(TEXT("VoxelTrace")), true, this);
@@ -1386,7 +1622,9 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
         GridSizeY,
         GridSizeZ,
         SemanticPriority,
-        UE_ARRAY_COUNT(SemanticPriority)
+        UE_ARRAY_COUNT(SemanticPriority),
+        InstanceIds ? GetInstancedLabels(UE_ARRAY_COUNT(SemanticPriority)) : 0,
+        GetEpisode()
     );
 
     const FIntVector GridSize(GridSizeX, GridSizeY, GridSizeZ);
@@ -1397,10 +1635,12 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     TArray<FVoxelProfile> Profiles;
 
+    TArray<TArray<FVoxelInstance>> Instances;
+
     int32 TotalTiles = 0;
 
     if (Frame.IsSupported())
-        TotalTiles = RunTiles(Frame, TileSize, Labels, ShowCalculationTime, Profiles);
+        TotalTiles = RunTiles(Frame, TileSize, Labels, ShowCalculationTime, Instances, Profiles);
     else
     {
         // A collapsed or non-finite sensor transform, or a voxel size of
@@ -1421,8 +1661,47 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const double ParallelEnd = FPlatformTime::Seconds();
 
+    int64 NumInstances = 0;
+
+    for (const TArray<FVoxelInstance>& Batch : Instances)
+    {
+        NumInstances += Batch.Num();
+    }
+
+    // A frame that outgrows the reserve moves to a larger buffer, which the
+    // pool then keeps.
+    if (NumInstances > InstanceReserve)
+    {
+        InstanceReserve = 2 * NumInstances;
+
+        carla::Buffer Larger = DataStream.PopBufferFromPool();
+
+        Larger.reset(GetBufferSize(InstanceReserve));
+
+        FMemory::Memcpy(Larger.data(), Labels, TotalVoxels);
+
+        Voxels = std::move(Larger);
+
+        Labels = Voxels.data();
+    }
+
+    Voxels.reset(GetBufferSize(NumInstances));
+
+    uint8* Tail = Labels + TotalVoxels;
+
+    for (const TArray<FVoxelInstance>& Batch : Instances)
+    {
+        const int64 Size = int64(Batch.Num()) * sizeof(FVoxelInstance);
+
+        FMemory::Memcpy(Tail, Batch.GetData(), Size);
+
+        Tail += Size;
+    }
+
+    const double InstanceEnd = FPlatformTime::Seconds();
+
     if (OracleStride > 0)
-        CheckAgainstOracle(Frame, Labels, OracleStride);
+        CheckAgainstOracle(Frame, Labels, Instances, OracleStride);
 
     const double OracleEnd = FPlatformTime::Seconds();
 
@@ -1477,7 +1756,8 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
         carla::log_warning("Voxel wall time (ms): setup=", 1000.0 * (ParallelStart - StartTime),
             ", parallel=", 1000.0 * (ParallelEnd - ParallelStart),
-            ", oracle=", 1000.0 * (OracleEnd - ParallelEnd),
+            ", instances=", 1000.0 * (InstanceEnd - ParallelEnd),
+            ", oracle=", 1000.0 * (OracleEnd - InstanceEnd),
             ", debug=", 1000.0 * (SendStart - OracleEnd),
             ", send=", 1000.0 * (EndTime - SendStart));
 

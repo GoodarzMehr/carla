@@ -124,5 +124,12 @@ private:
     int32 TileY = 32;
     int32 TileZ = 128;
 
+    // Send the voxels of labels with instances after the labels, each with
+    // the identifier the instance segmentation camera gives its actor.
+    bool InstanceIds = false;
+
+    // Voxels with an instance that the stream buffer has room for.
+    int64 InstanceReserve = 65536;
+
     int32 OracleStride = 0;
 };

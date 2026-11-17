@@ -212,7 +212,8 @@ namespace VoxelSurfaceRaster
     }
 
     // Label state of a voxel: the label in bits 0 to 4, and TieFlag once two
-    // different labels of the highest priority overlap it.
+    // different labels of the highest priority overlap it, or two instances
+    // of one such label.
     constexpr uint8_t TieFlag = 0x80;
 
     // Candidates are applied in descending priority, so the label rule does
@@ -238,6 +239,21 @@ namespace VoxelSurfaceRaster
         bool IsClosed(uint8_t State, uint8_t Label, uint8_t Priority) const
         {
             return Rank[State] > 2 * Priority || State == Label;
+        }
+
+        // The same for a candidate of a label that tells instances apart: its
+        // label only closes a voxel that holds its own instance. GetInstance
+        // returns the instance of the voxel and only runs for its label.
+        template <typename GetInstanceT>
+        bool IsClosed(
+            uint8_t State,
+            uint8_t Label,
+            uint8_t Priority,
+            uint16_t Instance,
+            const GetInstanceT& GetInstance
+        ) const
+        {
+            return Rank[State] > 2 * Priority || (State == Label && GetInstance() == Instance);
         }
 
         // Record an overlap of an open voxel. Returns true when this creates
@@ -303,6 +319,7 @@ namespace VoxelSurfaceRaster
     struct FRasterStats
     {
         uint64_t Triangles = 0;
+        uint64_t BoxTriangles = 0;
         uint64_t Skipped = 0;
         uint64_t Degenerate = 0;
         uint64_t Visited = 0;
@@ -323,6 +340,7 @@ namespace VoxelSurfaceRaster
         void Add(const FRasterStats& Other)
         {
             Triangles += Other.Triangles;
+            BoxTriangles += Other.BoxTriangles;
             Skipped += Other.Skipped;
             Degenerate += Other.Degenerate;
             Visited += Other.Visited;
@@ -351,6 +369,24 @@ namespace VoxelSurfaceRaster
                     Visit(X, Y, Z);
     }
 
+    // Bound on the rounding of VoxelTriangleOverlap::Test and of projections
+    // computed from lattice centers.
+    inline double GetSlack(const VoxelTriangleOverlap::FTriangle& Triangle, const FLattice& Lattice)
+    {
+        double Magnitude = 0.0;
+
+        for (physx::PxU32 Axis = 0; Axis < Triangle.NumAxes; ++Axis)
+        {
+            Magnitude = std::max(
+                Magnitude,
+                std::max(std::abs(double(Triangle.Minimum[Axis])), std::abs(double(Triangle.Maximum[Axis]))) +
+                Triangle.Error[Axis]
+            );
+        }
+
+        return 8.0 * FLT_EPSILON * (Lattice.Magnitude + Magnitude);
+    }
+
     // Visit every voxel where VoxelTriangleOverlap::Test of a non-degenerate
     // triangle may return anything but Outside. Test returns Outside as soon
     // as one axis separates by more than its error, so each subset of axes
@@ -371,25 +407,14 @@ namespace VoxelSurfaceRaster
         FVisit&& Visit
     )
     {
-        double Magnitude = 0.0;
-
         double MaxError = 0.0;
 
-        for (physx::PxU32 Index = 0; Index < Triangle.NumAxes; ++Index)
-        {
-            const VoxelTriangleOverlap::FAxis& Axis = Triangle.Axes[Index];
-
-            Magnitude = std::max(
-                Magnitude,
-                std::max(std::abs(double(Axis.Minimum)), std::abs(double(Axis.Maximum))) + Axis.Error
-            );
-
-            MaxError = std::max(MaxError, double(Axis.Error));
-        }
+        for (physx::PxU32 Axis = 0; Axis < Triangle.NumAxes; ++Axis)
+            MaxError = std::max(MaxError, double(Triangle.Error[Axis]));
 
         // Bounds rounding in VoxelTriangleOverlap::Test and in the
         // projections recovered below.
-        const double Slack = 8.0 * FLT_EPSILON * (Lattice.Magnitude + Magnitude);
+        const double Slack = GetSlack(Triangle, Lattice);
 
         const double Pad = Lattice.Margin + Lattice.Padding + Slack;
 
@@ -402,12 +427,10 @@ namespace VoxelSurfaceRaster
         // The first three axes are the voxel box axes.
         for (int Axis = 0; Axis < 3; ++Axis)
         {
-            const VoxelTriangleOverlap::FAxis& BoxAxis = Triangle.Axes[Axis];
-
             Lattice.Clip(
                 Axis,
-                double(BoxAxis.Minimum) - BoxAxis.Error - Pad,
-                double(BoxAxis.Maximum) + BoxAxis.Error + Pad,
+                double(Triangle.Minimum[Axis]) - Triangle.Error[Axis] - Pad,
+                double(Triangle.Maximum[Axis]) + Triangle.Error[Axis] + Pad,
                 Box.Begin[Axis],
                 Box.End[Axis]
             );
@@ -418,9 +441,11 @@ namespace VoxelSurfaceRaster
 
         // The fourth axis is the triangle normal, normalized to unit L1
         // length.
-        const VoxelTriangleOverlap::FAxis& Plane = Triangle.Axes[3];
+        const physx::PxVec3 Normal = Triangle.GetDirection(3);
 
-        const physx::PxVec3 Normal = Plane.Direction;
+        const double PlaneMinimum = Triangle.Minimum[3];
+        const double PlaneMaximum = Triangle.Maximum[3];
+        const double PlaneError = Triangle.Error[3];
 
         const int D = (
             std::abs(Normal.x) >= std::abs(Normal.y) &&
@@ -429,8 +454,8 @@ namespace VoxelSurfaceRaster
         const int U = (D + 1) % 3;
         const int V = (D + 2) % 3;
 
-        const double PlaneLow = double(Plane.Minimum) - Plane.Error - Pad;
-        const double PlaneHigh = double(Plane.Maximum) + Plane.Error + Pad;
+        const double PlaneLow = PlaneMinimum - PlaneError - Pad;
+        const double PlaneHigh = PlaneMaximum + PlaneError + Pad;
 
         // The dominant component holds at least a third of the unit L1
         // normal, so this is finite.
@@ -444,8 +469,8 @@ namespace VoxelSurfaceRaster
 
         const double Depth = std::abs(double(Normal[D])) * (HalfExtent[D] - MaxError - 2.0 * Slack) - Inset;
 
-        const double CertainPlaneLow = double(Plane.Maximum) - PlaneRadius - Depth;
-        const double CertainPlaneHigh = double(Plane.Minimum) + PlaneRadius + Depth;
+        const double CertainPlaneLow = PlaneMaximum - PlaneRadius - Depth;
+        const double CertainPlaneHigh = PlaneMinimum + PlaneRadius + Depth;
 
         // Edge axes perpendicular to D bound the triangle's projection onto
         // the U-V plane.
@@ -463,24 +488,28 @@ namespace VoxelSurfaceRaster
 
         int NumEdges = 0;
 
-        for (physx::PxU32 Index = 4; Index < Triangle.NumAxes; ++Index)
+        for (physx::PxU32 Axis = 4; Axis < Triangle.NumAxes; ++Axis)
         {
-            const VoxelTriangleOverlap::FAxis& Axis = Triangle.Axes[Index];
+            const physx::PxVec3 Direction = Triangle.GetDirection(Axis);
 
-            if (Axis.Direction[D] == 0.0f)
+            if (Direction[D] == 0.0f)
             {
-                const double InverseV = Axis.Direction[V] == 0.0f ? 0.0 : 1.0 / Axis.Direction[V];
+                const double InverseV = Direction[V] == 0.0f ? 0.0 : 1.0 / Direction[V];
 
-                const double Radius = HalfExtent[U] * std::abs(double(Axis.Direction[U])) +
-                                      HalfExtent[V] * std::abs(double(Axis.Direction[V]));
+                const double Radius = HalfExtent[U] * std::abs(double(Direction[U])) +
+                                      HalfExtent[V] * std::abs(double(Direction[V]));
+
+                const double Minimum = Triangle.Minimum[Axis];
+                const double Maximum = Triangle.Maximum[Axis];
+                const double Error = Triangle.Error[Axis];
 
                 Edges[NumEdges++] = FEdge{
-                    Axis.Direction[U],
+                    Direction[U],
                     InverseV,
-                    double(Axis.Minimum) - Axis.Error - Pad,
-                    double(Axis.Maximum) + Axis.Error + Pad,
-                    double(Axis.Minimum) + Radius + Inset,
-                    double(Axis.Maximum) - Radius - Inset
+                    Minimum - Error - Pad,
+                    Maximum + Error + Pad,
+                    Minimum + Radius + Inset,
+                    Maximum - Radius - Inset
                 };
             }
         }
@@ -786,9 +815,63 @@ namespace VoxelSurfaceRaster
         return false;
     }
 
-    // Test one triangle of the current candidate against its footprint. For a
-    // heightfield triangle, set in Surface, the test does not rule out counts
-    // only when ConfirmsSurfaceOverlap holds; PhysX decides the others.
+    // Decide one open voxel of the current candidate with the exact test of
+    // a triangle. For a heightfield triangle, set in Surface, the test does
+    // not rule out counts only when ConfirmsSurfaceOverlap holds; PhysX
+    // decides the others.
+    template <bool bStats, typename FEnv>
+    void TestVoxel(
+        const VoxelTriangleOverlap::FTriangle& Triangle,
+        const physx::PxVec3& HalfExtent,
+        FEnv& Env,
+        FRasterStats& Stats,
+        const FSurfaceTriangle* Surface,
+        int32_t X,
+        int32_t Y,
+        int32_t Z
+    )
+    {
+        physx::PxVec3 Center;
+
+        if (!Env.GetCenter(X, Y, Z, Center))
+        {
+            if (bStats)
+                ++Stats.Gated;
+
+            return;
+        }
+
+        const VoxelTriangleOverlap::EResult Result = VoxelTriangleOverlap::Test(Triangle, Center);
+
+        if (Result == VoxelTriangleOverlap::EResult::Outside)
+        {
+            if (bStats)
+                ++Stats.Outside;
+        }
+        else if (Surface && !ConfirmsSurfaceOverlap(*Surface, Center, HalfExtent))
+        {
+            if (bStats)
+                ++Stats.Unconfirmed;
+
+            Env.Defer(X, Y, Z);
+        }
+        else if (Surface || Result == VoxelTriangleOverlap::EResult::Overlap)
+        {
+            if (bStats)
+                ++Stats.Overlaps;
+
+            Env.Hit(X, Y, Z);
+        }
+        else
+        {
+            if (bStats)
+                ++Stats.Uncertain;
+
+            Env.Defer(X, Y, Z);
+        }
+    }
+
+    // Test one triangle of the current candidate against its footprint.
     template <bool bStats, typename FEnv>
     void RasterizeTriangle(
         const VoxelTriangleOverlap::FTriangle& Triangle,
@@ -825,45 +908,125 @@ namespace VoxelSurfaceRaster
                 return;
             }
 
-            physx::PxVec3 Center;
-
-            if (!Env.GetCenter(X, Y, Z, Center))
-            {
-                if (bStats)
-                    ++Stats.Gated;
-
-                return;
-            }
-
-            const VoxelTriangleOverlap::EResult Result = VoxelTriangleOverlap::Test(Triangle, Center);
-
-            if (Result == VoxelTriangleOverlap::EResult::Outside)
-            {
-                if (bStats)
-                    ++Stats.Outside;
-            }
-            else if (Surface && !ConfirmsSurfaceOverlap(*Surface, Center, HalfExtent))
-            {
-                if (bStats)
-                    ++Stats.Unconfirmed;
-
-                Env.Defer(X, Y, Z);
-            }
-            else if (Surface || Result == VoxelTriangleOverlap::EResult::Overlap)
-            {
-                if (bStats)
-                    ++Stats.Overlaps;
-
-                Env.Hit(X, Y, Z);
-            }
-            else
-            {
-                if (bStats)
-                    ++Stats.Uncertain;
-
-                Env.Defer(X, Y, Z);
-            }
+            TestVoxel<bStats>(Triangle, HalfExtent, Env, Stats, Surface, X, Y, Z);
         });
+    }
+
+    // Triangles whose index box holds at most this many voxels are tested
+    // voxel by voxel; finding the footprint of a larger one pays off.
+    constexpr int64_t MaxBoxVoxels = 256;
+
+    // Test one triangle of the current candidate against every voxel of its
+    // index box, which must hold every voxel where VoxelTriangleOverlap::Test
+    // may return anything but Outside. The axes are first evaluated at the
+    // approximate lattice centers. Those lie within Lattice.Margin of the
+    // exact centers on every axis, and directions have unit L1 length, so
+    // each distance is within Margin plus rounding of the exact one. A voxel
+    // further outside one axis than that band is Outside for the exact test.
+    // One further inside every axis is an Overlap: the triangle then meets
+    // the voxel box shrunk by the position error, and a point the two share
+    // also lies in the candidate's inflated world bounds, so the voxel
+    // passes its bounds gate as well. Every other voxel takes the exact
+    // test, and so does every voxel of a heightfield triangle, which needs
+    // the exact center anyway.
+    template <bool bStats, typename FEnv>
+    void RasterizeTriangleBox(
+        const VoxelTriangleOverlap::FTriangle& Triangle,
+        const FIndexBox& Box,
+        const physx::PxVec3& HalfExtent,
+        const FLattice& Lattice,
+        FEnv& Env,
+        FRasterStats& Stats,
+        const FSurfaceTriangle* Surface = nullptr
+    )
+    {
+        if (bStats)
+        {
+            ++Stats.Triangles;
+
+            ++Stats.BoxTriangles;
+        }
+
+        constexpr int NumLanes = VoxelTriangleOverlap::FTriangle::NumLanes;
+
+        const __m128 Band = _mm_set1_ps(float(Lattice.Margin + GetSlack(Triangle, Lattice)));
+
+        // Distances beyond Far are outside and those below Near are inside,
+        // whatever the exact center.
+        __m128 Far[NumLanes / 4];
+        __m128 Near[NumLanes / 4];
+
+        for (int Group = 0; Group < NumLanes / 4; ++Group)
+        {
+            Far[Group] = _mm_add_ps(_mm_load_ps(Triangle.Error + 4 * Group), Band);
+
+            Near[Group] = _mm_sub_ps(_mm_setzero_ps(), Far[Group]);
+        }
+
+        for (int32_t X = Box.Begin[0]; X < Box.End[0]; ++X)
+        {
+            const __m128 CenterX = _mm_set1_ps(float(Lattice.Center(0, X)));
+
+            for (int32_t Y = Box.Begin[1]; Y < Box.End[1]; ++Y)
+            {
+                const __m128 CenterY = _mm_set1_ps(float(Lattice.Center(1, Y)));
+
+                __m128 PartXY[NumLanes / 4];
+
+                for (int Group = 0; Group < NumLanes / 4; ++Group)
+                    PartXY[Group] = VoxelTriangleOverlap::GetPartXY(Triangle, 4 * Group, CenterX, CenterY);
+
+                for (int32_t Z = Box.Begin[2]; Z < Box.End[2]; ++Z)
+                {
+                    if (bStats)
+                        ++Stats.Visited;
+
+                    if (!Env.IsOpen(X, Y, Z))
+                    {
+                        if (bStats)
+                            ++Stats.Closed;
+
+                        continue;
+                    }
+
+                    const __m128 CenterZ = _mm_set1_ps(float(Lattice.Center(2, Z)));
+
+                    __m128 Outside = _mm_setzero_ps();
+                    __m128 Inside = _mm_cmpeq_ps(_mm_setzero_ps(), _mm_setzero_ps());
+
+                    for (int Group = 0; Group < NumLanes / 4; ++Group)
+                    {
+                        const __m128 Distance = VoxelTriangleOverlap::GetDistance(
+                            Triangle,
+                            4 * Group,
+                            PartXY[Group],
+                            CenterZ
+                        );
+
+                        Outside = _mm_or_ps(Outside, _mm_cmpgt_ps(Distance, Far[Group]));
+
+                        Inside = _mm_and_ps(Inside, _mm_cmplt_ps(Distance, Near[Group]));
+                    }
+
+                    // A NaN satisfies neither comparison and so leaves the
+                    // voxel to the exact test.
+                    if (_mm_movemask_ps(Outside) != 0)
+                    {
+                        if (bStats)
+                            ++Stats.Outside;
+                    }
+                    else if (!Surface && _mm_movemask_ps(Inside) == 0xF)
+                    {
+                        if (bStats)
+                            ++Stats.Certain;
+
+                        Env.Hit(X, Y, Z);
+                    }
+                    else
+                        TestVoxel<bStats>(Triangle, HalfExtent, Env, Stats, Surface, X, Y, Z);
+                }
+            }
+        }
     }
 
     // A degenerate triangle cannot be tested, so every voxel it may touch is
@@ -1054,9 +1217,18 @@ namespace VoxelSurfaceRaster
             return;
         }
 
+        const int64_t BoxVoxels = int64_t(Box.End[0] - Box.Begin[0]) *
+                                  int64_t(Box.End[1] - Box.Begin[1]) *
+                                  int64_t(Box.End[2] - Box.Begin[2]);
+
+        const bool bSmall = BoxVoxels <= MaxBoxVoxels;
+
         if (!Surface)
         {
-            RasterizeTriangle<bStats>(Prepared, HalfExtent, Lattice, Env, Stats);
+            if (bSmall)
+                RasterizeTriangleBox<bStats>(Prepared, Box, HalfExtent, Lattice, Env, Stats);
+            else
+                RasterizeTriangle<bStats>(Prepared, HalfExtent, Lattice, Env, Stats);
 
             return;
         }
@@ -1066,20 +1238,18 @@ namespace VoxelSurfaceRaster
         // Skin * (Direction . Up) further on one side only. Extending that
         // side keeps such boxes from being declared outside. The extra error
         // covers rounding in Up and in the shifted bounds.
-        for (physx::PxU32 Index = 0; Index < Prepared.NumAxes; ++Index)
+        for (physx::PxU32 Axis = 0; Axis < Prepared.NumAxes; ++Axis)
         {
-            VoxelTriangleOverlap::FAxis& Axis = Prepared.Axes[Index];
-
-            const float Shift = Surface->Skin * Axis.Direction.dot(Surface->Up);
+            const float Shift = Surface->Skin * Prepared.GetDirection(Axis).dot(Surface->Up);
 
             if (Shift > 0.0f)
-                Axis.Minimum -= Shift;
+                Prepared.Minimum[Axis] -= Shift;
             else
-                Axis.Maximum -= Shift;
+                Prepared.Maximum[Axis] -= Shift;
 
-            Axis.Error += 1e-4f * Surface->Skin + 4.0f * FLT_EPSILON * physx::PxMax(
-                physx::PxAbs(Axis.Minimum),
-                physx::PxAbs(Axis.Maximum)
+            Prepared.Error[Axis] += 1e-4f * Surface->Skin + 4.0f * FLT_EPSILON * physx::PxMax(
+                physx::PxAbs(Prepared.Minimum[Axis]),
+                physx::PxAbs(Prepared.Maximum[Axis])
             );
         }
 
@@ -1100,7 +1270,10 @@ namespace VoxelSurfaceRaster
             )
         );
 
-        RasterizeTriangle<bStats>(Prepared, HalfExtent, Lattice, Env, Stats, &SurfaceTriangle);
+        if (bSmall)
+            RasterizeTriangleBox<bStats>(Prepared, Box, HalfExtent, Lattice, Env, Stats, &SurfaceTriangle);
+        else
+            RasterizeTriangle<bStats>(Prepared, HalfExtent, Lattice, Env, Stats, &SurfaceTriangle);
     }
 
     // Decide the deferred voxels of the current candidate that are still open
@@ -1188,9 +1361,9 @@ namespace VoxelSurfaceRaster
         return Box;
     }
 
-    // Decide the voxels of Box for a candidate without triangles. Bricks are
-    // aligned to multiples of BrickSize in tile indices; each brick with open
-    // voxels is culled as a whole before its voxels are queried one by one.
+    // Decide the voxels of Box with exact PhysX overlaps. Bricks are aligned
+    // to multiples of BrickSize in tile indices; each brick with open voxels
+    // is culled as a whole before its voxels are queried one by one.
     template <bool bStats, typename FEnv>
     void RasterizeBounds(
         const FIndexBox& Box,
