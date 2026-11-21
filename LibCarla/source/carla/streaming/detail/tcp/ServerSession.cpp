@@ -104,7 +104,7 @@ namespace tcp {
           CloseNow(ec);
         } else {
           DEBUG_ONLY(log_debug("session", _session_id, ": successfully sent", bytes, "bytes"));
-          DEBUG_ASSERT_EQ(bytes, sizeof(message_size_type) + message->size());
+          DEBUG_ASSERT_EQ(bytes, message->header_size() + message->size());
         }
       };
 

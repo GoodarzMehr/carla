@@ -39,7 +39,7 @@ namespace carla {
   public:
 
     using value_type = unsigned char;
-    using size_type = uint32_t;
+    using size_type = uint64_t;
     using const_iterator = const value_type *;
 
     /// @}

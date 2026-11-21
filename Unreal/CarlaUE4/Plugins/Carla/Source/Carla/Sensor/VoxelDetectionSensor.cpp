@@ -21,6 +21,7 @@
 #include "PhysicsEngine/BodyInstance.h"
 
 #include "Engine/World.h"
+#include "HAL/PlatformMemory.h"
 
 #include "Runtime/Core/Public/Async/ParallelFor.h"
 
@@ -43,11 +44,12 @@
 namespace
 {
     // A voxel of such a label and the identifier of its actor, as they are
-    // sent after the labels.
+    // sent after the labels: two little-endian 64-bit integers, so the index
+    // covers grids of more than 2^32 voxels.
     struct FVoxelInstance
     {
-        uint32 Index;
-        uint32 Instance;
+        uint64 Index;
+        uint64 Instance;
     };
 
     struct FVoxelResult
@@ -383,6 +385,25 @@ namespace
                    FMath::IsFinite(CenterError);
         }
 
+        int64 GetNumVoxels() const
+        {
+            return int64(GridSizeX) * GridSizeY * GridSizeZ;
+        }
+
+        // Grid-wide index of voxel (X, Y, Z). Grids can hold more than 2^31
+        // voxels, so it is 64-bit.
+        int64 GetFlatIndex(int32 X, int32 Y, int32 Z) const
+        {
+            return (int64(X) * GridSizeY + Y) * GridSizeZ + Z;
+        }
+
+        FIntVector GetVoxel(int64 FlatIndex) const
+        {
+            const int64 Column = FlatIndex / GridSizeZ;
+
+            return FIntVector(int32(Column / GridSizeY), int32(Column % GridSizeY), int32(FlatIndex % GridSizeZ));
+        }
+
         // Center of voxel (X, Y, Z) in world space.
         FVector GetWorldPosition(int32 X, int32 Y, int32 Z) const
         {
@@ -550,6 +571,8 @@ namespace
     // grid. A tile larger than the grid covers it just the same, so requested
     // sizes are clamped to the grid first, and the rounding runs in 64 bits
     // so it cannot overflow.
+    constexpr int64 MaxTileVoxels = int64(1) << 30;
+
     FIntVector GetTileSize(const FIntVector& Requested, const FIntVector& GridSize)
     {
         const auto Round = [](int32 Tile, int32 Grid, int32 Brick)
@@ -561,11 +584,24 @@ namespace
             return int32(FMath::Min<int64>(Rounded, MAX_int32 / Brick * Brick));
         };
 
-        return FIntVector(
+        int32 Size[3] = {
             Round(Requested.X, GridSize.X, BrickSize.X),
             Round(Requested.Y, GridSize.Y, BrickSize.Y),
             Round(Requested.Z, GridSize.Z, BrickSize.Z)
-        );
+        };
+
+        const int32 Brick[3] = {BrickSize.X, BrickSize.Y, BrickSize.Z};
+
+        // Voxels are indexed within a tile with 32-bit integers, so halve the
+        // longest side of a larger tile, in whole bricks, until it fits.
+        while (int64(Size[0]) * Size[1] * Size[2] > MaxTileVoxels)
+        {
+            const int Axis = Size[0] >= Size[1] && Size[0] >= Size[2] ? 0 : (Size[1] >= Size[2] ? 1 : 2);
+
+            Size[Axis] = FMath::Max(Brick[Axis], FMath::DivideAndRoundUp(Size[Axis] / 2, Brick[Axis]) * Brick[Axis]);
+        }
+
+        return FIntVector(Size[0], Size[1], Size[2]);
     }
 
     // Connects the surface raster to the output labels and to the PhysX
@@ -579,16 +615,16 @@ namespace
         const FIntVector Begin;
         uint8* Labels;
         VoxelSurfaceRaster::FVoxelSet& Deferred;
-        TArray<int32>& Ties;
+        TArray<int64>& Ties;
         // Instance of every tile voxel that holds a label with instances;
         // the other voxels are not initialized.
         uint16* Instances;
         TArray<FVoxelInstance>& Marked;
         const FVoxelCandidate* Candidate;
 
-        int32 GetFlatIndex(int32 X, int32 Y, int32 Z) const
+        int64 GetFlatIndex(int32 X, int32 Y, int32 Z) const
         {
-            return (Begin.X + X) * Frame.GridSizeY * Frame.GridSizeZ + (Begin.Y + Y) * Frame.GridSizeZ + Begin.Z + Z;
+            return Frame.GetFlatIndex(Begin.X + X, Begin.Y + Y, Begin.Z + Z);
         }
 
         physx::PxVec3 GetWorldPosition(int32 X, int32 Y, int32 Z) const
@@ -631,7 +667,7 @@ namespace
 
         void Hit(int32 X, int32 Y, int32 Z)
         {
-            const int32 FlatIndex = GetFlatIndex(X, Y, Z);
+            const int64 FlatIndex = GetFlatIndex(X, Y, Z);
 
             if (Rules.Apply(Labels[FlatIndex], Candidate->Label))
                 Ties.Add(FlatIndex);
@@ -639,7 +675,7 @@ namespace
             {
                 Instances[Lattice.GetIndex(X, Y, Z)] = Candidate->Instance;
 
-                Marked.Add(FVoxelInstance{uint32(FlatIndex), Candidate->Instance});
+                Marked.Add(FVoxelInstance{uint64(FlatIndex), Candidate->Instance});
             }
         }
 
@@ -760,7 +796,7 @@ namespace
         {
             for (int32 Y = Begin.Y; Y < End.Y; ++Y)
             {
-                const int32 RowStart = X * Frame.GridSizeY * Frame.GridSizeZ + Y * Frame.GridSizeZ + Begin.Z;
+                const int64 RowStart = Frame.GetFlatIndex(X, Y, Begin.Z);
 
                 FMemory::Memzero(Labels + RowStart, Size.Z);
             }
@@ -843,7 +879,7 @@ namespace
 
         Deferred.Reset(Lattice.GetNumVoxels());
 
-        TArray<int32> Ties;
+        TArray<int64> Ties;
 
         // A voxel only reads its instance after a candidate wrote it.
         TArray<uint16> Instances;
@@ -1038,19 +1074,16 @@ namespace
 
         // Two different labels share the highest priority, or two instances
         // of one label; the per-voxel query keeps PhysX hit order.
-        for (const int32 FlatIndex : Ties)
+        for (const int64 FlatIndex : Ties)
         {
-            const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
-            const int32 Remainder = FlatIndex % (Frame.GridSizeY * Frame.GridSizeZ);
-            const int32 Y = Remainder / Frame.GridSizeZ;
-            const int32 Z = Remainder % Frame.GridSizeZ;
+            const FIntVector Voxel = Frame.GetVoxel(FlatIndex);
 
-            const FVoxelResult Result = Frame.QueryVoxel(Frame.GetWorldPosition(X, Y, Z));
+            const FVoxelResult Result = Frame.QueryVoxel(Frame.GetWorldPosition(Voxel.X, Voxel.Y, Voxel.Z));
 
             Labels[FlatIndex] = Result.Label;
 
             if (Frame.IsInstanced(Result.Label))
-                OutInstances.Add(FVoxelInstance{uint32(FlatIndex), Result.Instance});
+                OutInstances.Add(FVoxelInstance{uint64(FlatIndex), Result.Instance});
         }
 
         if (bProfile)
@@ -1067,7 +1100,7 @@ namespace
 
     // Label every voxel tile by tile and return the number of tiles. The
     // voxels with an instance come back in one list per batch.
-    int32 RunTiles(
+    int64 RunTiles(
         const FVoxelFrame& Frame,
         const FIntVector& TileSize,
         uint8* Labels,
@@ -1082,13 +1115,16 @@ namespace
         const int32 TilesY = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeY, TileSize.Y));
         const int32 TilesZ = int32(FMath::DivideAndRoundUp<int64>(Frame.GridSizeZ, TileSize.Z));
 
-        const int32 TotalTiles = TilesX * TilesY * TilesZ;
+        const int64 TotalTiles = int64(TilesX) * TilesY * TilesZ;
 
         const VoxelSurfaceRaster::FLabelRules Rules(Frame.Priorities, Frame.NumLabels);
 
         // Tile costs vary a lot, so batches hold a single tile unless tiles
         // are tiny. PhysX read locks share a mutex, so each batch takes one.
-        const int32 NumBatches = FMath::Min(TotalTiles, 64 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1));
+        const int32 NumBatches = int32(FMath::Min<int64>(
+            TotalTiles,
+            64 * (FTaskGraphInterface::Get().GetNumWorkerThreads() + 1)
+        ));
 
         OutProfiles.Reset();
 
@@ -1107,15 +1143,16 @@ namespace
 
             FVoxelProfile Profile;
 
-            const int32 Begin = int32(int64(TotalTiles) * Batch / NumBatches);
-            const int32 End = int32(int64(TotalTiles) * (Batch + 1) / NumBatches);
+            const int64 Begin = TotalTiles * Batch / NumBatches;
+            const int64 End = TotalTiles * (Batch + 1) / NumBatches;
 
-            for (int32 Index = Begin; Index < End; ++Index)
+            for (int64 Index = Begin; Index < End; ++Index)
             {
-                const int32 TX = Index / (TilesY * TilesZ);
-                const int32 Remainder = Index % (TilesY * TilesZ);
-                const int32 TY = Remainder / TilesZ;
-                const int32 TZ = Remainder % TilesZ;
+                const int64 Column = Index / TilesZ;
+
+                const int32 TX = int32(Column / TilesY);
+                const int32 TY = int32(Column % TilesY);
+                const int32 TZ = int32(Index % TilesZ);
 
                 const FIntVector Tile(TX, TY, TZ);
 
@@ -1142,11 +1179,11 @@ namespace
         int32 Stride
     )
     {
-        const int32 TotalVoxels = Frame.GridSizeX * Frame.GridSizeY * Frame.GridSizeZ;
+        const int64 TotalVoxels = Frame.GetNumVoxels();
 
-        TMap<uint32, uint32> InstanceOf;
+        TMap<uint64, uint64> InstanceOf;
 
-        int32 NumInstances = 0;
+        int64 NumInstances = 0;
 
         for (const TArray<FVoxelInstance>& Batch : Instances)
         {
@@ -1162,9 +1199,9 @@ namespace
 
         // Counts and batch ends are computed in 64 bits, since a count plus
         // the stride or batch size can exceed an int32.
-        const int64 Remaining = FMath::Max<int64>(int64(TotalVoxels) - Offset, 0);
+        const int64 Remaining = FMath::Max<int64>(TotalVoxels - Offset, 0);
 
-        const int32 NumSamples = int32(FMath::DivideAndRoundUp<int64>(Remaining, Stride));
+        const int64 NumSamples = FMath::DivideAndRoundUp<int64>(Remaining, Stride);
 
         constexpr int32 BatchSize = 4096;
         constexpr int32 MaxExamples = 8;
@@ -1172,7 +1209,7 @@ namespace
         struct FBatchResult
         {
             uint64 Mismatches = 0;
-            int32 Examples[MaxExamples] = {};
+            int64 Examples[MaxExamples] = {};
             FVoxelResult Oracles[MaxExamples] = {};
             int32 NumExamples = 0;
         };
@@ -1189,20 +1226,17 @@ namespace
 
             FBatchResult& Batch = Batches[BatchIndex];
 
-            const int32 End = int32(FMath::Min<int64>(int64(BatchIndex + 1) * BatchSize, NumSamples));
+            const int64 End = FMath::Min<int64>(int64(BatchIndex + 1) * BatchSize, NumSamples);
 
-            for (int32 Sample = BatchIndex * BatchSize; Sample < End; ++Sample)
+            for (int64 Sample = int64(BatchIndex) * BatchSize; Sample < End; ++Sample)
             {
-                const int32 FlatIndex = Offset + Sample * Stride;
+                const int64 FlatIndex = Offset + Sample * Stride;
 
-                const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
-                const int32 Remainder = FlatIndex % (Frame.GridSizeY * Frame.GridSizeZ);
-                const int32 Y = Remainder / Frame.GridSizeZ;
-                const int32 Z = Remainder % Frame.GridSizeZ;
+                const FIntVector Voxel = Frame.GetVoxel(FlatIndex);
 
-                const FVoxelResult Oracle = Frame.QueryVoxel(Frame.GetWorldPosition(X, Y, Z));
+                const FVoxelResult Oracle = Frame.QueryVoxel(Frame.GetWorldPosition(Voxel.X, Voxel.Y, Voxel.Z));
 
-                const uint32* Instance = InstanceOf.Find(uint32(FlatIndex));
+                const uint64* Instance = InstanceOf.Find(uint64(FlatIndex));
 
                 const bool bSameInstance = Frame.IsInstanced(Oracle.Label) ?
                     Instance && *Instance == Oracle.Instance :
@@ -1244,16 +1278,13 @@ namespace
         {
             for (int32 Example = 0; Example < Batch.NumExamples && Logged < MaxExamples; ++Example, ++Logged)
             {
-                const int32 FlatIndex = Batch.Examples[Example];
+                const int64 FlatIndex = Batch.Examples[Example];
 
-                const int32 X = FlatIndex / (Frame.GridSizeY * Frame.GridSizeZ);
-                const int32 Remainder = FlatIndex % (Frame.GridSizeY * Frame.GridSizeZ);
-                const int32 Y = Remainder / Frame.GridSizeZ;
-                const int32 Z = Remainder % Frame.GridSizeZ;
+                const FIntVector Voxel = Frame.GetVoxel(FlatIndex);
 
-                const uint32* Instance = InstanceOf.Find(uint32(FlatIndex));
+                const uint64* Instance = InstanceOf.Find(uint64(FlatIndex));
 
-                carla::log_warning("  voxel (", X, ", ", Y, ", ", Z, ")",
+                carla::log_warning("  voxel (", Voxel.X, ", ", Voxel.Y, ", ", Voxel.Z, ")",
                     ": output=", int32(Labels[FlatIndex]),
                     ", instance=", Instance ? int64(*Instance) : int64(-1),
                     ", per-voxel query=", int32(Batch.Oracles[Example].Label),
@@ -1277,7 +1308,7 @@ namespace
         return Labels;
     }
 
-    void LogProfile(const TArray<FVoxelProfile>& Profiles, int32 TotalTiles)
+    void LogProfile(const TArray<FVoxelProfile>& Profiles, int64 TotalTiles)
     {
         FVoxelProfile Profile;
 
@@ -1525,25 +1556,28 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     // Zero disables the comparison with the per-voxel engine query.
     OracleStride = FMath::Max(0, GetInt("oracle_stride", 0));
 
-    // Voxels along one axis, or zero unless the count is positive and at
-    // most 2^31. The count is checked before its integer conversion, so
-    // infinite, NaN and huge counts cannot overflow.
+    // Voxels along one axis, or zero unless the count is positive and below
+    // 2^31, so it fits an int32. The count is checked before its integer
+    // conversion, so infinite, NaN and huge counts cannot overflow.
     const auto GetGridSize = [](float Length, float Size)
     {
         const float Count = Length / Size;
 
-        return (Count > 0.0f && Count <= float(MAX_int32)) ? int64(FMath::CeilToDouble(Count)) : int64(0);
+        return (Count > 0.0f && Count < float(MAX_int32)) ? int64(FMath::CeilToDouble(Count)) : int64(0);
     };
 
     const int64 SizeX = GetGridSize(Front - Back, BoxSize);
     const int64 SizeY = GetGridSize(Right - Left, BoxSize);
     const int64 SizeZ = GetGridSize(Top - Bottom, BoxSize);
 
-    // Voxels are indexed with 32-bit integers and sent as one buffer, so
-    // larger grids would overflow. Each size is at most 2^31, so
+    // Voxels are indexed with 64-bit integers, so the limit is memory: the
+    // labels of one frame may take at most half of it, since the stream's
+    // pool keeps up to two buffers. Each size is at most 2^31, so
     // SizeX * SizeY fits an int64, and dividing the limit avoids the last
     // multiplication. Send empty frames instead.
-    const bool bValidGrid = SizeX > 0 && SizeY > 0 && SizeZ > 0 && SizeX * SizeY <= MAX_int32 / SizeZ;
+    const int64 MaxVoxels = int64(FPlatformMemory::GetConstants().TotalPhysical / 2);
+
+    const bool bValidGrid = SizeX > 0 && SizeY > 0 && SizeZ > 0 && SizeX * SizeY <= MaxVoxels / SizeZ;
 
     GridSizeX = bValidGrid ? int32(SizeX) : 0;
     GridSizeY = bValidGrid ? int32(SizeY) : 0;
@@ -1555,8 +1589,9 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
             LogCarla,
             Error,
             TEXT("VoxelDetectionSensor: limits x %g to %g m, y %g to %g m, z %g to %g m and voxel size %g m ")
-            TEXT("do not give a grid of 1 to %d voxels. Each front, right and upper limit must exceed ")
-            TEXT("its opposite limit; otherwise increase voxel_size or bring the limits closer."),
+            TEXT("do not give a grid of 1 to %lld voxels, half of this machine's memory in bytes. Each front, ")
+            TEXT("right and upper limit must exceed its opposite limit; otherwise increase voxel_size or bring ")
+            TEXT("the limits closer."),
             Back / M_TO_CM,
             Front / M_TO_CM,
             Left / M_TO_CM,
@@ -1564,18 +1599,18 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
             Bottom / M_TO_CM,
             Top / M_TO_CM,
             BoxSize / M_TO_CM,
-            MAX_int32
+            MaxVoxels
         );
     }
 
     UE_LOG(
         LogCarla,
         Log,
-        TEXT("VoxelDetectionSensor: Grid size %d x %d x %d = %d voxels"),
+        TEXT("VoxelDetectionSensor: Grid size %d x %d x %d = %lld voxels"),
         GridSizeX,
         GridSizeY,
         GridSizeZ,
-        GridSizeX * GridSizeY * GridSizeZ
+        int64(GridSizeX) * GridSizeY * GridSizeZ
     );
 }
 
@@ -1585,7 +1620,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const double StartTime = FPlatformTime::Seconds();
 
-    const int32 TotalVoxels = GridSizeX * GridSizeY * GridSizeZ;
+    const int64 TotalVoxels = int64(GridSizeX) * GridSizeY * GridSizeZ;
 
     // Labels go straight into a pooled stream buffer, with room after them
     // for the voxels that have an instance. The pool keeps one or two
@@ -1637,7 +1672,7 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     TArray<TArray<FVoxelInstance>> Instances;
 
-    int32 TotalTiles = 0;
+    int64 TotalTiles = 0;
 
     if (Frame.IsSupported())
         TotalTiles = RunTiles(Frame, TileSize, Labels, ShowCalculationTime, Instances, Profiles);
@@ -1710,19 +1745,15 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
     {
         const FQuat ActorQuat = GetActorQuat();
 
-        for (int32 FlatIndex = 0; FlatIndex < TotalVoxels; ++FlatIndex)
+        for (int64 FlatIndex = 0; FlatIndex < TotalVoxels; ++FlatIndex)
         {
             const uint8 Label = Labels[FlatIndex];
 
             if (Label > 0)
             {
-                // Convert flat index back to X, Y, Z.
-                const int32 X = FlatIndex / (GridSizeY * GridSizeZ);
-                const int32 Remainder = FlatIndex % (GridSizeY * GridSizeZ);
-                const int32 Y = Remainder / GridSizeZ;
-                const int32 Z = Remainder % GridSizeZ;
+                const FIntVector Voxel = Frame.GetVoxel(FlatIndex);
 
-                FVector Pos = Frame.GetWorldPosition(X, Y, Z);
+                FVector Pos = Frame.GetWorldPosition(Voxel.X, Voxel.Y, Voxel.Z);
 
                 FLinearColor Color = ColorMap.Contains(Label) ? ColorMap[Label] : FLinearColor::Green;
 

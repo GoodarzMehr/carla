@@ -113,7 +113,7 @@ void Router::Write(MultiGPUCommand id, Buffer &&buffer) {
   // define the command header
   CommandHeader header;
   header.id = id;
-  header.size = buffer.size();
+  header.size = static_cast<uint32_t>(buffer.size());
   Buffer buf_header((uint8_t *) &header, sizeof(header));
 
   auto view_header = carla::BufferView::CreateFrom(std::move(buf_header));
@@ -133,7 +133,7 @@ std::future<SessionInfo> Router::WriteToNext(MultiGPUCommand id, Buffer &&buffer
   // define the command header
   CommandHeader header;
   header.id = id;
-  header.size = buffer.size();
+  header.size = static_cast<uint32_t>(buffer.size());
   Buffer buf_header((uint8_t *) &header, sizeof(header));
 
   auto view_header = carla::BufferView::CreateFrom(std::move(buf_header));
@@ -165,7 +165,7 @@ std::future<SessionInfo> Router::WriteToOne(std::weak_ptr<Primary> server, Multi
   // define the command header
   CommandHeader header;
   header.id = id;
-  header.size = buffer.size();
+  header.size = static_cast<uint32_t>(buffer.size());
   Buffer buf_header((uint8_t *) &header, sizeof(header));
 
   auto view_header = carla::BufferView::CreateFrom(std::move(buf_header));

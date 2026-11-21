@@ -8,6 +8,7 @@
 
 #include "carla/Debug.h"
 #include "carla/Logging.h"
+#include "carla/BufferPool.h"
 #include "carla/multigpu/incomingMessage.h"
 #include "carla/multigpu/listener.h"
 
@@ -83,7 +84,7 @@ namespace multigpu {
           log_error("session ", self->_session_id, ": error sending data: ", ec.message());
           self->CloseNow(ec);
         } else {
-          // DEBUG_ASSERT_EQ(bytes, sizeof(message_size_type) + message->size());
+          // DEBUG_ASSERT_EQ(bytes, message->header_size() + message->size());
         }
       };
 
@@ -144,18 +145,43 @@ namespace multigpu {
         }
       };
 
-      auto handle_read_header = [weak, message, handle_read_data](
+      // Now that we know the size of the coming buffer, we can allocate our
+      // buffer and start putting data into it.
+      auto read_data = [message, handle_read_data](const std::shared_ptr<Primary> &self) {
+        boost::asio::async_read(
+            self->_socket,
+            message->buffer(),
+            boost::asio::bind_executor(self->_strand, handle_read_data));
+      };
+
+      // A message of 4 GB or more continues its size in eight more bytes.
+      auto handle_read_long_size = [weak, message, read_data](
+          boost::system::error_code ec,
+          size_t) {
+        auto self = weak.lock();
+        if (!self) return;
+        if (!ec && (message->size() > 0u)) {
+          read_data(self);
+        } else {
+          if (ec) {
+            log_error("Primary server: failed to read header: ", ec.message());
+          }
+          self->Close();
+        }
+      };
+
+      auto handle_read_header = [weak, message, read_data, handle_read_long_size](
           boost::system::error_code ec,
           size_t DEBUG_ONLY(bytes)) {
         auto self = weak.lock();
         if (!self) return;
-        if (!ec && (message->size() > 0u)) {
-          // Now that we know the size of the coming buffer, we can allocate our
-          // buffer and start putting data into it.
+        if (!ec && message->has_long_size()) {
           boost::asio::async_read(
               self->_socket,
-              message->buffer(),
-              boost::asio::bind_executor(self->_strand, handle_read_data));
+              message->long_size_as_buffer(),
+              boost::asio::bind_executor(self->_strand, handle_read_long_size));
+        } else if (!ec && (message->size() > 0u)) {
+          read_data(self);
         } else {
           if (ec) {
             log_error("Primary server: failed to read header: ", ec.message());

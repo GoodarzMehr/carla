@@ -11,6 +11,7 @@
 #include "carla/Exception.h"
 #include "carla/Logging.h"
 #include "carla/Time.h"
+#include "carla/streaming/detail/IncomingMessage.h"
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/read.hpp>
@@ -23,42 +24,6 @@ namespace carla {
 namespace streaming {
 namespace detail {
 namespace tcp {
-
-  // ===========================================================================
-  // -- IncomingMessage --------------------------------------------------------
-  // ===========================================================================
-
-  /// Helper for reading incoming TCP messages. Allocates the whole message in
-  /// a single buffer.
-  class IncomingMessage {
-  public:
-
-    explicit IncomingMessage(Buffer &&buffer) : _message(std::move(buffer)) {}
-
-    boost::asio::mutable_buffer size_as_buffer() {
-      return boost::asio::buffer(&_size, sizeof(_size));
-    }
-
-    boost::asio::mutable_buffer buffer() {
-      DEBUG_ASSERT(_size > 0u);
-      _message.reset(_size);
-      return _message.buffer();
-    }
-
-    auto size() const {
-      return _size;
-    }
-
-    auto pop() {
-      return std::move(_message);
-    }
-
-  private:
-
-    message_size_type _size = 0u;
-
-    Buffer _message;
-  };
 
   // ===========================================================================
   // -- Client -----------------------------------------------------------------
@@ -185,21 +150,48 @@ namespace tcp {
         }
       };
 
-      auto handle_read_header = [this, self, message, handle_read_data](
+      // Now that we know the size of the coming buffer, we can allocate our
+      // buffer and start putting data into it.
+      auto read_data = [this, message, handle_read_data]() {
+        boost::asio::async_read(
+            _socket,
+            message->buffer(),
+            boost::asio::bind_executor(_strand, handle_read_data));
+      };
+
+      // A message of 4 GB or more continues its size in eight more bytes.
+      auto handle_read_long_size = [this, self, message, read_data](
           boost::system::error_code ec,
           size_t DEBUG_ONLY(bytes)) {
-        DEBUG_ONLY(log_debug("streaming client: Client::ReadData.handle_read_header", bytes, "bytes"));
         if (!ec && (message->size() > 0u)) {
-          DEBUG_ASSERT_EQ(bytes, sizeof(message_size_type));
+          DEBUG_ASSERT_EQ(bytes, sizeof(message_long_size_type));
           if (_done) {
             return;
           }
-          // Now that we know the size of the coming buffer, we can allocate our
-          // buffer and start putting data into it.
-          boost::asio::async_read(
-              _socket,
-              message->buffer(),
-              boost::asio::bind_executor(_strand, handle_read_data));
+          read_data();
+        } else if (!_done) {
+          log_debug("streaming client: failed to read header:", ec.message());
+          Connect();
+        }
+      };
+
+      auto handle_read_header = [this, self, message, read_data, handle_read_long_size](
+          boost::system::error_code ec,
+          size_t DEBUG_ONLY(bytes)) {
+        DEBUG_ONLY(log_debug("streaming client: Client::ReadData.handle_read_header", bytes, "bytes"));
+        if (!ec && (message->has_long_size() || message->size() > 0u)) {
+          DEBUG_ASSERT_EQ(bytes, sizeof(message_short_size_type));
+          if (_done) {
+            return;
+          }
+          if (message->has_long_size()) {
+            boost::asio::async_read(
+                _socket,
+                message->long_size_as_buffer(),
+                boost::asio::bind_executor(_strand, handle_read_long_size));
+          } else {
+            read_data();
+          }
         } else if (!_done) {
           log_debug("streaming client: failed to read header:", ec.message());
           DEBUG_ONLY(log_debug("size  = ", message->size()));
