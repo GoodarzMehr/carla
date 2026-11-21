@@ -124,23 +124,27 @@ private:
     bool UseTraceComplex = true;
     bool bReportedUnsupported = false;
 
-    int32 TileX = 32;
-    int32 TileY = 32;
-    int32 TileZ = 128;
-
     // Send the voxels of labels with instances after the labels, each with
     // the identifier the instance segmentation camera gives its actor.
     bool InstanceIds = false;
 
-    // Voxels with an instance that the stream buffer has room for.
-    int64 InstanceReserve = 65536;
-
-    int32 OracleStride = 0;
-
     // Label on a CUDA GPU without PhysX queries (use_gpu): exact shapes in
     // double precision, ties to the lower label, then the lower instance.
     bool UseGpu = false;
-    int32 GpuDevice = 0;
     bool bReportedGpuFailure = false;
+
+    int32 TileX = 32;
+    int32 TileY = 32;
+    int32 TileZ = 128;
+
+    // Voxels with an instance that the stream buffer has room for.
+    int64 InstanceReserve = 65536;
+
+    // The stride of the oracle, i.e., the number of frames between each
+    // oracle check.
+    int32 OracleStride = 0;
+
+    int32 GpuDevice = 0;
+    
     FVoxelGpuContext* GpuContext = nullptr;
 };
