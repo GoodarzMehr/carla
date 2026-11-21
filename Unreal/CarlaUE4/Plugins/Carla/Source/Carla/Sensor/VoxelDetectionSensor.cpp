@@ -4,6 +4,7 @@
 #include "Carla/Game/CarlaEngine.h"
 #include "Carla/Game/CarlaEpisode.h"
 
+#include "Carla/Sensor/VoxelGpuApi.h"
 #include "Carla/Sensor/VoxelSurfaceRaster.h"
 #include "Carla/Sensor/VoxelDetectionSensor.h"
 #include "Carla/Sensor/VoxelTriangleOverlap.h"
@@ -21,6 +22,8 @@
 #include "PhysicsEngine/BodyInstance.h"
 
 #include "Engine/World.h"
+#include "Misc/Paths.h"
+#include "HAL/PlatformProcess.h"
 #include "HAL/PlatformMemory.h"
 
 #include "Runtime/Core/Public/Async/ParallelFor.h"
@@ -30,10 +33,16 @@
 #include <PxRigidDynamic.h>
 
 #include <geometry/PxMeshQuery.h>
+#include <geometry/PxConvexMesh.h>
+#include <geometry/PxTriangleMesh.h>
 #include <geometry/PxHeightField.h>
 #include <geometry/PxGeometryQuery.h>
 
 #include <extensions/PxShapeExt.h>
+
+#include <array>
+#include <cmath>
+#include <type_traits>
 
 // Voxels are labeled tile by tile. Each tile gathers its candidate shapes
 // with one scene query, then uses exact voxel queries or visits the voxels
@@ -109,6 +118,9 @@ namespace
         uint16 Instance;
         bool bInstanced;
 
+        // The actor can move or deform, as vehicles and walkers do.
+        bool bDynamic;
+
         FVoxelCandidate(
             const physx::PxShape& Shape,
             const physx::PxRigidActor& Actor,
@@ -124,6 +136,7 @@ namespace
             , Priority(InPriority)
             , Instance(InInstance)
             , bInstanced(bInInstanced)
+            , bDynamic(Actor.is<physx::PxRigidDynamic>() != nullptr)
         {
         }
     };
@@ -1308,6 +1321,792 @@ namespace
         return Labels;
     }
 
+    // The GPU path of use_gpu, from libcarla_voxel_gpu, which is loaded at
+    // run time so CARLA builds and runs without CUDA.
+    struct FVoxelGpuLibrary
+    {
+        decltype(&VoxelGpuApiVersion) ApiVersion = nullptr;
+        decltype(&VoxelGpuCreate) Create = nullptr;
+        decltype(&VoxelGpuDestroy) Destroy = nullptr;
+        decltype(&VoxelGpuError) Error = nullptr;
+        decltype(&VoxelGpuFindMesh) FindMesh = nullptr;
+        decltype(&VoxelGpuUploadMesh) UploadMesh = nullptr;
+        decltype(&VoxelGpuRun) Run = nullptr;
+        decltype(&VoxelGpuGetPairs) GetPairs = nullptr;
+
+        FString LoadError;
+
+        bool IsLoaded() const
+        {
+            return Run != nullptr;
+        }
+
+        static const FVoxelGpuLibrary& Get()
+        {
+            static const FVoxelGpuLibrary Library = Load();
+
+            return Library;
+        }
+
+    private:
+
+        static FVoxelGpuLibrary Load()
+        {
+            FVoxelGpuLibrary Library;
+
+            const FString Path = FPaths::ConvertRelativePathToFull(FPaths::Combine(
+                FPaths::ProjectPluginsDir(),
+                TEXT("Carla/CarlaDependencies/lib/libcarla_voxel_gpu.so")
+            ));
+
+            void* Handle = FPlatformProcess::GetDllHandle(*Path);
+
+            if (!Handle)
+            {
+                Library.LoadError = FString::Printf(
+                    TEXT("cannot load %s; it is built when nvcc is available"),
+                    *Path
+                );
+
+                return Library;
+            }
+
+            const auto Find = [&](auto& Function, const TCHAR* Name)
+            {
+                using FFunction = typename std::remove_reference<decltype(Function)>::type;
+
+                Function = reinterpret_cast<FFunction>(FPlatformProcess::GetDllExport(Handle, Name));
+
+                return Function != nullptr;
+            };
+
+            const bool bFound = Find(Library.ApiVersion, TEXT("VoxelGpuApiVersion")) &&
+                                Find(Library.Create, TEXT("VoxelGpuCreate")) &&
+                                Find(Library.Destroy, TEXT("VoxelGpuDestroy")) &&
+                                Find(Library.Error, TEXT("VoxelGpuError")) &&
+                                Find(Library.FindMesh, TEXT("VoxelGpuFindMesh")) &&
+                                Find(Library.UploadMesh, TEXT("VoxelGpuUploadMesh")) &&
+                                Find(Library.Run, TEXT("VoxelGpuRun")) &&
+                                Find(Library.GetPairs, TEXT("VoxelGpuGetPairs"));
+
+            if (!bFound || Library.ApiVersion() != VOXEL_GPU_API_VERSION)
+            {
+                Library = FVoxelGpuLibrary();
+
+                Library.LoadError = FString::Printf(TEXT("%s does not match this sensor; rebuild it"), *Path);
+            }
+
+            return Library;
+        }
+    };
+
+    using FPrecise = std::array<double, 3>;
+
+    FPrecise Cross(const FPrecise& A, const FPrecise& B)
+    {
+        return FPrecise{A[1] * B[2] - A[2] * B[1], A[2] * B[0] - A[0] * B[2], A[0] * B[1] - A[1] * B[0]};
+    }
+
+    double Dot(const FPrecise& A, const FPrecise& B)
+    {
+        return A[0] * B[0] + A[1] * B[1] + A[2] * B[2];
+    }
+
+    FPrecise Subtract(const FPrecise& A, const FPrecise& B)
+    {
+        return FPrecise{A[0] - B[0], A[1] - B[1], A[2] - B[2]};
+    }
+
+    // A 3 x 4 affine map in double precision, row-major, as the GPU path
+    // takes shapes into grid space.
+    struct FAffine
+    {
+        double M[12] = {1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0};
+
+        static FAffine FromRotation(double X, double Y, double Z, double W)
+        {
+            const double Norm = std::sqrt(X * X + Y * Y + Z * Z + W * W);
+
+            X /= Norm;
+            Y /= Norm;
+            Z /= Norm;
+            W /= Norm;
+
+            FAffine A;
+
+            A.M[0] = 1.0 - 2.0 * (Y * Y + Z * Z);
+            A.M[1] = 2.0 * (X * Y - Z * W);
+            A.M[2] = 2.0 * (X * Z + Y * W);
+            A.M[4] = 2.0 * (X * Y + Z * W);
+            A.M[5] = 1.0 - 2.0 * (X * X + Z * Z);
+            A.M[6] = 2.0 * (Y * Z - X * W);
+            A.M[8] = 2.0 * (X * Z - Y * W);
+            A.M[9] = 2.0 * (Y * Z + X * W);
+            A.M[10] = 1.0 - 2.0 * (X * X + Y * Y);
+
+            return A;
+        }
+
+        static FAffine FromPose(const physx::PxTransform& Pose)
+        {
+            FAffine A = FromRotation(Pose.q.x, Pose.q.y, Pose.q.z, Pose.q.w);
+
+            A.M[3] = Pose.p.x;
+            A.M[7] = Pose.p.y;
+            A.M[11] = Pose.p.z;
+
+            return A;
+        }
+
+        static FAffine FromMatrix(const physx::PxMat33& Matrix)
+        {
+            FAffine A;
+
+            for (int Row = 0; Row < 3; ++Row)
+            {
+                A.M[4 * Row] = Matrix.column0[Row];
+                A.M[4 * Row + 1] = Matrix.column1[Row];
+                A.M[4 * Row + 2] = Matrix.column2[Row];
+            }
+
+            return A;
+        }
+
+        // This map after Other.
+        FAffine operator*(const FAffine& Other) const
+        {
+            FAffine A;
+
+            for (int Row = 0; Row < 3; ++Row)
+            {
+                for (int Column = 0; Column < 4; ++Column)
+                {
+                    double Sum = Column == 3 ? M[4 * Row + 3] : 0.0;
+
+                    for (int K = 0; K < 3; ++K)
+                        Sum += M[4 * Row + K] * Other.M[4 * K + Column];
+
+                    A.M[4 * Row + Column] = Sum;
+                }
+            }
+
+            return A;
+        }
+
+        FPrecise Apply(const FPrecise& Point) const
+        {
+            return FPrecise{
+                M[0] * Point[0] + M[1] * Point[1] + M[2] * Point[2] + M[3],
+                M[4] * Point[0] + M[5] * Point[1] + M[6] * Point[2] + M[7],
+                M[8] * Point[0] + M[9] * Point[1] + M[10] * Point[2] + M[11]
+            };
+        }
+
+        FPrecise Rotate(const FPrecise& Direction) const
+        {
+            return FPrecise{
+                M[0] * Direction[0] + M[1] * Direction[1] + M[2] * Direction[2],
+                M[4] * Direction[0] + M[5] * Direction[1] + M[6] * Direction[2],
+                M[8] * Direction[0] + M[9] * Direction[1] + M[10] * Direction[2]
+            };
+        }
+    };
+
+    // The voxels whose unit boxes may touch grid-space bounds [Low, High].
+    void SetVoxelBox(FVoxelGpuShape& Shape, const FPrecise& Low, const FPrecise& High, const FIntVector& GridSize)
+    {
+        for (int Axis = 0; Axis < 3; ++Axis)
+        {
+            const double Begin = std::ceil(Low[Axis]) - 1.0;
+            const double End = std::floor(High[Axis]) + 1.0;
+
+            Shape.Begin[Axis] = Begin > 0.0 ? int32(FMath::Min<double>(Begin, GridSize[Axis])) : 0;
+            Shape.End[Axis] = End > 0.0 ? int32(FMath::Min<double>(End, GridSize[Axis])) : 0;
+        }
+    }
+
+    // A convex shape for the GPU: every axis that can separate it from a
+    // voxel (the grid axes, its face normals, and its edges crossed with the
+    // grid axes), with its extent along each.
+    void AddHull(
+        const TArray<FPrecise>& Points,
+        const TArray<FPrecise>& Normals,
+        const TArray<FPrecise>& Edges,
+        const FIntVector& GridSize,
+        FVoxelGpuShape& Shape,
+        TArray<FVoxelGpuAxis>& Axes
+    )
+    {
+        Shape.Type = VOXEL_GPU_HULL;
+        Shape.FirstAxis = uint32(Axes.Num());
+
+        TArray<FPrecise> Directions = {FPrecise{1.0, 0.0, 0.0}, FPrecise{0.0, 1.0, 0.0}, FPrecise{0.0, 0.0, 1.0}};
+
+        Directions.Append(Normals);
+
+        for (const FPrecise& Edge : Edges)
+        {
+            for (int Axis = 0; Axis < 3; ++Axis)
+                Directions.Add(Cross(Edge, Directions[Axis]));
+        }
+
+        for (const FPrecise& Direction : Directions)
+        {
+            if (Direction[0] == 0.0 && Direction[1] == 0.0 && Direction[2] == 0.0)
+                continue;
+
+            FVoxelGpuAxis Axis{{Direction[0], Direction[1], Direction[2]}, INFINITY, -INFINITY};
+
+            for (const FPrecise& Point : Points)
+            {
+                const double Projection = Dot(Direction, Point);
+
+                Axis.Low = FMath::Min(Axis.Low, Projection);
+                Axis.High = FMath::Max(Axis.High, Projection);
+            }
+
+            Axes.Add(Axis);
+        }
+
+        Shape.NumAxes = uint32(Axes.Num()) - Shape.FirstAxis;
+
+        FPrecise Low{INFINITY, INFINITY, INFINITY};
+        FPrecise High{-INFINITY, -INFINITY, -INFINITY};
+
+        for (const FPrecise& Point : Points)
+        {
+            for (int Axis = 0; Axis < 3; ++Axis)
+            {
+                Low[Axis] = FMath::Min(Low[Axis], Point[Axis]);
+                High[Axis] = FMath::Max(High[Axis], Point[Axis]);
+            }
+        }
+
+        SetVoxelBox(Shape, Low, High, GridSize);
+    }
+
+    // Timings and counts of one frame on the GPU path.
+    struct FVoxelGpuReport
+    {
+        double GatherMs = 0.0;
+        double GeometryMs = 0.0;
+        double RunMs = 0.0;
+        int32 Candidates = 0;
+        int32 Meshes = 0;
+        int32 Uploads = 0;
+        int64 UploadBytes = 0;
+        int32 HeightFields = 0;
+        int32 Shapes = 0;
+        int32 Unsupported = 0;
+        FVoxelGpuStats Stats = {};
+    };
+
+    // Label the frame on the GPU without PhysX queries: one scene query
+    // gathers the labeled shapes, their geometry goes to the GPU in grid
+    // space, and every overlap is decided there in double precision. Ties
+    // between equal priorities go to the lower label, then the lower
+    // instance, instead of the engine query's hit order.
+    bool LabelOnGpu(
+        const FVoxelFrame& Frame,
+        FVoxelGpuContext* Context,
+        uint8* Labels,
+        TArray<FVoxelInstance>& OutInstances,
+        FVoxelGpuReport& Report,
+        FString& OutError
+    )
+    {
+        const FVoxelGpuLibrary& Gpu = FVoxelGpuLibrary::Get();
+
+        // Unit voxels in grid space need an unscaled sensor.
+        if (!Frame.SensorScale.Equals(FVector::OneVector, 1e-4f))
+        {
+            OutError = TEXT("use_gpu needs a sensor scale of 1");
+
+            return false;
+        }
+
+        const double Start = FPlatformTime::Seconds();
+
+        const FIntVector GridSize(Frame.GridSizeX, Frame.GridSizeY, Frame.GridSizeZ);
+
+        // Grid space: (sensor frame - Origin) / BoxSize, so voxel (X, Y, Z)
+        // spans [X, X + 1] x [Y, Y + 1] x [Z, Z + 1].
+        const FQuat Rotation = Frame.SensorTransform.GetRotation();
+        const FVector Location = Frame.SensorTransform.GetLocation();
+
+        const FAffine SensorRotation = FAffine::FromRotation(Rotation.X, Rotation.Y, Rotation.Z, Rotation.W);
+
+        FAffine WorldToGrid;
+
+        for (int Row = 0; Row < 3; ++Row)
+        {
+            double Translation = 0.0;
+
+            for (int Column = 0; Column < 3; ++Column)
+            {
+                WorldToGrid.M[4 * Row + Column] = SensorRotation.M[4 * Column + Row] / Frame.BoxSize;
+
+                Translation -= SensorRotation.M[4 * Column + Row] * Location[Column];
+            }
+
+            WorldToGrid.M[4 * Row + 3] = (Translation - Frame.Origin[Row]) / Frame.BoxSize;
+        }
+
+        physx::PxSceneReadLock SceneLock(*Frame.Scene);
+
+        FVoxelCandidateCollector Collector(
+            Frame.QueryParams,
+            Frame.ObjectParams,
+            Frame.Priorities,
+            Frame.NumLabels,
+            Frame.InstancedLabels,
+            Frame.Episode
+        );
+
+        {
+            physx::PxOverlapHit UnusedHit;
+            physx::PxOverlapBuffer UnusedHits(&UnusedHit, 1);
+
+            const physx::PxQueryFlags Flags = PhysXInterface::StaticDynamicQueryFlags(Frame.QueryParams);
+
+            const physx::PxQueryFilterData Filter(Flags | physx::PxQueryFlag::ePREFILTER);
+
+            const FQueryBox GridBox = Frame.MakeQueryBox(FIntVector(0), GridSize);
+
+            Frame.Scene->overlap(GridBox.Geometry, GridBox.Pose, UnusedHits, Filter, &Collector);
+        }
+
+        Report.Candidates = Collector.Candidates.Num();
+
+        const double Gathered = FPlatformTime::Seconds();
+
+        TArray<FVoxelGpuInstance> Instances;
+        TArray<FVoxelGpuShape> Shapes;
+        TArray<FVoxelGpuAxis> Axes;
+
+        TArray<uint32> Indices;
+        TArray<float> Vertices;
+        TSet<uint64> Sent;
+
+        // Cache a mesh on the GPU, or refresh the vertices of one that can
+        // deform, once per frame.
+        const auto Upload = [&](
+            uint64 MeshKey,
+            const float* MeshVertices,
+            uint32 NumVertices,
+            const uint32* MeshIndices,
+            uint32 NumTriangles
+        )
+        {
+            const FVoxelGpuMesh Mesh{MeshKey, MeshVertices, NumVertices, MeshIndices, NumTriangles};
+
+            if (Gpu.UploadMesh(Context, &Mesh) != 0)
+                return false;
+
+            Sent.Add(MeshKey);
+
+            ++Report.Uploads;
+
+            Report.UploadBytes += 12 * int64(NumVertices) + (MeshIndices ? 12 * int64(NumTriangles) : 0);
+
+            return true;
+        };
+
+        for (const FVoxelCandidate& Candidate : Collector.Candidates)
+        {
+            const uint32 InstanceId = Candidate.bInstanced ? Candidate.Instance : 0;
+
+            const uint32 Key = VOXEL_GPU_KEY(Candidate.Priority, Candidate.Label, InstanceId);
+
+            const FAffine ShapeToGrid = WorldToGrid * FAffine::FromPose(Candidate.Pose);
+
+            switch (Candidate.Geometry.getType())
+            {
+            case physx::PxGeometryType::eTRIANGLEMESH:
+            {
+                const physx::PxTriangleMeshGeometry& Geometry = Candidate.Geometry.triangleMesh();
+                const physx::PxTriangleMesh& Mesh = *Geometry.triangleMesh;
+
+                const uint64 MeshKey = uint64(UPTRINT(&Mesh));
+                const uint32 NumVertices = Mesh.getNbVertices();
+                const uint32 NumTriangles = Mesh.getNbTriangles();
+                const float* MeshVertices = reinterpret_cast<const float*>(Mesh.getVertices());
+
+                uint32 CachedVertices = 0;
+                uint32 CachedTriangles = 0;
+
+                const bool bCached = Gpu.FindMesh(Context, MeshKey, &CachedVertices, &CachedTriangles) &&
+                                     CachedVertices == NumVertices &&
+                                     CachedTriangles == NumTriangles;
+
+                if (!bCached)
+                {
+                    Indices.SetNumUninitialized(3 * NumTriangles);
+
+                    if (Mesh.getTriangleMeshFlags() & physx::PxTriangleMeshFlag::e16_BIT_INDICES)
+                    {
+                        const physx::PxU16* Source = static_cast<const physx::PxU16*>(Mesh.getTriangles());
+
+                        for (uint32 Index = 0; Index < 3 * NumTriangles; ++Index)
+                            Indices[Index] = Source[Index];
+                    }
+                    else
+                        FMemory::Memcpy(Indices.GetData(), Mesh.getTriangles(), 12 * size_t(NumTriangles));
+
+                    if (!Upload(MeshKey, MeshVertices, NumVertices, Indices.GetData(), NumTriangles))
+                        break;
+                }
+                else if (Candidate.bDynamic && !Sent.Contains(MeshKey))
+                {
+                    if (!Upload(MeshKey, MeshVertices, NumVertices, nullptr, NumTriangles))
+                        break;
+                }
+
+                FVoxelGpuInstance Instance{};
+
+                const FAffine MeshToGrid = ShapeToGrid * FAffine::FromMatrix(Geometry.scale.toMat33());
+
+                Instance.MeshKey = MeshKey;
+                Instance.Key = Key;
+
+                FMemory::Memcpy(Instance.ToGrid, MeshToGrid.M, sizeof(Instance.ToGrid));
+
+                Instances.Add(Instance);
+
+                ++Report.Meshes;
+
+                break;
+            }
+            case physx::PxGeometryType::eHEIGHTFIELD:
+            {
+                // Landscapes do not move, so their triangles are taken once,
+                // in world space, without holes.
+                const physx::PxHeightFieldGeometry& Geometry = Candidate.Geometry.heightField();
+                const physx::PxHeightField& HeightField = *Geometry.heightField;
+
+                const uint64 MeshKey = uint64(UPTRINT(&HeightField)) | 1;
+
+                uint32 CachedVertices = 0;
+                uint32 CachedTriangles = 0;
+
+                if (!Gpu.FindMesh(Context, MeshKey, &CachedVertices, &CachedTriangles))
+                {
+                    // PhysX numbers the two triangles of the cell at a row and
+                    // column 2 * (Row * Columns + Column), so the last row and
+                    // column of samples start no cell.
+                    const uint32 NumRows = HeightField.getNbRows();
+                    const uint32 NumColumns = HeightField.getNbColumns();
+
+                    Vertices.Reset();
+                    Indices.Reset();
+
+                    for (uint32 Row = 0; Row + 1 < NumRows; ++Row)
+                    {
+                        for (uint32 Column = 0; Column + 1 < NumColumns; ++Column)
+                        {
+                            for (uint32 Half = 0; Half < 2; ++Half)
+                            {
+                                const uint32 Index = 2 * (Row * NumColumns + Column) + Half;
+
+                                const bool bHole = HeightField.getTriangleMaterialIndex(Index) ==
+                                                   physx::PxHeightFieldMaterial::eHOLE;
+
+                                if (bHole)
+                                    continue;
+
+                                physx::PxTriangle Triangle;
+
+                                physx::PxMeshQuery::getTriangle(Geometry, Candidate.Pose, Index, Triangle);
+
+                                for (int Vertex = 0; Vertex < 3; ++Vertex)
+                                {
+                                    Indices.Add(uint32(Vertices.Num() / 3));
+
+                                    Vertices.Add(Triangle.verts[Vertex].x);
+                                    Vertices.Add(Triangle.verts[Vertex].y);
+                                    Vertices.Add(Triangle.verts[Vertex].z);
+                                }
+                            }
+                        }
+                    }
+
+                    if (Indices.Num() == 0)
+                        break;
+
+                    const bool bUploaded = Upload(
+                        MeshKey,
+                        Vertices.GetData(),
+                        uint32(Vertices.Num() / 3),
+                        Indices.GetData(),
+                        uint32(Indices.Num() / 3)
+                    );
+
+                    if (!bUploaded)
+                        break;
+                }
+
+                // PhysX counts a layer of |Thickness| on the side away from
+                // Up, and Unreal leaves the thickness negative.
+                const float Thickness = HeightField.getThickness();
+
+                const float Side = Thickness > 0.0f ? -1.0f : 1.0f;
+
+                const physx::PxVec3 Up = Candidate.Pose.q.rotate(physx::PxVec3(0.0f, Side, 0.0f));
+
+                const FPrecise GridUp = WorldToGrid.Rotate(FPrecise{Up.x, Up.y, Up.z});
+
+                const double UpLength = std::sqrt(Dot(GridUp, GridUp));
+
+                FVoxelGpuInstance Instance{};
+
+                Instance.MeshKey = MeshKey;
+                Instance.Key = Key;
+                Instance.Flags = VOXEL_GPU_HEIGHTFIELD;
+                Instance.Skin = std::abs(Thickness) / Frame.BoxSize;
+
+                for (int Axis = 0; Axis < 3; ++Axis)
+                    Instance.Up[Axis] = GridUp[Axis] / UpLength;
+
+                FMemory::Memcpy(Instance.ToGrid, WorldToGrid.M, sizeof(Instance.ToGrid));
+
+                Instances.Add(Instance);
+
+                ++Report.HeightFields;
+
+                break;
+            }
+            case physx::PxGeometryType::eSPHERE:
+            {
+                FVoxelGpuShape Shape{};
+
+                const FPrecise Center = ShapeToGrid.Apply(FPrecise{0.0, 0.0, 0.0});
+
+                Shape.Type = VOXEL_GPU_SPHERE;
+                Shape.Key = Key;
+                Shape.Radius = Candidate.Geometry.sphere().radius / Frame.BoxSize;
+
+                for (int Axis = 0; Axis < 3; ++Axis)
+                    Shape.Points[0][Axis] = Center[Axis];
+
+                SetVoxelBox(
+                    Shape,
+                    FPrecise{Center[0] - Shape.Radius, Center[1] - Shape.Radius, Center[2] - Shape.Radius},
+                    FPrecise{Center[0] + Shape.Radius, Center[1] + Shape.Radius, Center[2] + Shape.Radius},
+                    GridSize
+                );
+
+                Shapes.Add(Shape);
+
+                ++Report.Shapes;
+
+                break;
+            }
+            case physx::PxGeometryType::eCAPSULE:
+            {
+                // A capsule is a segment along its local x axis grown by its
+                // radius.
+                const physx::PxCapsuleGeometry& Geometry = Candidate.Geometry.capsule();
+
+                FVoxelGpuShape Shape{};
+
+                const FPrecise Ends[2] = {
+                    ShapeToGrid.Apply(FPrecise{-Geometry.halfHeight, 0.0, 0.0}),
+                    ShapeToGrid.Apply(FPrecise{Geometry.halfHeight, 0.0, 0.0})
+                };
+
+                Shape.Type = VOXEL_GPU_CAPSULE;
+                Shape.Key = Key;
+                Shape.Radius = Geometry.radius / Frame.BoxSize;
+
+                FPrecise Low;
+                FPrecise High;
+
+                for (int Axis = 0; Axis < 3; ++Axis)
+                {
+                    Shape.Points[0][Axis] = Ends[0][Axis];
+                    Shape.Points[1][Axis] = Ends[1][Axis];
+
+                    Low[Axis] = FMath::Min(Ends[0][Axis], Ends[1][Axis]) - Shape.Radius;
+                    High[Axis] = FMath::Max(Ends[0][Axis], Ends[1][Axis]) + Shape.Radius;
+                }
+
+                SetVoxelBox(Shape, Low, High, GridSize);
+
+                Shapes.Add(Shape);
+
+                ++Report.Shapes;
+
+                break;
+            }
+            case physx::PxGeometryType::eBOX:
+            {
+                const physx::PxVec3 Half = Candidate.Geometry.box().halfExtents;
+
+                TArray<FPrecise> Points;
+
+                for (int Corner = 0; Corner < 8; ++Corner)
+                {
+                    Points.Add(ShapeToGrid.Apply(FPrecise{
+                        (Corner & 1) ? Half.x : -Half.x,
+                        (Corner & 2) ? Half.y : -Half.y,
+                        (Corner & 4) ? Half.z : -Half.z
+                    }));
+                }
+
+                const TArray<FPrecise> Sides = {
+                    ShapeToGrid.Rotate(FPrecise{1.0, 0.0, 0.0}),
+                    ShapeToGrid.Rotate(FPrecise{0.0, 1.0, 0.0}),
+                    ShapeToGrid.Rotate(FPrecise{0.0, 0.0, 1.0})
+                };
+
+                FVoxelGpuShape Shape{};
+
+                Shape.Key = Key;
+
+                AddHull(Points, Sides, Sides, GridSize, Shape, Axes);
+
+                Shapes.Add(Shape);
+
+                ++Report.Shapes;
+
+                break;
+            }
+            case physx::PxGeometryType::eCONVEXMESH:
+            {
+                const physx::PxConvexMeshGeometry& Geometry = Candidate.Geometry.convexMesh();
+                const physx::PxConvexMesh& Mesh = *Geometry.convexMesh;
+
+                const FAffine HullToGrid = ShapeToGrid * FAffine::FromMatrix(Geometry.scale.toMat33());
+
+                TArray<FPrecise> Points;
+
+                for (physx::PxU32 Vertex = 0; Vertex < Mesh.getNbVertices(); ++Vertex)
+                {
+                    const physx::PxVec3& Point = Mesh.getVertices()[Vertex];
+
+                    Points.Add(HullToGrid.Apply(FPrecise{Point.x, Point.y, Point.z}));
+                }
+
+                TArray<FPrecise> Normals;
+                TArray<FPrecise> Edges;
+
+                const physx::PxU8* HullIndices = Mesh.getIndexBuffer();
+
+                for (physx::PxU32 Face = 0; Face < Mesh.getNbPolygons(); ++Face)
+                {
+                    physx::PxHullPolygon Polygon;
+
+                    Mesh.getPolygonData(Face, Polygon);
+
+                    // Newell's method gives the face normal from its vertices.
+                    FPrecise Normal{0.0, 0.0, 0.0};
+
+                    for (physx::PxU16 Corner = 0; Corner < Polygon.mNbVerts; ++Corner)
+                    {
+                        const FPrecise& A = Points[HullIndices[Polygon.mIndexBase + Corner]];
+                        const FPrecise& B = Points[HullIndices[Polygon.mIndexBase + (Corner + 1) % Polygon.mNbVerts]];
+
+                        Normal[0] += (A[1] - B[1]) * (A[2] + B[2]);
+                        Normal[1] += (A[2] - B[2]) * (A[0] + B[0]);
+                        Normal[2] += (A[0] - B[0]) * (A[1] + B[1]);
+
+                        Edges.Add(Subtract(B, A));
+                    }
+
+                    Normals.Add(Normal);
+                }
+
+                FVoxelGpuShape Shape{};
+
+                Shape.Key = Key;
+
+                AddHull(Points, Normals, Edges, GridSize, Shape, Axes);
+
+                Shapes.Add(Shape);
+
+                ++Report.Shapes;
+
+                break;
+            }
+            default:
+                ++Report.Unsupported;
+
+                break;
+            }
+        }
+
+        const double Built = FPlatformTime::Seconds();
+
+        const FVoxelGpuGrid Grid{{Frame.GridSizeX, Frame.GridSizeY, Frame.GridSizeZ}, Frame.InstancedLabels};
+
+        const int32 Status = Gpu.Run(
+            Context,
+            &Grid,
+            Instances.GetData(),
+            uint32(Instances.Num()),
+            Shapes.GetData(),
+            uint32(Shapes.Num()),
+            Axes.GetData(),
+            uint32(Axes.Num()),
+            Labels,
+            &Report.Stats
+        );
+
+        if (Status != 0)
+        {
+            OutError = UTF8_TO_TCHAR(Gpu.Error(Context));
+
+            return false;
+        }
+
+        const FVoxelGpuPair* Pairs = nullptr;
+        uint64_t NumPairs = 0;
+
+        Gpu.GetPairs(Context, &Pairs, &NumPairs);
+
+        static_assert(sizeof(FVoxelGpuPair) == sizeof(FVoxelInstance), "the GPU pairs are sent as they are");
+
+        OutInstances.SetNumUninitialized(int32(NumPairs));
+
+        FMemory::Memcpy(OutInstances.GetData(), Pairs, NumPairs * sizeof(FVoxelInstance));
+
+        const double End = FPlatformTime::Seconds();
+
+        Report.GatherMs = 1000.0 * (Gathered - Start);
+        Report.GeometryMs = 1000.0 * (Built - Gathered);
+        Report.RunMs = 1000.0 * (End - Built);
+
+        return true;
+    }
+
+    void LogGpuReport(const FVoxelGpuReport& Report)
+    {
+        const FVoxelGpuStats& Stats = Report.Stats;
+
+        carla::log_warning("Voxel GPU time (ms): gather=", Report.GatherMs,
+            ", geometry=", Report.GeometryMs,
+            ", GPU run=", Report.RunMs,
+            " (prepare=", Stats.PrepareMs,
+            ", raster=", Stats.RasterMs,
+            ", shapes=", Stats.ShapesMs,
+            ", resolve=", Stats.ResolveMs,
+            ", readback=", Stats.ReadbackMs, ")");
+
+        carla::log_warning("Voxel GPU counts: candidates=", Report.Candidates,
+            ", meshes=", Report.Meshes,
+            ", heightfields=", Report.HeightFields,
+            ", shapes=", Report.Shapes,
+            ", unsupported=", Report.Unsupported,
+            ", uploads=", Report.Uploads,
+            ", uploaded MB=", double(Report.UploadBytes) / 1e6,
+            ", triangles=", Stats.Triangles,
+            ", columns=", Stats.Columns,
+            ", shape voxels=", Stats.ShapeVoxels,
+            ", double-precision tests=", Stats.ExactTests,
+            ", instances=", Stats.Pairs,
+            ", slabs=", Stats.Slabs);
+    }
+
     void LogProfile(const TArray<FVoxelProfile>& Profiles, int64 TotalTiles)
     {
         FVoxelProfile Profile;
@@ -1470,6 +2269,18 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
     InstanceIds.RecommendedValues = { TEXT("False") };
     InstanceIds.bRestrictToRecommended = false;
 
+    FActorVariation UseGpuVariation;
+    UseGpuVariation.Id = TEXT("use_gpu");
+    UseGpuVariation.Type = EActorAttributeType::Bool;
+    UseGpuVariation.RecommendedValues = { TEXT("False") };
+    UseGpuVariation.bRestrictToRecommended = false;
+
+    FActorVariation GpuDeviceVariation;
+    GpuDeviceVariation.Id = TEXT("gpu_device");
+    GpuDeviceVariation.Type = EActorAttributeType::Int;
+    GpuDeviceVariation.RecommendedValues = { TEXT("0") };
+    GpuDeviceVariation.bRestrictToRecommended = false;
+
     FActorVariation OracleStride;
     OracleStride.Id = TEXT("oracle_stride");
     OracleStride.Type = EActorAttributeType::Int;
@@ -1494,6 +2305,8 @@ FActorDefinition AVoxelDetectionSensor::GetSensorDefinition()
             TileZ,
             InstanceIds,
             OracleStride,
+            UseGpuVariation,
+            GpuDeviceVariation,
         }
     );
 
@@ -1556,6 +2369,11 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
     // Zero disables the comparison with the per-voxel engine query.
     OracleStride = FMath::Max(0, GetInt("oracle_stride", 0));
 
+    // Label on a CUDA GPU without PhysX queries, if the GPU library is there.
+    UseGpu = GetBool("use_gpu", false);
+
+    GpuDevice = FMath::Max(0, GetInt("gpu_device", 0));
+
     // Voxels along one axis, or zero unless the count is positive and below
     // 2^31, so it fits an int32. The count is checked before its integer
     // conversion, so infinite, NaN and huge counts cannot overflow.
@@ -1612,6 +2430,18 @@ void AVoxelDetectionSensor::Set(const FActorDescription &Description)
         GridSizeZ,
         int64(GridSizeX) * GridSizeY * GridSizeZ
     );
+}
+
+void AVoxelDetectionSensor::EndPlay(EEndPlayReason::Type EndPlayReason)
+{
+    if (GpuContext)
+    {
+        FVoxelGpuLibrary::Get().Destroy(GpuContext);
+
+        GpuContext = nullptr;
+    }
+
+    Super::EndPlay(EndPlayReason);
 }
 
 void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime)
@@ -1674,9 +2504,59 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     int64 TotalTiles = 0;
 
-    if (Frame.IsSupported())
+    // The GPU path, when asked for and available; the CPU path otherwise.
+    bool bOnGpu = false;
+
+    FVoxelGpuReport GpuReport;
+
+    if (UseGpu && Frame.IsSupported())
+    {
+        const FVoxelGpuLibrary& Gpu = FVoxelGpuLibrary::Get();
+
+        FString GpuError = Gpu.LoadError;
+
+        if (Gpu.IsLoaded() && !GpuContext)
+        {
+            char Error[256] = {};
+
+            if (Gpu.Create(GpuDevice, &GpuContext, Error, sizeof(Error)) != 0)
+                GpuError = UTF8_TO_TCHAR(Error);
+        }
+
+        if (GpuContext)
+        {
+            TArray<FVoxelInstance> GpuInstances;
+
+            bOnGpu = LabelOnGpu(Frame, GpuContext, Labels, GpuInstances, GpuReport, GpuError);
+
+            if (bOnGpu)
+                Instances.Add(MoveTemp(GpuInstances));
+        }
+
+        // Shipping builds drop UE_LOG, so the reason also goes to the
+        // simulator's output.
+        if (!bOnGpu && !bReportedGpuFailure)
+        {
+            UE_LOG(
+                LogCarla,
+                Error,
+                TEXT("VoxelDetectionSensor: use_gpu failed (%s); using the CPU path."),
+                *GpuError
+            );
+
+            carla::log_warning(
+                "VoxelDetectionSensor: use_gpu failed (",
+                TCHAR_TO_UTF8(*GpuError),
+                "); using the CPU path."
+            );
+
+            bReportedGpuFailure = true;
+        }
+    }
+
+    if (!bOnGpu && Frame.IsSupported())
         TotalTiles = RunTiles(Frame, TileSize, Labels, ShowCalculationTime, Instances, Profiles);
-    else
+    else if (!bOnGpu)
     {
         // A collapsed or non-finite sensor transform, or a voxel size of
         // almost zero, has no meaningful grid.
@@ -1780,7 +2660,21 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
     const double EndTime = FPlatformTime::Seconds();
 
-    if (ShowCalculationTime)
+    if (ShowCalculationTime && bOnGpu)
+    {
+        carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms (GPU ", GpuDevice,
+            ", slabs: ", GpuReport.Stats.Slabs, ")");
+
+        carla::log_warning("Voxel wall time (ms): setup=", 1000.0 * (ParallelStart - StartTime),
+            ", labeling=", 1000.0 * (ParallelEnd - ParallelStart),
+            ", instances=", 1000.0 * (InstanceEnd - ParallelEnd),
+            ", oracle=", 1000.0 * (OracleEnd - InstanceEnd),
+            ", debug=", 1000.0 * (SendStart - OracleEnd),
+            ", send=", 1000.0 * (EndTime - SendStart));
+
+        LogGpuReport(GpuReport);
+    }
+    else if (ShowCalculationTime)
     {
         carla::log_warning("Calculation time: ", 1000.0 * (EndTime - StartTime), " ms (tiles: ", TotalTiles,
             " of ", TileSize.X, "x", TileSize.Y, "x", TileSize.Z, ", batches: ", Profiles.Num(), ")");

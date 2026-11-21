@@ -6,6 +6,8 @@
 
 #include "VoxelDetectionSensor.generated.h"
 
+struct FVoxelGpuContext;
+
 UCLASS()
 class CARLA_API AVoxelDetectionSensor : public ASensor
 {
@@ -20,6 +22,8 @@ public:
     void Set(const FActorDescription &ActorDescription) override;
 
     void PostPhysTick(UWorld *World, ELevelTick TickType, float DeltaTime) override;
+
+    void EndPlay(EEndPlayReason::Type EndPlayReason) override;
 
     static TMap<int32, FLinearColor> ColorMap;
 
@@ -132,4 +136,11 @@ private:
     int64 InstanceReserve = 65536;
 
     int32 OracleStride = 0;
+
+    // Label on a CUDA GPU without PhysX queries (use_gpu): exact shapes in
+    // double precision, ties to the lower label, then the lower instance.
+    bool UseGpu = false;
+    int32 GpuDevice = 0;
+    bool bReportedGpuFailure = false;
+    FVoxelGpuContext* GpuContext = nullptr;
 };
