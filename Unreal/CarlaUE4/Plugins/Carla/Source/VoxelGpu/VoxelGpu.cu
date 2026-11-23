@@ -7,14 +7,19 @@
 // labeled in slabs along X that fit the GPU. Per slab, every triangle finds
 // the voxel columns along its dominant normal axis that its plane may cross,
 // each column tests its one to three voxels in double precision, and an
-// atomic maximum on a 32-bit key keeps the winning label per voxel.
+// atomic maximum on a 32-bit key keeps the winning label per voxel. Most
+// voxels are empty, so a slab comes back as a bitmap of its occupied voxels
+// and their labels, which the host expands into the sensor's buffer.
 
 #include "../Carla/Sensor/VoxelGpuApi.h"
 
 #include <cuda_runtime.h>
 #include <cub/device/device_scan.cuh>
 
+#include <emmintrin.h>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -22,6 +27,7 @@
 #include <cfloat>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -71,6 +77,42 @@ namespace
         {
             if (Data)
                 cudaFree(Data);
+
+            Data = nullptr;
+            Capacity = 0;
+        }
+    };
+
+    // Page-locked host memory, which the GPU copies to at full speed.
+    template <typename T>
+    struct FHostArray
+    {
+        T* Data = nullptr;
+        size_t Capacity = 0;
+
+        cudaError_t Reserve(size_t Count)
+        {
+            if (Count <= Capacity)
+                return cudaSuccess;
+
+            const size_t NewCapacity = std::max(Count, Capacity + Capacity / 2);
+
+            Free();
+
+            const cudaError_t Status = cudaMallocHost(&Data, NewCapacity * sizeof(T));
+
+            if (Status == cudaSuccess)
+                Capacity = NewCapacity;
+            else
+                Data = nullptr;
+
+            return Status;
+        }
+
+        void Free()
+        {
+            if (Data)
+                cudaFreeHost(Data);
 
             Data = nullptr;
             Capacity = 0;
@@ -449,6 +491,73 @@ namespace
         }
     }
 
+    // Writes triangle T's axes at unit L1 length, with its range along each
+    // widened by the voxel's radius, 0.5, and returns the band that bounds
+    // the rounding of a test against them. An axis of zero length separates
+    // nothing and passes every voxel. Q holds the vertices relative to voxel
+    // Begin.
+    __device__ float WriteAxes(
+        const double (*Directions)[3],
+        const double (*Q)[3],
+        const FPrepared& P,
+        uint64_t T,
+        uint64_t NumTriangles,
+        float* Axes
+    )
+    {
+        double Magnitude = 0.0;
+
+        for (int Index = 0; Index < NumAxes; ++Index)
+        {
+            const double* Direction = Directions[Index];
+
+            const double Length = fabs(Direction[0]) + fabs(Direction[1]) + fabs(Direction[2]);
+
+            float* Axis = Axes + uint64_t(5 * Index) * NumTriangles + T;
+
+            if (!(Length > 0.0))
+            {
+                Axis[0] = 0.0f;
+                Axis[NumTriangles] = 0.0f;
+                Axis[2 * NumTriangles] = 0.0f;
+                Axis[3 * NumTriangles] = -FLT_MAX;
+                Axis[4 * NumTriangles] = FLT_MAX;
+
+                continue;
+            }
+
+            const double Inverse = 1.0 / Length;
+
+            const double Unit[3] = {Direction[0] * Inverse, Direction[1] * Inverse, Direction[2] * Inverse};
+
+            const double A = DotProduct(Unit, Q[0]);
+            const double B = DotProduct(Unit, Q[1]);
+            const double C = DotProduct(Unit, Q[2]);
+
+            const double Low = fmin(A, fmin(B, C)) - 0.5;
+            const double High = fmax(A, fmax(B, C)) + 0.5;
+
+            Axis[0] = float(Unit[0]);
+            Axis[NumTriangles] = float(Unit[1]);
+            Axis[2 * NumTriangles] = float(Unit[2]);
+            Axis[3 * NumTriangles] = float(Low);
+            Axis[4 * NumTriangles] = float(High);
+
+            Magnitude = fmax(Magnitude, fmax(fabs(Low), fabs(High)));
+        }
+
+        // Centers are at most the box size from Begin. Rounding the axes and
+        // ranges to single precision and projecting a center costs a few
+        // units in the last place of these magnitudes; twice that is kept as
+        // the band.
+        double Extent = 0.0;
+
+        for (int Axis = 0; Axis < 3; ++Axis)
+            Extent = fmax(Extent, double(P.End[Axis] - P.Begin[Axis]));
+
+        return float(8.0 * FLT_EPSILON * (Magnitude + Extent + 2.0));
+    }
+
     __global__ void PrepareTriangles(
         const FInstanceGpu* Instances,
         uint32_t NumInstances,
@@ -575,60 +684,9 @@ namespace
 
             P.bExact = bSurface || P.Dominant < 0;
 
-            // Each axis at unit L1 length, with the triangle's range along it
-            // widened by the voxel's radius, 0.5. An axis of zero length
-            // separates nothing and passes every voxel.
-            double Magnitude = 0.0;
-
-            for (int Index = 0; Index < NumAxes; ++Index)
-            {
-                const double* Direction = Directions[Index];
-
-                const double Length = fabs(Direction[0]) + fabs(Direction[1]) + fabs(Direction[2]);
-
-                float* Axis = Axes + uint64_t(5 * Index) * NumTriangles + T;
-
-                if (!(Length > 0.0))
-                {
-                    Axis[0] = 0.0f;
-                    Axis[NumTriangles] = 0.0f;
-                    Axis[2 * NumTriangles] = 0.0f;
-                    Axis[3 * NumTriangles] = -FLT_MAX;
-                    Axis[4 * NumTriangles] = FLT_MAX;
-
-                    continue;
-                }
-
-                const double Inverse = 1.0 / Length;
-
-                const double Unit[3] = {Direction[0] * Inverse, Direction[1] * Inverse, Direction[2] * Inverse};
-
-                const double A = DotProduct(Unit, Q[0]);
-                const double B = DotProduct(Unit, Q[1]);
-                const double C = DotProduct(Unit, Q[2]);
-
-                const double Low = fmin(A, fmin(B, C)) - 0.5;
-                const double High = fmax(A, fmax(B, C)) + 0.5;
-
-                Axis[0] = float(Unit[0]);
-                Axis[NumTriangles] = float(Unit[1]);
-                Axis[2 * NumTriangles] = float(Unit[2]);
-                Axis[3 * NumTriangles] = float(Low);
-                Axis[4 * NumTriangles] = float(High);
-
-                Magnitude = fmax(Magnitude, fmax(fabs(Low), fabs(High)));
-            }
-
-            // Centers are at most the box size from Begin. Rounding the axes
-            // and ranges to single precision and projecting a center costs a
-            // few units in the last place of these magnitudes; twice that is
-            // kept as the band.
-            double Extent = 0.0;
-
-            for (int Axis = 0; Axis < 3; ++Axis)
-                Extent = fmax(Extent, double(P.End[Axis] - P.Begin[Axis]));
-
-            P.Error = float(8.0 * FLT_EPSILON * (Magnitude + Extent + 2.0));
+            // Heightfield and zero-area triangles are tested from their
+            // vertices alone and need no axes.
+            P.Error = P.bExact ? 0.0f : WriteAxes(Directions, Q, P, T, NumTriangles, Axes);
 
             const int D = P.Dominant < 0 ? 2 : P.Dominant;
             const int U = (D + 1) % 3;
@@ -889,47 +947,165 @@ namespace
         return Key ? uint8_t(31 - ((Key >> 16) & 31)) : uint8_t(0);
     }
 
-    __global__ void ResolveLabels(
+    // The slab goes back to the host packed: a bitmap of the occupied voxels
+    // and their labels in order. Bit B of the bitmap is voxel B - Shift of
+    // the slab, where Shift is the host address of the slab's first label
+    // modulo 64, so every 64-bit word fills one host cache line. A warp
+    // handles one word, its lanes one voxel in each half.
+    __device__ uint32_t GetSlabKey(const uint32_t* Keys, uint64_t NumVoxels, uint64_t Shift, uint64_t Bit)
+    {
+        return Bit >= Shift && Bit - Shift < NumVoxels ? Keys[Bit - Shift] : 0u;
+    }
+
+    __device__ bool IsInstanced(uint32_t Key, uint32_t InstancedLabels)
+    {
+        const uint8_t Label = GetLabel(Key);
+
+        return Label && ((InstancedLabels >> Label) & 1);
+    }
+
+    __global__ void PackBitmap(
         const uint32_t* Keys,
         uint64_t NumVoxels,
+        uint64_t Shift,
+        uint64_t NumWords,
         uint32_t InstancedLabels,
-        uint8_t* Labels,
+        uint64_t* Bitmap,
+        uint64_t* Counts,
         unsigned long long* NumPairs
     )
     {
-        for (uint64_t I = blockIdx.x * uint64_t(blockDim.x) + threadIdx.x; I < NumVoxels; I += uint64_t(gridDim.x) * blockDim.x)
+        const uint32_t Lane = threadIdx.x % 32;
+
+        const uint64_t First = (blockIdx.x * uint64_t(blockDim.x) + threadIdx.x) / 32;
+        const uint64_t Stride = uint64_t(gridDim.x) * blockDim.x / 32;
+
+        for (uint64_t Word = First; Word < NumWords; Word += Stride)
         {
-            const uint8_t Label = GetLabel(Keys[I]);
+            const uint32_t Low = GetSlabKey(Keys, NumVoxels, Shift, 64 * Word + Lane);
+            const uint32_t High = GetSlabKey(Keys, NumVoxels, Shift, 64 * Word + 32 + Lane);
 
-            Labels[I] = Label;
+            const uint32_t LowBits = __ballot_sync(0xFFFFFFFFu, GetLabel(Low) != 0);
+            const uint32_t HighBits = __ballot_sync(0xFFFFFFFFu, GetLabel(High) != 0);
 
-            if (Label && ((InstancedLabels >> Label) & 1))
-                atomicAdd(NumPairs, 1ull);
+            const uint32_t Instanced = __popc(__ballot_sync(0xFFFFFFFFu, IsInstanced(Low, InstancedLabels))) +
+                                       __popc(__ballot_sync(0xFFFFFFFFu, IsInstanced(High, InstancedLabels)));
+
+            if (Lane == 0)
+            {
+                Bitmap[Word] = uint64_t(HighBits) << 32 | LowBits;
+                Counts[Word] = __popc(LowBits) + __popc(HighBits);
+
+                if (Instanced > 0)
+                    atomicAdd(NumPairs, (unsigned long long)Instanced);
+            }
         }
     }
 
-    __global__ void WritePairs(
+    __global__ void PackLabels(
         const uint32_t* Keys,
-        const uint8_t* Labels,
         uint64_t NumVoxels,
+        uint64_t Shift,
+        uint64_t NumWords,
         uint64_t FirstIndex,
         uint32_t InstancedLabels,
+        const uint64_t* Offsets,
+        uint8_t* Packed,
         FVoxelGpuPair* Pairs,
-        unsigned long long* Counter
+        unsigned long long* NextPair
     )
     {
-        for (uint64_t I = blockIdx.x * uint64_t(blockDim.x) + threadIdx.x; I < NumVoxels; I += uint64_t(gridDim.x) * blockDim.x)
+        const uint32_t Lane = threadIdx.x % 32;
+        const uint32_t Before = (1u << Lane) - 1;
+
+        const uint64_t First = (blockIdx.x * uint64_t(blockDim.x) + threadIdx.x) / 32;
+        const uint64_t Stride = uint64_t(gridDim.x) * blockDim.x / 32;
+
+        for (uint64_t Word = First; Word < NumWords; Word += Stride)
         {
-            const uint8_t Label = Labels[I];
+            const uint32_t Low = GetSlabKey(Keys, NumVoxels, Shift, 64 * Word + Lane);
+            const uint32_t High = GetSlabKey(Keys, NumVoxels, Shift, 64 * Word + 32 + Lane);
 
-            if (!Label || !((InstancedLabels >> Label) & 1))
-                continue;
+            const uint32_t LowBits = __ballot_sync(0xFFFFFFFFu, GetLabel(Low) != 0);
+            const uint32_t HighBits = __ballot_sync(0xFFFFFFFFu, GetLabel(High) != 0);
 
-            const unsigned long long Slot = atomicAdd(Counter, 1ull);
+            const uint64_t Offset = Offsets[Word];
 
-            Pairs[Slot].Index = FirstIndex + I;
-            Pairs[Slot].Instance = 0xFFFF - (Keys[I] & 0xFFFF);
+            const uint32_t HalfKeys[2] = {Low, High};
+            const uint64_t Slots[2] = {
+                Offset + __popc(LowBits & Before),
+                Offset + __popc(LowBits) + __popc(HighBits & Before)
+            };
+
+            for (int Half = 0; Half < 2; ++Half)
+            {
+                const uint32_t Key = HalfKeys[Half];
+
+                if (!GetLabel(Key))
+                    continue;
+
+                Packed[Slots[Half]] = GetLabel(Key);
+
+                if (!IsInstanced(Key, InstancedLabels))
+                    continue;
+
+                const unsigned long long Slot = atomicAdd(NextPair, 1ull);
+
+                Pairs[Slot].Index = FirstIndex + 64 * Word + 32 * Half + Lane - Shift;
+                Pairs[Slot].Instance = 0xFFFF - (Key & 0xFFFF);
+            }
         }
+    }
+
+    // Writes the labels of words FirstWord to LastWord of a packed slab,
+    // starting from packed label Next. A line inside the slab is built in a
+    // small buffer and streamed to memory, so the host writes the slab at
+    // its memory bandwidth; the first and last lines may reach past the
+    // slab and are written byte by byte.
+    void ExpandWords(
+        uint8_t* Labels,
+        uint64_t NumVoxels,
+        uint64_t Shift,
+        const uint64_t* Bitmap,
+        const uint8_t* Packed,
+        uint64_t FirstWord,
+        uint64_t LastWord,
+        uint64_t Next
+    )
+    {
+        alignas(64) uint8_t Buffer[64];
+
+        for (uint64_t Word = FirstWord; Word < LastWord; ++Word)
+        {
+            std::memset(Buffer, 0, sizeof(Buffer));
+
+            for (uint64_t Bits = Bitmap[Word]; Bits != 0; Bits &= Bits - 1)
+                Buffer[__builtin_ctzll(Bits)] = Packed[Next++];
+
+            if (64 * Word < Shift || 64 * Word + 64 > Shift + NumVoxels)
+            {
+                for (uint64_t Byte = 0; Byte < 64; ++Byte)
+                {
+                    const uint64_t Voxel = 64 * Word + Byte - Shift;
+
+                    if (64 * Word + Byte >= Shift && Voxel < NumVoxels)
+                        Labels[Voxel] = Buffer[Byte];
+                }
+
+                continue;
+            }
+
+            uint8_t* Line = Labels + (64 * Word - Shift);
+
+            for (int Part = 0; Part < 4; ++Part)
+            {
+                const __m128i Value = _mm_load_si128(reinterpret_cast<const __m128i*>(Buffer + 16 * Part));
+
+                _mm_stream_si128(reinterpret_cast<__m128i*>(Line + 16 * Part), Value);
+            }
+        }
+
+        _mm_sfence();
     }
 }
 
@@ -949,48 +1125,22 @@ struct FVoxelGpuContext
     FDeviceArray<FShapeGpu> Shapes;
     FDeviceArray<FVoxelGpuAxis> Axes;
     FDeviceArray<uint32_t> Keys;
-    FDeviceArray<uint8_t> Labels;
+    FDeviceArray<uint64_t> Bitmap;
+    FDeviceArray<uint64_t> Counts;
+    FDeviceArray<uint64_t> WordOffsets;
+    FDeviceArray<uint8_t> Packed;
     FDeviceArray<FVoxelGpuPair> Pairs;
     FDeviceArray<unsigned long long> Counters;
 
+    // The packed slab on the host: the caller's label buffer is never
+    // registered with CUDA, since it may be freed and reallocated at the
+    // same address while still registered, which sends copies to its old
+    // pages.
+    FHostArray<uint64_t> HostBitmap;
+    FHostArray<uint8_t> HostPacked;
+    FHostArray<uint64_t> HostStarts;
+
     std::vector<FVoxelGpuPair> HostPairs;
-
-    // Host label buffers pinned for direct copies, most recent last. The
-    // sensor's stream pool reuses one or two buffers, so each is pinned once.
-    std::vector<std::pair<void*, size_t>> Pinned;
-
-    // Pin the host range, or return false so the copy goes through pageable
-    // memory.
-    bool Pin(void* Data, size_t Size)
-    {
-        for (size_t Index = 0; Index < Pinned.size(); ++Index)
-        {
-            if (Pinned[Index].first == Data && Pinned[Index].second >= Size)
-            {
-                std::rotate(Pinned.begin() + Index, Pinned.begin() + Index + 1, Pinned.end());
-
-                return true;
-            }
-        }
-
-        if (Pinned.size() >= 4)
-        {
-            cudaHostUnregister(Pinned.front().first);
-
-            Pinned.erase(Pinned.begin());
-        }
-
-        if (cudaHostRegister(Data, Size, cudaHostRegisterDefault) != cudaSuccess)
-        {
-            cudaGetLastError();
-
-            return false;
-        }
-
-        Pinned.emplace_back(Data, Size);
-
-        return true;
-    }
 
     cudaEvent_t Events[2] = {nullptr, nullptr};
 
@@ -1022,14 +1172,9 @@ struct FVoxelGpuContext
         return Milliseconds;
     }
 
-    // The buffers rebuilt every frame, and the pinned host ranges.
+    // The buffers rebuilt every frame.
     void ReleaseScratch()
     {
-        for (const auto& Range : Pinned)
-            cudaHostUnregister(Range.first);
-
-        Pinned.clear();
-
         Instances.Free();
         Prepared.Free();
         TriangleAxes.Free();
@@ -1039,17 +1184,18 @@ struct FVoxelGpuContext
         Shapes.Free();
         Axes.Free();
         Keys.Free();
-        Labels.Free();
+        Bitmap.Free();
+        Counts.Free();
+        WordOffsets.Free();
+        Packed.Free();
         Pairs.Free();
+        HostBitmap.Free();
+        HostPacked.Free();
+        HostStarts.Free();
     }
 
     void Release()
     {
-        for (const auto& Range : Pinned)
-            cudaHostUnregister(Range.first);
-
-        Pinned.clear();
-
         cudaGetLastError();
 
         for (auto& Entry : Meshes)
@@ -1060,17 +1206,8 @@ struct FVoxelGpuContext
 
         Meshes.clear();
 
-        Instances.Free();
-        Prepared.Free();
-        TriangleAxes.Free();
-        Columns.Free();
-        Offsets.Free();
-        ScanTemp.Free();
-        Shapes.Free();
-        Axes.Free();
-        Keys.Free();
-        Labels.Free();
-        Pairs.Free();
+        ReleaseScratch();
+
         Counters.Free();
 
         for (cudaEvent_t& Event : Events)
@@ -1180,11 +1317,8 @@ VOXEL_GPU_EXPORT int32_t VoxelGpuFindMesh(
     return 1;
 }
 
-VOXEL_GPU_EXPORT int32_t VoxelGpuUploadMesh(FVoxelGpuContext* Context, const FVoxelGpuMesh* Mesh)
+static int32_t UploadMesh(FVoxelGpuContext* Context, const FVoxelGpuMesh* Mesh, FMesh& Entry)
 {
-    VOXEL_GPU_CHECK(cudaSetDevice(Context->Device));
-
-    FMesh& Entry = Context->Meshes[Mesh->Key];
 
     if (Mesh->Indices)
     {
@@ -1219,6 +1353,82 @@ VOXEL_GPU_EXPORT int32_t VoxelGpuUploadMesh(FVoxelGpuContext* Context, const FVo
     Entry.LastUsed = Context->RunCount + 1;
 
     return 0;
+}
+
+VOXEL_GPU_EXPORT int32_t VoxelGpuUploadMesh(FVoxelGpuContext* Context, const FVoxelGpuMesh* Mesh)
+{
+    VOXEL_GPU_CHECK(cudaSetDevice(Context->Device));
+
+    FMesh& Entry = Context->Meshes[Mesh->Key];
+
+    // A mesh left half written would pair new indices with old vertices, so
+    // it is dropped and uploaded whole next time.
+    if (UploadMesh(Context, Mesh, Entry) != 0)
+    {
+        Entry.Vertices.Free();
+        Entry.Indices.Free();
+
+        Context->Meshes.erase(Mesh->Key);
+
+        return -1;
+    }
+
+    return 0;
+}
+
+// Bitmap words per chunk of the host expansion: 4 MB of labels.
+constexpr uint64_t ChunkWords = uint64_t(1) << 16;
+
+// A few threads reach the host's memory bandwidth.
+constexpr uint64_t MaxExpandThreads = 8;
+
+// Writes a packed slab into Labels. Starts holds the first packed label of
+// each chunk of ChunkWords words.
+static void ExpandSlab(
+    uint8_t* Labels,
+    uint64_t NumVoxels,
+    uint64_t Shift,
+    uint64_t NumWords,
+    const uint64_t* Bitmap,
+    const uint8_t* Packed,
+    const uint64_t* Starts
+)
+{
+    const uint64_t NumChunks = (NumWords + ChunkWords - 1) / ChunkWords;
+
+    std::atomic<uint64_t> NextChunk(0);
+
+    const auto Work = [&]()
+    {
+        for (uint64_t Chunk = NextChunk++; Chunk < NumChunks; Chunk = NextChunk++)
+        {
+            const uint64_t FirstWord = Chunk * ChunkWords;
+            const uint64_t LastWord = std::min(NumWords, FirstWord + ChunkWords);
+
+            ExpandWords(Labels, NumVoxels, Shift, Bitmap, Packed, FirstWord, LastWord, Starts[Chunk]);
+        }
+    };
+
+    const uint64_t Cores = std::max(1u, std::thread::hardware_concurrency());
+
+    const uint64_t NumThreads = std::min({NumChunks, MaxExpandThreads, std::max<uint64_t>(1, Cores / 4)});
+
+    std::vector<std::thread> Helpers;
+
+    // Without helpers this thread does all the work.
+    try
+    {
+        for (uint64_t Index = 1; Index < NumThreads; ++Index)
+            Helpers.emplace_back(Work);
+    }
+    catch (const std::system_error&)
+    {
+    }
+
+    Work();
+
+    for (std::thread& Helper : Helpers)
+        Helper.join();
 }
 
 // One attempt at labeling the grid, with slabs sized to MemoryShare of the
@@ -1333,7 +1543,8 @@ static int32_t RunOnce(
 
     VOXEL_GPU_CHECK(Context->Shapes.Reserve(std::max<uint32_t>(NumShapes, 1)));
 
-    // Slabs along X, at five bytes per voxel for the keys and the labels.
+    // Slabs along X, at up to five bytes per voxel: four for the keys, the
+    // rest for the bitmap, its counts and offsets, and the packed labels.
     // Buffers kept from earlier frames set the slab size, so a GPU whose free
     // memory changes from frame to frame, as one that also renders, is not
     // asked for new buffers every frame. Otherwise MemoryShare of the free
@@ -1341,7 +1552,7 @@ static int32_t RunOnce(
     const int64_t PlaneVoxels = int64_t(SizeY) * SizeZ;
     const int64_t TotalVoxels = PlaneVoxels * SizeX;
 
-    const int64_t Held = int64_t(std::min(Context->Keys.Capacity, Context->Labels.Capacity));
+    const int64_t Held = int64_t(Context->Keys.Capacity);
 
     int64_t Planes = 0;
 
@@ -1368,8 +1579,14 @@ static int32_t RunOnce(
 
     VOXEL_GPU_CHECK(Context->Keys.Reserve(size_t(std::min(SlabVoxels, TotalVoxels))));
 
-    Context->Pin(Labels, size_t(TotalVoxels));
-    VOXEL_GPU_CHECK(Context->Labels.Reserve(size_t(std::min(SlabVoxels, TotalVoxels))));
+    // A slab's bitmap may start up to 63 bits early and end in a part word.
+    const size_t MaxWords = size_t(std::min(SlabVoxels, TotalVoxels) / 64 + 2);
+
+    VOXEL_GPU_CHECK(Context->Bitmap.Reserve(MaxWords));
+    VOXEL_GPU_CHECK(Context->Counts.Reserve(MaxWords));
+    VOXEL_GPU_CHECK(Context->WordOffsets.Reserve(MaxWords));
+    VOXEL_GPU_CHECK(Context->HostBitmap.Reserve(MaxWords));
+    VOXEL_GPU_CHECK(Context->HostStarts.Reserve(MaxWords / ChunkWords + 1));
 
     Context->Lap();
 
@@ -1526,50 +1743,131 @@ static int32_t RunOnce(
 
         Stats->ShapesMs += Context->Lap();
 
-        // Labels, then the voxels with an instance.
+        // The occupied voxels' bitmap and labels, then the voxels with an
+        // instance.
+        uint8_t* SlabLabels = Labels + int64_t(SlabBegin) * PlaneVoxels;
+
+        const uint64_t Shift = uint64_t(reinterpret_cast<uintptr_t>(SlabLabels) % 64);
+        const uint64_t NumWords = (Shift + uint64_t(Voxels) + 63) / 64;
+        const uint64_t NumChunks = (NumWords + ChunkWords - 1) / ChunkWords;
+
         VOXEL_GPU_CHECK(cudaMemset(Context->Counters.Data, 0, 2 * sizeof(unsigned long long)));
 
-        ResolveLabels<<<GetBlocks(uint64_t(Voxels)), ThreadsPerBlock>>>(
+        PackBitmap<<<GetBlocks(32 * NumWords), ThreadsPerBlock>>>(
             Context->Keys.Data,
             uint64_t(Voxels),
+            Shift,
+            NumWords,
             Grid->InstancedLabels,
-            Context->Labels.Data,
+            Context->Bitmap.Data,
+            Context->Counts.Data,
             Context->Counters.Data
         );
 
         VOXEL_GPU_CHECK(cudaGetLastError());
 
+        size_t ScanBytes = 0;
+
+        VOXEL_GPU_CHECK(cub::DeviceScan::ExclusiveSum(
+            nullptr,
+            ScanBytes,
+            Context->Counts.Data,
+            Context->WordOffsets.Data,
+            NumWords
+        ));
+
+        VOXEL_GPU_CHECK(Context->ScanTemp.Reserve(std::max<size_t>(ScanBytes, 1)));
+
+        ScanBytes = Context->ScanTemp.Capacity;
+
+        VOXEL_GPU_CHECK(cub::DeviceScan::ExclusiveSum(
+            Context->ScanTemp.Data,
+            ScanBytes,
+            Context->Counts.Data,
+            Context->WordOffsets.Data,
+            NumWords
+        ));
+
+        uint64_t Last[2] = {0, 0};
+
+        VOXEL_GPU_CHECK(cudaMemcpy(
+            &Last[0],
+            Context->WordOffsets.Data + NumWords - 1,
+            sizeof(uint64_t),
+            cudaMemcpyDeviceToHost
+        ));
+
+        VOXEL_GPU_CHECK(cudaMemcpy(
+            &Last[1],
+            Context->Counts.Data + NumWords - 1,
+            sizeof(uint64_t),
+            cudaMemcpyDeviceToHost
+        ));
+
+        const uint64_t NumOccupied = Last[0] + Last[1];
+
         unsigned long long NumPairs = 0;
 
         VOXEL_GPU_CHECK(cudaMemcpy(&NumPairs, Context->Counters.Data, sizeof(NumPairs), cudaMemcpyDeviceToHost));
 
-        if (NumPairs > 0)
-        {
-            VOXEL_GPU_CHECK(Context->Pairs.Reserve(NumPairs));
+        VOXEL_GPU_CHECK(Context->Packed.Reserve(std::max<uint64_t>(NumOccupied, 1)));
+        VOXEL_GPU_CHECK(Context->Pairs.Reserve(std::max<unsigned long long>(NumPairs, 1)));
 
-            WritePairs<<<GetBlocks(uint64_t(Voxels)), ThreadsPerBlock>>>(
-                Context->Keys.Data,
-                Context->Labels.Data,
-                uint64_t(Voxels),
-                uint64_t(SlabBegin) * uint64_t(PlaneVoxels),
-                Grid->InstancedLabels,
-                Context->Pairs.Data,
-                Context->Counters.Data + 1
-            );
+        PackLabels<<<GetBlocks(32 * NumWords), ThreadsPerBlock>>>(
+            Context->Keys.Data,
+            uint64_t(Voxels),
+            Shift,
+            NumWords,
+            uint64_t(SlabBegin) * uint64_t(PlaneVoxels),
+            Grid->InstancedLabels,
+            Context->WordOffsets.Data,
+            Context->Packed.Data,
+            Context->Pairs.Data,
+            Context->Counters.Data + 1
+        );
 
-            VOXEL_GPU_CHECK(cudaGetLastError());
-        }
+        VOXEL_GPU_CHECK(cudaGetLastError());
 
         Stats->ResolveMs += Context->Lap();
 
         const auto ReadStart = std::chrono::steady_clock::now();
 
+        VOXEL_GPU_CHECK(Context->HostPacked.Reserve(std::max<uint64_t>(NumOccupied, 1)));
+
         VOXEL_GPU_CHECK(cudaMemcpy(
-            Labels + int64_t(SlabBegin) * PlaneVoxels,
-            Context->Labels.Data,
-            size_t(Voxels),
+            Context->HostBitmap.Data,
+            Context->Bitmap.Data,
+            NumWords * sizeof(uint64_t),
             cudaMemcpyDeviceToHost
         ));
+
+        VOXEL_GPU_CHECK(cudaMemcpy(
+            Context->HostPacked.Data,
+            Context->Packed.Data,
+            NumOccupied,
+            cudaMemcpyDeviceToHost
+        ));
+
+        // The offset of every chunk's first word.
+        VOXEL_GPU_CHECK(cudaMemcpy2D(
+            Context->HostStarts.Data,
+            sizeof(uint64_t),
+            Context->WordOffsets.Data,
+            ChunkWords * sizeof(uint64_t),
+            sizeof(uint64_t),
+            NumChunks,
+            cudaMemcpyDeviceToHost
+        ));
+
+        ExpandSlab(
+            SlabLabels,
+            uint64_t(Voxels),
+            Shift,
+            NumWords,
+            Context->HostBitmap.Data,
+            Context->HostPacked.Data,
+            Context->HostStarts.Data
+        );
 
         if (NumPairs > 0)
         {

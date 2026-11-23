@@ -1689,7 +1689,8 @@ namespace
         TSet<uint64> Sent;
 
         // Cache a mesh on the GPU, or refresh the vertices of one that can
-        // deform, once per frame.
+        // deform, once per frame. A failed upload fails the frame, which then
+        // goes to the CPU path instead of leaving the shape out.
         const auto Upload = [&](
             uint64 MeshKey,
             const float* MeshVertices,
@@ -1701,7 +1702,11 @@ namespace
             const FVoxelGpuMesh Mesh{MeshKey, MeshVertices, NumVertices, MeshIndices, NumTriangles};
 
             if (Gpu.UploadMesh(Context, &Mesh) != 0)
+            {
+                OutError = UTF8_TO_TCHAR(Gpu.Error(Context));
+
                 return false;
+            }
 
             Sent.Add(MeshKey);
 
@@ -1754,12 +1759,12 @@ namespace
                         FMemory::Memcpy(Indices.GetData(), Mesh.getTriangles(), 12 * size_t(NumTriangles));
 
                     if (!Upload(MeshKey, MeshVertices, NumVertices, Indices.GetData(), NumTriangles))
-                        break;
+                        return false;
                 }
                 else if (Candidate.bDynamic && !Sent.Contains(MeshKey))
                 {
                     if (!Upload(MeshKey, MeshVertices, NumVertices, nullptr, NumTriangles))
-                        break;
+                        return false;
                 }
 
                 FVoxelGpuInstance Instance{};
@@ -1842,7 +1847,7 @@ namespace
                     );
 
                     if (!bUploaded)
-                        break;
+                        return false;
                 }
 
                 // PhysX counts a layer of |Thickness| on the side away from

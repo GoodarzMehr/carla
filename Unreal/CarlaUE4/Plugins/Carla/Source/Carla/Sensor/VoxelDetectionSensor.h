@@ -112,7 +112,7 @@ private:
     float Left = -5000.0f;
     float Right = 5000.0f;
     float Top = 1000.0f;
-    float Bottom = -100.0f;
+    float Bottom = -500.0f;
 
     int32 GridSizeX = 0;
     int32 GridSizeY = 0;
