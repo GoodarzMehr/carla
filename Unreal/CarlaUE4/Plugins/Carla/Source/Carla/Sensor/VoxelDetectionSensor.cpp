@@ -16,6 +16,7 @@
 #include "CollisionQueryParams.h"
 #include "PhysXInterfaceWrapper.h"
 #include "PhysicsInterfaceUtilsCore.h"
+#include "PhysicsPublicCore.h"
 
 #include "Physics/PhysicsFiltering.h"
 
@@ -23,12 +24,15 @@
 
 #include "Engine/World.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeLock.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformMemory.h"
 
 #include "Runtime/Core/Public/Async/ParallelFor.h"
 
 #include <PxScene.h>
+#include <PxPhysics.h>
+#include <PxDeletionListener.h>
 #include <PxSceneLock.h>
 #include <PxRigidDynamic.h>
 
@@ -1331,6 +1335,7 @@ namespace
         decltype(&VoxelGpuError) Error = nullptr;
         decltype(&VoxelGpuFindMesh) FindMesh = nullptr;
         decltype(&VoxelGpuUploadMesh) UploadMesh = nullptr;
+        decltype(&VoxelGpuReleaseMesh) ReleaseMesh = nullptr;
         decltype(&VoxelGpuRun) Run = nullptr;
         decltype(&VoxelGpuGetPairs) GetPairs = nullptr;
 
@@ -1386,6 +1391,7 @@ namespace
                                 Find(Library.Error, TEXT("VoxelGpuError")) &&
                                 Find(Library.FindMesh, TEXT("VoxelGpuFindMesh")) &&
                                 Find(Library.UploadMesh, TEXT("VoxelGpuUploadMesh")) &&
+                                Find(Library.ReleaseMesh, TEXT("VoxelGpuReleaseMesh")) &&
                                 Find(Library.Run, TEXT("VoxelGpuRun")) &&
                                 Find(Library.GetPairs, TEXT("VoxelGpuGetPairs"));
 
@@ -1398,6 +1404,125 @@ namespace
 
             return Library;
         }
+    };
+
+    // GPU contexts cache meshes and heightfields under their PhysX address,
+    // which PhysX may give to a new object once the old one is released.
+    // This listener passes each release of a cached object on to the
+    // contexts, which drop it before their next frame. PhysX reports a
+    // release after freeing the object, so only its address is used.
+    //
+    // It listens while any context watches. Unreal releases PhysX meshes on
+    // the game thread, which also starts and stops the watching, as PhysX
+    // forbids registering a listener during a release.
+    class FVoxelGpuReleases final : public physx::PxDeletionListener
+    {
+    public:
+
+        static FVoxelGpuReleases& Get()
+        {
+            static FVoxelGpuReleases Releases;
+
+            return Releases;
+        }
+
+        // PhysX's lock is taken outside this one, which onRelease takes
+        // inside PhysX's.
+        bool Watch(const FVoxelGpuContext* Context)
+        {
+            {
+                FScopeLock Lock(&Mutex);
+
+                if (Contexts.Contains(Context))
+                    return true;
+            }
+
+            if (!Physics)
+            {
+                if (!GPhysXSDK)
+                    return false;
+
+                Physics = GPhysXSDK;
+
+                Physics->registerDeletionListener(*this, physx::PxDeletionEventFlag::eMEMORY_RELEASE);
+            }
+
+            FScopeLock Lock(&Mutex);
+
+            Contexts.Add(Context);
+
+            return true;
+        }
+
+        void Forget(const FVoxelGpuContext* Context)
+        {
+            bool bLast = false;
+
+            {
+                FScopeLock Lock(&Mutex);
+
+                Contexts.Remove(Context);
+
+                bLast = Contexts.Num() == 0;
+            }
+
+            if (bLast && Physics)
+            {
+                Physics->unregisterDeletionListener(*this);
+
+                Physics = nullptr;
+            }
+        }
+
+        void Track(const FVoxelGpuContext* Context, uint64 Address)
+        {
+            FScopeLock Lock(&Mutex);
+
+            if (FWatched* Watched = Contexts.Find(Context))
+                Watched->Cached.Add(Address);
+        }
+
+        // The addresses of the context's objects released since the last
+        // call.
+        TArray<uint64> TakeReleased(const FVoxelGpuContext* Context)
+        {
+            FScopeLock Lock(&Mutex);
+
+            FWatched* Watched = Contexts.Find(Context);
+
+            return Watched ? MoveTemp(Watched->Released) : TArray<uint64>();
+        }
+
+        void onRelease(
+            const physx::PxBase* Observed,
+            void* UserData,
+            physx::PxDeletionEventFlag::Enum DeletionEvent
+        ) override
+        {
+            const uint64 Address = uint64(UPTRINT(Observed));
+
+            FScopeLock Lock(&Mutex);
+
+            for (auto& Entry : Contexts)
+            {
+                if (Entry.Value.Cached.Remove(Address) > 0)
+                    Entry.Value.Released.Add(Address);
+            }
+        }
+
+    private:
+
+        struct FWatched
+        {
+            TSet<uint64> Cached;
+            TArray<uint64> Released;
+        };
+
+        FCriticalSection Mutex;
+        TMap<const FVoxelGpuContext*, FWatched> Contexts;
+
+        // The SDK listened to, used only on the game thread.
+        physx::PxPhysics* Physics = nullptr;
     };
 
     using FPrecise = std::array<double, 3>;
@@ -1597,7 +1722,6 @@ namespace
         int64 UploadBytes = 0;
         int32 HeightFields = 0;
         int32 Shapes = 0;
-        int32 Unsupported = 0;
         FVoxelGpuStats Stats = {};
     };
 
@@ -1610,12 +1734,21 @@ namespace
         const FVoxelFrame& Frame,
         FVoxelGpuContext* Context,
         uint8* Labels,
-        TArray<FVoxelInstance>& OutInstances,
+        TArray<TArray<FVoxelInstance>>& OutInstances,
         FVoxelGpuReport& Report,
         FString& OutError
     )
     {
         const FVoxelGpuLibrary& Gpu = FVoxelGpuLibrary::Get();
+
+        FVoxelGpuReleases& Releases = FVoxelGpuReleases::Get();
+
+        if (!Releases.Watch(Context))
+        {
+            OutError = TEXT("use_gpu needs the PhysX SDK to follow mesh releases");
+
+            return false;
+        }
 
         // Unit voxels in grid space need an unscaled sensor.
         if (!Frame.SensorScale.Equals(FVector::OneVector, 1e-4f))
@@ -1678,6 +1811,42 @@ namespace
 
         Report.Candidates = Collector.Candidates.Num();
 
+        // A shape the GPU has no test for, such as a PhysX plane, sends the
+        // frame to the CPU path rather than be left out, before anything is
+        // uploaded for it.
+        for (const FVoxelCandidate& Candidate : Collector.Candidates)
+        {
+            switch (Candidate.Geometry.getType())
+            {
+            case physx::PxGeometryType::eTRIANGLEMESH:
+            case physx::PxGeometryType::eHEIGHTFIELD:
+            case physx::PxGeometryType::eSPHERE:
+            case physx::PxGeometryType::eCAPSULE:
+            case physx::PxGeometryType::eBOX:
+            case physx::PxGeometryType::eCONVEXMESH:
+                break;
+            default:
+                OutError = FString::Printf(
+                    TEXT("use_gpu has no test for PhysX geometry type %d"),
+                    int32(Candidate.Geometry.getType())
+                );
+
+                return false;
+            }
+        }
+
+        // Released meshes go before any lookup, as a new mesh may already
+        // have one's address. Unreal releases meshes on this thread, so none
+        // is released between here and the lookups. A triangle mesh is
+        // cached under its address, a heightfield under its address plus
+        // one.
+        for (const uint64 Address : Releases.TakeReleased(Context))
+        {
+            Gpu.ReleaseMesh(Context, Address);
+            Gpu.ReleaseMesh(Context, Address | 1);
+        }
+
+
         const double Gathered = FPlatformTime::Seconds();
 
         TArray<FVoxelGpuInstance> Instances;
@@ -1700,6 +1869,8 @@ namespace
         )
         {
             const FVoxelGpuMesh Mesh{MeshKey, MeshVertices, NumVertices, MeshIndices, NumTriangles};
+
+            Releases.Track(Context, MeshKey & ~uint64(1));
 
             if (Gpu.UploadMesh(Context, &Mesh) != 0)
             {
@@ -1784,8 +1955,11 @@ namespace
             }
             case physx::PxGeometryType::eHEIGHTFIELD:
             {
-                // Landscapes do not move, so their triangles are taken once,
-                // in world space, without holes.
+                // A heightfield's triangles are cached once, without holes,
+                // in its sample space: rows along x, heights along y and
+                // columns along z, all exact in single precision. Each shape
+                // places them with its own scales and its current pose,
+                // which a world origin shift moves.
                 const physx::PxHeightFieldGeometry& Geometry = Candidate.Geometry.heightField();
                 const physx::PxHeightField& HeightField = *Geometry.heightField;
 
@@ -1801,6 +1975,14 @@ namespace
                     // column of samples start no cell.
                     const uint32 NumRows = HeightField.getNbRows();
                     const uint32 NumColumns = HeightField.getNbColumns();
+
+                    physx::PxHeightFieldGeometry Samples = Geometry;
+
+                    Samples.rowScale = 1.0f;
+                    Samples.heightScale = 1.0f;
+                    Samples.columnScale = 1.0f;
+
+                    const physx::PxTransform Identity(physx::PxIdentity);
 
                     Vertices.Reset();
                     Indices.Reset();
@@ -1821,7 +2003,7 @@ namespace
 
                                 physx::PxTriangle Triangle;
 
-                                physx::PxMeshQuery::getTriangle(Geometry, Candidate.Pose, Index, Triangle);
+                                physx::PxMeshQuery::getTriangle(Samples, Identity, Index, Triangle);
 
                                 for (int Vertex = 0; Vertex < 3; ++Vertex)
                                 {
@@ -1850,29 +2032,24 @@ namespace
                         return false;
                 }
 
-                // PhysX counts a layer of |Thickness| on the side away from
-                // Up, and Unreal leaves the thickness negative.
-                const float Thickness = HeightField.getThickness();
+                const physx::PxVec3 Scales(Geometry.rowScale, Geometry.heightScale, Geometry.columnScale);
 
-                const float Side = Thickness > 0.0f ? -1.0f : 1.0f;
+                const FAffine Scale = FAffine::FromMatrix(physx::PxMat33::createDiagonal(Scales));
 
-                const physx::PxVec3 Up = Candidate.Pose.q.rotate(physx::PxVec3(0.0f, Side, 0.0f));
+                const FAffine SamplesToGrid = ShapeToGrid * Scale;
 
-                const FPrecise GridUp = WorldToGrid.Rotate(FPrecise{Up.x, Up.y, Up.z});
-
-                const double UpLength = std::sqrt(Dot(GridUp, GridUp));
-
+                // PhysX compares the thickness with heights in shape space;
+                // the library takes it in sample heights.
                 FVoxelGpuInstance Instance{};
 
                 Instance.MeshKey = MeshKey;
                 Instance.Key = Key;
                 Instance.Flags = VOXEL_GPU_HEIGHTFIELD;
-                Instance.Skin = std::abs(Thickness) / Frame.BoxSize;
+                Instance.Thickness = double(HeightField.getThickness()) / Geometry.heightScale;
+                Instance.Rows = HeightField.getNbRows();
+                Instance.Columns = HeightField.getNbColumns();
 
-                for (int Axis = 0; Axis < 3; ++Axis)
-                    Instance.Up[Axis] = GridUp[Axis] / UpLength;
-
-                FMemory::Memcpy(Instance.ToGrid, WorldToGrid.M, sizeof(Instance.ToGrid));
+                FMemory::Memcpy(Instance.ToGrid, SamplesToGrid.M, sizeof(Instance.ToGrid));
 
                 Instances.Add(Instance);
 
@@ -2034,8 +2211,7 @@ namespace
                 break;
             }
             default:
-                ++Report.Unsupported;
-
+                // Checked above.
                 break;
             }
         }
@@ -2071,9 +2247,18 @@ namespace
 
         static_assert(sizeof(FVoxelGpuPair) == sizeof(FVoxelInstance), "the GPU pairs are sent as they are");
 
-        OutInstances.SetNumUninitialized(int32(NumPairs));
+        // An array holds fewer than 2^31 elements, so the pairs come in
+        // batches no larger than the CPU path's tiles.
+        for (uint64 First = 0; First < NumPairs; First += uint64(MaxTileVoxels))
+        {
+            const int32 Count = int32(FMath::Min<uint64>(NumPairs - First, uint64(MaxTileVoxels)));
 
-        FMemory::Memcpy(OutInstances.GetData(), Pairs, NumPairs * sizeof(FVoxelInstance));
+            TArray<FVoxelInstance>& Batch = OutInstances.AddDefaulted_GetRef();
+
+            Batch.SetNumUninitialized(Count);
+
+            FMemory::Memcpy(Batch.GetData(), Pairs + First, Count * sizeof(FVoxelInstance));
+        }
 
         const double End = FPlatformTime::Seconds();
 
@@ -2101,7 +2286,6 @@ namespace
             ", meshes=", Report.Meshes,
             ", heightfields=", Report.HeightFields,
             ", shapes=", Report.Shapes,
-            ", unsupported=", Report.Unsupported,
             ", uploads=", Report.Uploads,
             ", uploaded MB=", double(Report.UploadBytes) / 1e6,
             ", triangles=", Stats.Triangles,
@@ -2441,6 +2625,8 @@ void AVoxelDetectionSensor::EndPlay(EEndPlayReason::Type EndPlayReason)
 {
     if (GpuContext)
     {
+        FVoxelGpuReleases::Get().Forget(GpuContext);
+
         FVoxelGpuLibrary::Get().Destroy(GpuContext);
 
         GpuContext = nullptr;
@@ -2530,12 +2716,12 @@ void AVoxelDetectionSensor::PostPhysTick(UWorld *World, ELevelTick TickType, flo
 
         if (GpuContext)
         {
-            TArray<FVoxelInstance> GpuInstances;
+            TArray<TArray<FVoxelInstance>> GpuInstances;
 
             bOnGpu = LabelOnGpu(Frame, GpuContext, Labels, GpuInstances, GpuReport, GpuError);
 
             if (bOnGpu)
-                Instances.Add(MoveTemp(GpuInstances));
+                Instances = MoveTemp(GpuInstances);
         }
 
         // Shipping builds drop UE_LOG, so the reason also goes to the

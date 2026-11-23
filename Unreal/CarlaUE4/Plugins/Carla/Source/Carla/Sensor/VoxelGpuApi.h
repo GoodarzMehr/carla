@@ -15,7 +15,7 @@ extern "C"
 {
 #endif
 
-#define VOXEL_GPU_API_VERSION 2
+#define VOXEL_GPU_API_VERSION 3
 
 // A key orders the shapes that touch a voxel: a higher priority wins, then
 // the lower label, then the lower instance.
@@ -45,14 +45,21 @@ typedef struct
 } FVoxelGpuMesh;
 
 // A cached mesh placed in the grid. ToGrid maps mesh space to grid space as
-// a row-major 3 x 4 matrix. A heightfield touches a voxel by PhysX's rules
-// instead of the triangle test, with its skin along Up, both in grid space.
+// a row-major 3 x 4 matrix.
+//
+// A heightfield (Flags has VOXEL_GPU_HEIGHTFIELD) touches a voxel by
+// PhysX's rules instead of the triangle test. Its mesh is the triangles of
+// a PhysX heightfield of Rows x Columns samples in sample space: rows along
+// x, heights along y and columns along z, with the triangles of holes left
+// out. ToGrid must scale those axes by positive factors. Thickness is
+// PhysX's, in sample heights.
 typedef struct
 {
     uint64_t MeshKey;
     double ToGrid[12];
-    double Up[3];
-    double Skin;
+    double Thickness;
+    uint32_t Rows;
+    uint32_t Columns;
     uint32_t Key;
     uint32_t Flags;
 } FVoxelGpuInstance;
@@ -122,6 +129,10 @@ const char* VoxelGpuError(const FVoxelGpuContext* Context);
 int32_t VoxelGpuFindMesh(FVoxelGpuContext* Context, uint64_t Key, uint32_t* NumVertices, uint32_t* NumTriangles);
 
 int32_t VoxelGpuUploadMesh(FVoxelGpuContext* Context, const FVoxelGpuMesh* Mesh);
+
+// Drops a cached mesh, if there is one under Key, as when the mesh it came
+// from is released and its key may come back for a different mesh.
+void VoxelGpuReleaseMesh(FVoxelGpuContext* Context, uint64_t Key);
 
 // Labels the grid into Labels, one byte per voxel, in slabs along X when it
 // does not fit the GPU at once. Returns 0 on success.

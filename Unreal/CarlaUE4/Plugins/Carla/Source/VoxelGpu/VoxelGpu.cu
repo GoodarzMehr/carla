@@ -128,15 +128,20 @@ namespace
         uint64_t LastUsed = 0;
     };
 
-    // An instance as the kernels read it.
+    // An instance as the kernels read it. A heightfield also has the map
+    // back to its sample space, and Skin, its thickness in voxels, which
+    // bounds the voxels it may reach.
     struct FInstanceGpu
     {
         const float* Vertices;
         const uint32_t* Indices;
         double ToGrid[12];
-        double Up[3];
+        double ToSamples[12];
         double Skin;
+        double Thickness;
         uint64_t FirstTriangle;
+        uint32_t Rows;
+        uint32_t Columns;
         uint32_t Key;
         uint32_t Flags;
     };
@@ -253,10 +258,163 @@ namespace
         return true;
     }
 
-    // PhysX's heightfield rules: a box edge crossing the triangle, a box
-    // corner within the skin under it along Up, or a triangle vertex inside
-    // the box. PhysX has no face test, and neither has this.
-    __device__ bool BoxTouchesSurface(const double* Center, const double (*V)[3], const double* Up, double Skin)
+    // A heightfield is tested in its sample space, where its cells are unit
+    // squares between integer rows and columns. A coordinate within
+    // SampleTolerance of an integer is taken as that integer, and a height
+    // within it of the surface as on it: the map back from grid space
+    // rounds, while PhysX decides its ties exactly there.
+    constexpr double SampleTolerance = 1e-9;
+
+    // How far outside a triangle PhysX's box edge test still finds a hit,
+    // in barycentric coordinates.
+    constexpr double EdgeSlack = 1e-4;
+
+    __device__ double Snap(double Value)
+    {
+        const double Nearest = rint(Value);
+
+        return fabs(Value - Nearest) <= SampleTolerance ? Nearest : Value;
+    }
+
+    __device__ void Transform(const double* M, const double* Point, double* Out)
+    {
+        for (int Row = 0; Row < 3; ++Row)
+            Out[Row] = M[4 * Row] * Point[0] + M[4 * Row + 1] * Point[1] + M[4 * Row + 2] * Point[2] + M[4 * Row + 3];
+    }
+
+    // A heightfield triangle in sample space: its cell, whether the cell's
+    // diagonal runs from its first sample to its last, whether it is the
+    // second triangle of the cell, as PhysX numbers them, and its plane's
+    // height at row and column 0 and slopes along them.
+    struct FSurfaceTriangle
+    {
+        double Row;
+        double Column;
+        bool bZerothShared;
+        bool bSecond;
+        double Height;
+        double RowSlope;
+        double ColumnSlope;
+    };
+
+    __device__ FSurfaceTriangle GetSurfaceTriangle(const double (*S)[3])
+    {
+        FSurfaceTriangle T;
+
+        T.Row = fmin(S[0][0], fmin(S[1][0], S[2][0]));
+        T.Column = fmin(S[0][2], fmin(S[1][2], S[2][2]));
+
+        bool bHas[2][2] = {{false, false}, {false, false}};
+
+        for (int Vertex = 0; Vertex < 3; ++Vertex)
+            bHas[S[Vertex][0] > T.Row][S[Vertex][2] > T.Column] = true;
+
+        // Gu::HeightField::getTriangleVertices: with the diagonal from the
+        // first sample, the first triangle has the sample one row on;
+        // otherwise it has the first sample.
+        T.bZerothShared = bHas[0][0] && bHas[1][1];
+        T.bSecond = T.bZerothShared ? !bHas[1][0] : !bHas[0][0];
+
+        // A cell triangle's normal has a y of plus or minus one.
+        const double A[3] = {S[1][0] - S[0][0], S[1][1] - S[0][1], S[1][2] - S[0][2]};
+        const double B[3] = {S[2][0] - S[0][0], S[2][1] - S[0][1], S[2][2] - S[0][2]};
+
+        double Normal[3];
+
+        CrossProduct(A, B, Normal);
+
+        T.RowSlope = -Normal[0] / Normal[1];
+        T.ColumnSlope = -Normal[2] / Normal[1];
+        T.Height = S[0][1] - T.RowSlope * S[0][0] - T.ColumnSlope * S[0][2];
+
+        return T;
+    }
+
+    // The surface's height at a row and column, on the triangle's plane.
+    __device__ double GetSurfaceHeight(const FSurfaceTriangle& T, double Row, double Column)
+    {
+        return T.Height + T.RowSlope * Row + T.ColumnSlope * Column;
+    }
+
+    // Whether the triangle is the one PhysX takes at a row and column, as
+    // HeightFieldUtil::getFaceIndexAtShapePoint does: the point must lie
+    // on the heightfield short of its last row and column, and its cell and
+    // half decide. A hole there is no triangle, so nothing takes it.
+    __device__ bool TakesPoint(const FSurfaceTriangle& T, double Row, double Column, uint32_t Rows, uint32_t Columns)
+    {
+        if (!(Row >= 0.0 && Column >= 0.0 && Row < Rows - 1.0 && Column < Columns - 1.0))
+            return false;
+
+        if (floor(Row) != T.Row || floor(Column) != T.Column)
+            return false;
+
+        const double FracX = Row - T.Row;
+        const double FracZ = Column - T.Column;
+
+        const bool bSecond = T.bZerothShared ?
+            FracZ - FracX > SampleTolerance :
+            FracX + FracZ - 1.0 > SampleTolerance;
+
+        return bSecond == T.bSecond;
+    }
+
+    // Whether PhysX's trace of the box edge from A to B, all in sample
+    // space, visits the triangle's cell, which it must for the edge to hit
+    // the triangle. The trace visits the cells the edge passes through. An
+    // edge along a cell line visits the cells on the side of higher rows or
+    // columns, as the trace nudges it there, except on the last line, which
+    // the trace clamps into the last cells.
+    __device__ bool VisitsCell(
+        const FSurfaceTriangle& T,
+        const double* A,
+        const double* B,
+        uint32_t Rows,
+        uint32_t Columns
+    )
+    {
+        double Low = 0.0;
+        double High = 1.0;
+
+        const int Axes[2] = {0, 2};
+        const double Cells[2] = {T.Row, T.Column};
+        const double Lines[2] = {Rows - 1.0, Columns - 1.0};
+
+        for (int Index = 0; Index < 2; ++Index)
+        {
+            const double From = Snap(A[Axes[Index]]);
+            const double To = Snap(B[Axes[Index]]);
+
+            if (From == To)
+            {
+                if (!(From >= 0.0 && From <= Lines[Index]) || fmin(floor(From), Lines[Index] - 1.0) != Cells[Index])
+                    return false;
+
+                continue;
+            }
+
+            const double First = (Cells[Index] - From) / (To - From);
+            const double Last = (Cells[Index] + 1.0 - From) / (To - From);
+
+            Low = fmax(Low, fmin(First, Last));
+            High = fmin(High, fmax(First, Last));
+        }
+
+        return Low < High;
+    }
+
+    // PhysX's heightfield rules (GuOverlapTestsHF.cpp, intersectHeightField
+    // Box), with the triangle V in grid space and S in sample space: a box
+    // corner within the thickness of the surface the heightfield has under
+    // it, a box edge hitting the triangle, or a triangle vertex inside the
+    // box. PhysX has no face test, and neither has this. PhysX also takes a
+    // vertex only where its heightfield is convex or ends, which this does
+    // not follow.
+    __device__ bool BoxTouchesSurface(
+        const double* Center,
+        const double (*V)[3],
+        const double (*S)[3],
+        const FInstanceGpu& Instance
+    )
     {
         for (int Vertex = 0; Vertex < 3; ++Vertex)
         {
@@ -268,75 +426,60 @@ namespace
                 return true;
         }
 
-        double Edges[3][3];
+        const FSurfaceTriangle T = GetSurfaceTriangle(S);
 
-        for (int Edge = 0; Edge < 3; ++Edge)
-        {
-            for (int Axis = 0; Axis < 3; ++Axis)
-                Edges[Edge][Axis] = V[(Edge + 1) % 3][Axis] - V[Edge][Axis];
-        }
+        // Corners in sample space, from the center and half the grid axes,
+        // and their heights above the triangle's plane in sample heights.
+        const double* M = Instance.ToSamples;
 
-        double Normal[3];
+        double Middle[3];
 
-        CrossProduct(Edges[0], Edges[1], Normal);
-
-        const double Length = sqrt(DotProduct(Normal, Normal));
-
-        if (!(Length > 0.0))
-            return false;
-
-        for (int Axis = 0; Axis < 3; ++Axis)
-            Normal[Axis] /= Length;
-
-        // In-plane normals of the edges, pointing inside.
-        double Inward[3][3];
-
-        for (int Edge = 0; Edge < 3; ++Edge)
-        {
-            CrossProduct(Normal, Edges[Edge], Inward[Edge]);
-
-            const double EdgeLength = sqrt(DotProduct(Inward[Edge], Inward[Edge]));
-
-            if (!(EdgeLength > 0.0))
-                return false;
-
-            for (int Axis = 0; Axis < 3; ++Axis)
-                Inward[Edge][Axis] /= EdgeLength;
-        }
-
-        const auto IsInside = [&](const double* Point)
-        {
-            for (int Edge = 0; Edge < 3; ++Edge)
-            {
-                const double Offset[3] = {
-                    Point[0] - V[Edge][0],
-                    Point[1] - V[Edge][1],
-                    Point[2] - V[Edge][2]
-                };
-
-                if (!(DotProduct(Inward[Edge], Offset) > 0.0))
-                    return false;
-            }
-
-            return true;
-        };
+        Transform(M, Center, Middle);
 
         double Corners[8][3];
-        double Sides[8];
+        double Heights[8];
 
         for (int Corner = 0; Corner < 8; ++Corner)
         {
-            double Offset[3];
-
-            for (int Axis = 0; Axis < 3; ++Axis)
+            for (int Row = 0; Row < 3; ++Row)
             {
-                Corners[Corner][Axis] = Center[Axis] + ((Corner >> Axis) & 1 ? 0.5 : -0.5);
+                double Value = Middle[Row];
 
-                Offset[Axis] = Corners[Corner][Axis] - V[0][Axis];
+                for (int Axis = 0; Axis < 3; ++Axis)
+                    Value += ((Corner >> Axis) & 1 ? 0.5 : -0.5) * M[4 * Row + Axis];
+
+                Corners[Corner][Row] = Value;
             }
 
-            Sides[Corner] = DotProduct(Normal, Offset);
+            Heights[Corner] = Corners[Corner][1] - GetSurfaceHeight(T, Corners[Corner][0], Corners[Corner][2]);
         }
+
+        // A corner counts within the thickness, which PhysX bounds with its
+        // ends for a negative thickness, as Unreal's, and without them
+        // otherwise.
+        const double Thickness = Instance.Thickness;
+
+        for (int Corner = 0; Corner < 8; ++Corner)
+        {
+            const double Height = Heights[Corner];
+
+            const bool bWithin = Thickness <= 0.0 ?
+                Height <= SampleTolerance && Height >= Thickness - SampleTolerance :
+                Height > SampleTolerance && Height < Thickness - SampleTolerance;
+
+            if (!bWithin)
+                continue;
+
+            const double Row = Snap(Corners[Corner][0]);
+            const double Column = Snap(Corners[Corner][2]);
+
+            if (TakesPoint(T, Row, Column, Instance.Rows, Instance.Columns))
+                return true;
+        }
+
+        // An edge hits where it meets the plane, ends included, unless it
+        // lies in it, within EdgeSlack of the triangle.
+        const double Area = (S[1][0] - S[0][0]) * (S[2][2] - S[0][2]) - (S[2][0] - S[0][0]) * (S[1][2] - S[0][2]);
 
         for (int Corner = 0; Corner < 8; ++Corner)
         {
@@ -347,40 +490,38 @@ namespace
                 if (Other == Corner)
                     continue;
 
-                if (!((Sides[Corner] > 0.0 && Sides[Other] < 0.0) || (Sides[Corner] < 0.0 && Sides[Other] > 0.0)))
+                const double HeightA = fabs(Heights[Corner]) <= SampleTolerance ? 0.0 : Heights[Corner];
+                const double HeightB = fabs(Heights[Other]) <= SampleTolerance ? 0.0 : Heights[Other];
+
+                if ((HeightA > 0.0 && HeightB > 0.0) || (HeightA < 0.0 && HeightB < 0.0))
                     continue;
 
-                const double Fraction = Sides[Corner] / (Sides[Corner] - Sides[Other]);
+                if (HeightA == 0.0 && HeightB == 0.0)
+                    continue;
 
-                double Point[3];
+                const double Fraction = HeightA / (HeightA - HeightB);
 
-                for (int Index = 0; Index < 3; ++Index)
-                    Point[Index] = Corners[Corner][Index] + (Corners[Other][Index] - Corners[Corner][Index]) * Fraction;
+                const double* A = Corners[Corner];
+                const double* B = Corners[Other];
 
-                if (IsInside(Point))
+                const double Row = A[0] + (B[0] - A[0]) * Fraction;
+                const double Column = A[2] + (B[2] - A[2]) * Fraction;
+
+                bool bInside = true;
+
+                for (int Vertex = 0; Vertex < 3; ++Vertex)
+                {
+                    const double* P = S[(Vertex + 1) % 3];
+                    const double* Q = S[(Vertex + 2) % 3];
+
+                    const double Weight = ((P[0] - Row) * (Q[2] - Column) - (Q[0] - Row) * (P[2] - Column)) / Area;
+
+                    bInside = bInside && Weight >= -EdgeSlack;
+                }
+
+                if (bInside && VisitsCell(T, A, B, Instance.Rows, Instance.Columns))
                     return true;
             }
-        }
-
-        const double NormalUp = DotProduct(Normal, Up);
-
-        if (fabs(NormalUp) < 1e-3)
-            return false;
-
-        for (int Corner = 0; Corner < 8; ++Corner)
-        {
-            const double Height = Sides[Corner] / NormalUp;
-
-            if (Height > 0.0 || Height < -Skin)
-                continue;
-
-            double Foot[3];
-
-            for (int Index = 0; Index < 3; ++Index)
-                Foot[Index] = Corners[Corner][Index] - Height * Up[Index];
-
-            if (IsInside(Foot))
-                return true;
         }
 
         return false;
@@ -474,6 +615,18 @@ namespace
 
     // ---------------------------------------------------------------------------------------------------------------
     // Kernels.
+
+    // Triangle Local of an instance in its mesh's space.
+    __device__ void LoadSamples(const FInstanceGpu& Instance, uint64_t Local, double (*S)[3])
+    {
+        for (int Vertex = 0; Vertex < 3; ++Vertex)
+        {
+            const float* Source = Instance.Vertices + 3 * uint64_t(Instance.Indices[3 * Local + Vertex]);
+
+            for (int Axis = 0; Axis < 3; ++Axis)
+                S[Vertex][Axis] = Source[Axis];
+        }
+    }
 
     // Triangle Local of an instance in grid space, in double precision.
     __device__ void LoadTriangle(const FInstanceGpu& Instance, uint64_t Local, double (*V)[3])
@@ -612,10 +765,10 @@ namespace
 
             // Voxel I spans [I, I + 1], so it may touch [Min, Max] when
             // ceil(Min) - 1 <= I <= floor(Max). A heightfield also reaches
-            // its skin below the surface.
+            // its skin, and its edge test EdgeSlack outside the triangle,
+            // which in barycentric coordinates is within twice EdgeSlack of
+            // its extent past its bounds.
             const bool bSurface = (Instance.Flags & VOXEL_GPU_HEIGHTFIELD) != 0;
-
-            const double Reach = bSurface ? Instance.Skin : 0.0;
 
             const int32_t Lower[3] = {SlabBegin, 0, 0};
             const int32_t Upper[3] = {SlabEnd, SizeY, SizeZ};
@@ -624,6 +777,8 @@ namespace
 
             for (int Axis = 0; Axis < 3; ++Axis)
             {
+                const double Reach = bSurface ? Instance.Skin + 2.0 * EdgeSlack * (Max[Axis] - Min[Axis]) : 0.0;
+
                 P.Begin[Axis] = ClampIndex(ceil(Min[Axis] - Reach) - 1.0, Lower[Axis], Upper[Axis]);
                 P.End[Axis] = ClampIndex(floor(Max[Axis] + Reach) + 1.0, Lower[Axis], Upper[Axis]);
 
@@ -797,8 +952,12 @@ namespace
                 const bool bSurface = (Instance.Flags & VOXEL_GPU_HEIGHTFIELD) != 0;
 
                 double V[3][3];
+                double S[3][3];
 
                 LoadTriangle(Instance, P.Triangle, V);
+
+                if (bSurface)
+                    LoadSamples(Instance, P.Triangle, S);
 
                 if (P.Dominant >= 0)
                     GetExactRange(V, Cell, D, U, W, bSurface ? Instance.Skin : 0.0, P, First, Last);
@@ -810,7 +969,7 @@ namespace
                     const double Center[3] = {Cell[0] + 0.5, Cell[1] + 0.5, Cell[2] + 0.5};
 
                     const bool bTouches = bSurface ?
-                        BoxTouchesSurface(Center, V, Instance.Up, Instance.Skin) :
+                        BoxTouchesSurface(Center, V, S, Instance) :
                         BoxTouchesTriangle(Center, V);
 
                     if (bTouches)
@@ -1376,6 +1535,24 @@ VOXEL_GPU_EXPORT int32_t VoxelGpuUploadMesh(FVoxelGpuContext* Context, const FVo
     return 0;
 }
 
+VOXEL_GPU_EXPORT void VoxelGpuReleaseMesh(FVoxelGpuContext* Context, uint64_t Key)
+{
+    const auto Found = Context->Meshes.find(Key);
+
+    if (Found == Context->Meshes.end())
+        return;
+
+    cudaSetDevice(Context->Device);
+
+    Found->second.Vertices.Free();
+    Found->second.Indices.Free();
+
+    Context->Meshes.erase(Found);
+
+    // An error here must not fail the next call that checks.
+    cudaGetLastError();
+}
+
 // Bitmap words per chunk of the host expansion: 4 MB of labels.
 constexpr uint64_t ChunkWords = uint64_t(1) << 16;
 
@@ -1429,6 +1606,42 @@ static void ExpandSlab(
 
     for (std::thread& Helper : Helpers)
         Helper.join();
+}
+
+// The inverse of a row-major 3 x 4 affine map, if it has one.
+static bool Invert(const double* M, double* Out)
+{
+    const double Determinant =
+        M[0] * (M[5] * M[10] - M[6] * M[9]) -
+        M[1] * (M[4] * M[10] - M[6] * M[8]) +
+        M[2] * (M[4] * M[9] - M[5] * M[8]);
+
+    if (!(std::fabs(Determinant) > 0.0) || !std::isfinite(Determinant))
+        return false;
+
+    const double Inverse = 1.0 / Determinant;
+
+    double R[9];
+
+    R[0] = (M[5] * M[10] - M[6] * M[9]) * Inverse;
+    R[1] = (M[2] * M[9] - M[1] * M[10]) * Inverse;
+    R[2] = (M[1] * M[6] - M[2] * M[5]) * Inverse;
+    R[3] = (M[6] * M[8] - M[4] * M[10]) * Inverse;
+    R[4] = (M[0] * M[10] - M[2] * M[8]) * Inverse;
+    R[5] = (M[2] * M[4] - M[0] * M[6]) * Inverse;
+    R[6] = (M[4] * M[9] - M[5] * M[8]) * Inverse;
+    R[7] = (M[1] * M[8] - M[0] * M[9]) * Inverse;
+    R[8] = (M[0] * M[5] - M[1] * M[4]) * Inverse;
+
+    for (int Row = 0; Row < 3; ++Row)
+    {
+        for (int Column = 0; Column < 3; ++Column)
+            Out[4 * Row + Column] = R[3 * Row + Column];
+
+        Out[4 * Row + 3] = -(R[3 * Row] * M[3] + R[3 * Row + 1] * M[7] + R[3 * Row + 2] * M[11]);
+    }
+
+    return true;
 }
 
 // One attempt at labeling the grid, with slabs sized to MemoryShare of the
@@ -1486,9 +1699,27 @@ static int32_t RunOnce(
         Entry.Indices = Mesh.Indices.Data;
 
         std::memcpy(Entry.ToGrid, Instance.ToGrid, sizeof(Entry.ToGrid));
-        std::memcpy(Entry.Up, Instance.Up, sizeof(Entry.Up));
 
-        Entry.Skin = Instance.Skin;
+        Entry.Skin = 0.0;
+        Entry.Thickness = Instance.Thickness;
+        Entry.Rows = Instance.Rows;
+        Entry.Columns = Instance.Columns;
+
+        if (Instance.Flags & VOXEL_GPU_HEIGHTFIELD)
+        {
+            if (!Invert(Instance.ToGrid, Entry.ToSamples))
+            {
+                Context->Error = "a heightfield's map to the grid cannot be inverted";
+
+                return -1;
+            }
+
+            // Heights run along the map's second column.
+            const double* M = Instance.ToGrid;
+
+            Entry.Skin = std::fabs(Instance.Thickness) * std::sqrt(M[1] * M[1] + M[5] * M[5] + M[9] * M[9]);
+        }
+
         Entry.FirstTriangle = NumTriangles;
         Entry.Key = Instance.Key;
         Entry.Flags = Instance.Flags;
@@ -1590,9 +1821,12 @@ static int32_t RunOnce(
 
     Context->Lap();
 
-    for (int32_t SlabBegin = 0; SlabBegin < SizeX; SlabBegin += SlabPlanes)
+    // Slab bounds are summed in 64 bits: two plane counts near the axis
+    // limit overflow 32.
+    for (int64_t First = 0; First < SizeX; First += SlabPlanes)
     {
-        const int32_t SlabEnd = std::min(SizeX, SlabBegin + SlabPlanes);
+        const int32_t SlabBegin = int32_t(First);
+        const int32_t SlabEnd = int32_t(std::min<int64_t>(SizeX, First + SlabPlanes));
         const int64_t Voxels = PlaneVoxels * (SlabEnd - SlabBegin);
 
         ++Stats->Slabs;

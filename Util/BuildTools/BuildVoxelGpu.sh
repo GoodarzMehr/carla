@@ -2,8 +2,9 @@
 
 # Builds libcarla_voxel_gpu, the CUDA path of the voxel detection sensor
 # (use_gpu), into the plugin's CarlaDependencies, where the package picks it
-# up. Without nvcc it does nothing, and the sensor reports use_gpu as
-# unavailable.
+# up. Without nvcc it keeps a library that is up to date and removes one
+# that is not, so a package never carries code older than its source; the
+# sensor then reports use_gpu as unavailable.
 
 set -e
 
@@ -13,6 +14,11 @@ HEADER=${ROOT}/Unreal/CarlaUE4/Plugins/Carla/Source/Carla/Sensor/VoxelGpuApi.h
 OUTPUT=${ROOT}/Unreal/CarlaUE4/Plugins/Carla/CarlaDependencies/lib/libcarla_voxel_gpu.so
 BUILD=${ROOT}/Build/voxel-gpu-build
 
+if [ -f "${OUTPUT}" ] && [ "${OUTPUT}" -nt "${SOURCE}" ] && [ "${OUTPUT}" -nt "${HEADER}" ] && [ "${OUTPUT}" -nt "$0" ]; then
+  echo "BuildVoxelGpu.sh: ${OUTPUT} is up to date."
+  exit 0
+fi
+
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 NVCC=${CUDA_HOME}/bin/nvcc
 
@@ -21,12 +27,12 @@ if [ ! -x "${NVCC}" ]; then
 fi
 
 if [ -z "${NVCC}" ]; then
-  echo "BuildVoxelGpu.sh: nvcc not found; skipping the voxel sensor's GPU path."
-  exit 0
-fi
-
-if [ -f "${OUTPUT}" ] && [ "${OUTPUT}" -nt "${SOURCE}" ] && [ "${OUTPUT}" -nt "${HEADER}" ] && [ "${OUTPUT}" -nt "$0" ]; then
-  echo "BuildVoxelGpu.sh: ${OUTPUT} is up to date."
+  if [ -f "${OUTPUT}" ]; then
+    echo "BuildVoxelGpu.sh: nvcc not found; removing ${OUTPUT}, which is older than its source or this script."
+    rm -f "${OUTPUT}"
+  else
+    echo "BuildVoxelGpu.sh: nvcc not found; skipping the voxel sensor's GPU path."
+  fi
   exit 0
 fi
 

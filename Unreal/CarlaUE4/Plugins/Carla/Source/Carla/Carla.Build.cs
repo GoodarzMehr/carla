@@ -236,11 +236,14 @@ public class Carla : ModuleRules
         PublicAdditionalLibraries.Add(Path.Combine(LibCarlaInstallPath, "lib", GetLibName("carla_server")));
       }
       // The voxel detection sensor's GPU path, built by BuildVoxelGpu.sh when
-      // nvcc is available and loaded at run time.
+      // nvcc is available and loaded at run time. As an external dependency,
+      // its removal also rebuilds the cached makefile, which would otherwise
+      // still stage it.
       string VoxelGpuLibrary = Path.Combine(LibCarlaInstallPath, "lib", "libcarla_voxel_gpu.so");
       if (File.Exists(VoxelGpuLibrary))
       {
         RuntimeDependencies.Add(VoxelGpuLibrary);
+        ExternalDependencies.Add(VoxelGpuLibrary);
       }
       if (UsingChrono)
       {

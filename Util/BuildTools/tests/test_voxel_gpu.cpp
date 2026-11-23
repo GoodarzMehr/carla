@@ -1,6 +1,7 @@
 // Standalone check of libcarla_voxel_gpu against a brute-force reference that
-// tests every voxel against every shape. From the repository root, after
-// Util/BuildTools/BuildVoxelGpu.sh:
+// tests every voxel against every shape. Heightfields follow PhysX's rules,
+// which test_voxel_gpu_heightfield.cpp checks against PhysX itself. From
+// the repository root, after Util/BuildTools/BuildVoxelGpu.sh:
 //   lib=Unreal/CarlaUE4/Plugins/Carla/CarlaDependencies/lib
 //   g++-11 -std=c++17 -O2 Util/BuildTools/tests/test_voxel_gpu.cpp -L$lib -lcarla_voxel_gpu \
 //     -Wl,-rpath,$PWD/$lib -o /tmp/test_voxel_gpu
@@ -50,73 +51,6 @@ static bool RefTriangle(const Vec& C, const Vec* V)
     return true;
 }
 
-static bool RefSurface(const Vec& C, const Vec* V, const Vec& Up, double Skin)
-{
-    for (int K = 0; K < 3; ++K)
-        if (std::fabs(V[K][0] - C[0]) < 0.5 && std::fabs(V[K][1] - C[1]) < 0.5 && std::fabs(V[K][2] - C[2]) < 0.5)
-            return true;
-    Vec E[3] = {Sub(V[1], V[0]), Sub(V[2], V[1]), Sub(V[0], V[2])};
-    Vec N = Cross(E[0], E[1]);
-    const double L = std::sqrt(Dot(N, N));
-    if (!(L > 0))
-        return false;
-    for (double& X : N)
-        X /= L;
-    Vec In[3];
-    for (int K = 0; K < 3; ++K)
-    {
-        In[K] = Cross(N, E[K]);
-        const double Len = std::sqrt(Dot(In[K], In[K]));
-        if (!(Len > 0))
-            return false;
-        for (double& X : In[K])
-            X /= Len;
-    }
-    const auto Inside = [&](const Vec& P)
-    {
-        for (int K = 0; K < 3; ++K)
-            if (!(Dot(In[K], Sub(P, V[K])) > 0))
-                return false;
-        return true;
-    };
-    Vec Corner[8];
-    double Side[8];
-    for (int K = 0; K < 8; ++K)
-    {
-        for (int A = 0; A < 3; ++A)
-            Corner[K][A] = C[A] + ((K >> A) & 1 ? 0.5 : -0.5);
-        Side[K] = Dot(N, Sub(Corner[K], V[0]));
-    }
-    for (int K = 0; K < 8; ++K)
-        for (int A = 0; A < 3; ++A)
-        {
-            const int O = K | (1 << A);
-            if (O == K || !((Side[K] > 0 && Side[O] < 0) || (Side[K] < 0 && Side[O] > 0)))
-                continue;
-            const double F = Side[K] / (Side[K] - Side[O]);
-            Vec P;
-            for (int I = 0; I < 3; ++I)
-                P[I] = Corner[K][I] + (Corner[O][I] - Corner[K][I]) * F;
-            if (Inside(P))
-                return true;
-        }
-    const double NU = Dot(N, Up);
-    if (std::fabs(NU) < 1e-3)
-        return false;
-    for (int K = 0; K < 8; ++K)
-    {
-        const double H = Side[K] / NU;
-        if (H > 0 || H < -Skin)
-            continue;
-        Vec F;
-        for (int I = 0; I < 3; ++I)
-            F[I] = Corner[K][I] - H * Up[I];
-        if (Inside(F))
-            return true;
-    }
-    return false;
-}
-
 static double BoxDistance2(const Vec& C, const Vec& P)
 {
     double S = 0;
@@ -145,7 +79,7 @@ int main()
         return 1;
     }
 
-    struct FRefTriangle { Vec V[3]; uint32_t Key; bool bSurface; Vec Up; double Skin; };
+    struct FRefTriangle { Vec V[3]; uint32_t Key; };
     std::vector<FRefTriangle> Triangles;
     std::vector<FVoxelGpuInstance> Instances;
 
@@ -203,13 +137,6 @@ int main()
             Instance.ToGrid[4 * Row + 3] = Offset[Row];
         }
         Instance.Key = RandomKey();
-        const bool bSurface = MeshIndex % 7 == 6;
-        if (bSurface)
-        {
-            Instance.Flags = VOXEL_GPU_HEIGHTFIELD;
-            Instance.Up[2] = 1.0;
-            Instance.Skin = 0.37;
-        }
         Instances.push_back(Instance);
         for (int T = 0; T < NumTriangles; ++T)
         {
@@ -222,9 +149,6 @@ int main()
                                     Instance.ToGrid[4 * Row + 2] * S[2] + Instance.ToGrid[4 * Row + 3];
             }
             Ref.Key = Instance.Key;
-            Ref.bSurface = bSurface;
-            Ref.Up = {0, 0, 1};
-            Ref.Skin = 0.37;
             Triangles.push_back(Ref);
         }
     }
@@ -352,7 +276,7 @@ int main()
                 const Vec C{X + 0.5, Y + 0.5, Z + 0.5};
                 uint32_t Key = 0;
                 for (const FRefTriangle& T : Triangles)
-                    if (T.Key > Key && (T.bSurface ? RefSurface(C, T.V, T.Up, T.Skin) : RefTriangle(C, T.V)))
+                    if (T.Key > Key && RefTriangle(C, T.V))
                         Key = T.Key;
                 for (const FVoxelGpuShape& S : Shapes)
                 {
@@ -406,12 +330,14 @@ int main()
                 }
             }
 
+    const bool bPass = Mismatches == 0 && PairMismatches == 0 && uint64_t(RefPairs) == NumPairs;
+
     std::printf("%s: %lld of %lld voxels differ (%lld occupied); pairs %llu gpu, %lld reference, %lld differ; "
                 "triangles=%llu columns=%llu shape voxels=%llu slabs=%u\n",
-                Mismatches == 0 && PairMismatches == 0 && uint64_t(RefPairs) == NumPairs ? "PASS" : "FAIL",
+                bPass ? "PASS" : "FAIL",
                 (long long)Mismatches, (long long)NumVoxels, (long long)Occupied, (unsigned long long)NumPairs,
                 (long long)RefPairs, (long long)PairMismatches, (unsigned long long)Stats.Triangles,
                 (unsigned long long)Stats.Columns, (unsigned long long)Stats.ShapeVoxels, Stats.Slabs);
     VoxelGpuDestroy(Context);
-    return Mismatches == 0 && PairMismatches == 0 ? 0 : 1;
+    return bPass ? 0 : 1;
 }
