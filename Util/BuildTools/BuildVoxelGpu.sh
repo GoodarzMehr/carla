@@ -55,11 +55,10 @@ echo "BuildVoxelGpu.sh: building $(basename "${OUTPUT}") with ${NVCC}."
 # Only a C interface is exported, and the CUDA runtime and C++ standard
 # library are linked statically, so the library does not clash with the
 # engine's own runtime.
-"${NVCC}" -ccbin "${HOST_CXX}" -O3 -std=c++17 -arch=all-major -Xcompiler -fPIC,-fvisibility=hidden \
-  -c "${SOURCE}" -o "${BUILD}/VoxelGpu.o"
+"${NVCC}" -ccbin "${HOST_CXX}" -O3 -std=c++17 -arch=all-major -Xcompiler -fPIC,-fvisibility=hidden -c "${SOURCE}" \
+-o "${BUILD}/VoxelGpu.o"
 
-"${HOST_CXX}" -shared -o "${OUTPUT}" "${BUILD}/VoxelGpu.o" \
-  -L"${CUDA_LIB}" -lcudart_static -ldl -lrt -lpthread \
+"${HOST_CXX}" -shared -o "${OUTPUT}" "${BUILD}/VoxelGpu.o" -L"${CUDA_LIB}" -lcudart_static -ldl -lrt -lpthread \
   -static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL -Wl,-z,defs
 
 echo "BuildVoxelGpu.sh: done."
