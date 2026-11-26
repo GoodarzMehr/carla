@@ -932,11 +932,11 @@ namespace
             Env.Candidate = &Candidate;
 
             // Walker meshes favor exact voxel queries above the measured
-            // crossover near 2.0 cm; finer grids keep the surface raster.
+            // crossover near 5.0 cm; finer grids keep the surface raster.
             const bool bQueryPedestrian =
                 Candidate.Label == uint8(carla::rpc::CityObjectLabel::Pedestrians) &&
                 Candidate.Geometry.getType() == physx::PxGeometryType::eTRIANGLEMESH &&
-                Frame.BoxSize >= 2.0f;
+                Frame.BoxSize >= 5.0f;
 
             if (!HasTriangles(Candidate) || bQueryPedestrian)
             {
